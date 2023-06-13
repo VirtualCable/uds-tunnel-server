@@ -146,7 +146,7 @@ async def create_tunnel_proc(
     if response is None:
         response = conf.UDS_GET_TICKET_RESPONSE(remote_host, remote_port)
 
-    port = random.randint(20000, 40000)  # nosec  Just a random port
+    port = tools.get_free_port(':' in listen_host)  # : in listen_host means ipv6
     hhost = f'[{listen_host}]' if ':' in listen_host else listen_host
     args = {
         'uds_server': f'http://{hhost}:{port}/uds/rest',

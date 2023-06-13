@@ -45,6 +45,19 @@ if typing.TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def get_free_port(ipv6: bool = False) -> int:
+    '''Returns a free port in the system
+    '''
+    if not ipv6:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    else:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    s.bind(('', 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
 class AsyncMock(mock.MagicMock):
     async def __call__(self, *args, **kwargs):  # pylint: disable=invalid-overridden-method
         return super().__call__(*args, **kwargs)
