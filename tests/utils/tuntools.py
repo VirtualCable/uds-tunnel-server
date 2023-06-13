@@ -438,7 +438,7 @@ async def tunnel_app_runner(
     with create_config_file(host, port, **kwargs) as config_file:
         args = args or ['-t', '-c', config_file]
         process = await asyncio.create_subprocess_exec(
-            'python',
+            'python3',
             '-m',
             'udstunnel',
             *args,
