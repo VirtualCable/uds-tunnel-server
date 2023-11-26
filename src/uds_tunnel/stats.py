@@ -88,14 +88,14 @@ class StatsManager:
     )
     # No locking nor sharing needed for local stats
     local: typing.ClassVar[LocalStatsCounters] = LocalStatsCounters()
+    partial_local: typing.ClassVar[LocalStatsCounters] = LocalStatsCounters()
+
     last: float  # timestamp, from time.monotonic()
     start_time: float  # timestamp, from time.monotonic()
     end_time: float  # timestamp, from time.monotonic()
 
     def __init__(self):
-        self.last = time.monotonic()
-        self.start_time = time.monotonic()
-        self.end_time = self.start_time
+        self.last = self.start_time = self.end_time = self.current_time
 
     @property
     def current_time(self) -> float:
@@ -105,15 +105,32 @@ class StatsManager:
     def elapsed_time(self) -> float:
         return self.current_time - self.start_time
 
+    def update(self, force: bool = False):
+        """
+        In order to keep stats updated, we will update them only if a certain time has passed
+        or if force is True
+        This reduces dramatically the number of locks needed, and keeps global stats reasonably updated
+        """
+        now = self.current_time
+        if force or now - self.last > INTERVAL:
+            self.last = now
+            # Sinchronize accumulators
+            with self.accum.sent:
+                self.accum.sent.value += self.partial_local.sent
+            with self.accum.recv:
+                self.accum.recv.value += self.partial_local.recv
+            # Reset partials
+            self.partial_local.sent = self.partial_local.recv = 0
+
     def add_recv(self, size: int) -> None:
-        with self.accum.recv:
-            self.accum.recv.value += size
         self.local.recv += size
+        self.partial_local.recv += size
+        self.update()
 
     def add_sent(self, size: int) -> None:
-        with self.accum.sent:
-            self.accum.sent.value += size
+        self.partial_local.sent += size
         self.local.sent += size
+        self.update()
 
     def decrement_connections(self):
         # Decrement current runing connections
@@ -139,6 +156,7 @@ class StatsManager:
     def close(self):
         self.decrement_connections()
         self.end_time = time.monotonic()
+        self.update(True)  # Ensure that last values are updated
 
     @staticmethod
     def get_stats() -> typing.Generator['str', None, None]:
