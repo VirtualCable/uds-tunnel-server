@@ -44,15 +44,14 @@ from . import config
 from . import consts
 
 
-if typing.TYPE_CHECKING:
-    from multiprocessing.managers import Namespace, SyncManager
-
 INTERVAL = 2  # Interval in seconds between stats update
 
 logger = logging.getLogger(__name__)
 
 
 class StatsSingleCounter:
+    adder: typing.Callable[[int], None]
+
     def __init__(self, parent: 'StatsManager', for_receiving=True) -> None:
         if for_receiving:
             self.adder = parent.add_recv
@@ -65,13 +64,17 @@ class StatsSingleCounter:
 
 
 class StatsCounters(typing.NamedTuple):
-    sent: ctypes.c_int64
-    recv: ctypes.c_int64
+    sent: 'multiprocessing.sharedctypes.Synchronized[int]'
+    recv: 'multiprocessing.sharedctypes.Synchronized[int]'
 
 
 class StatsManager:
-    connections_counter: typing.ClassVar[ctypes.c_int64] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
-    connections_total: typing.ClassVar[ctypes.c_int64] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+    connections_counter: typing.ClassVar[
+        'multiprocessing.sharedctypes.Synchronized[int]'
+    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+    connections_total: typing.ClassVar[
+        'multiprocessing.sharedctypes.Synchronized[int]'
+    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
 
     accum: typing.ClassVar[StatsCounters] = StatsCounters(
         multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
@@ -93,28 +96,35 @@ class StatsManager:
     @property
     def current_time(self) -> float:
         return time.monotonic()
-    
+
     @property
     def elapsed_time(self) -> float:
         return self.current_time - self.start_time
 
     def add_recv(self, size: int) -> None:
-        self.accum.recv.value += size
-        self.local.recv.value += size
+        with self.accum.recv:
+            self.accum.recv.value += size
+        with self.local.recv:
+            self.local.recv.value += size
 
     def add_sent(self, size: int) -> None:
-        self.accum.sent.value += size
-        self.local.sent.value += size
+        with self.accum.sent:
+            self.accum.sent.value += size
+        with self.local.sent:
+            self.local.sent.value += size
 
     def decrement_connections(self):
         # Decrement current runing connections
-        self.connections_counter.value -= 1
+        with self.connections_counter:
+            self.connections_counter.value -= 1
 
     def increment_connections(self):
         # Increment current runing connections
         # Also, increment total connections
-        self.connections_counter.value += 1
-        self.connections_total.value += 1
+        with self.connections_counter:
+            self.connections_counter.value += 1
+        with self.connections_total:
+            self.connections_total.value += 1
 
     @property
     def as_sent_counter(self) -> 'StatsSingleCounter':
@@ -130,6 +140,8 @@ class StatsManager:
 
     @staticmethod
     def get_stats() -> typing.Generator['str', None, None]:
+        # Do not lock because any variable, we want just an aproximation to current values
+        # That, anyway, could change in the middle of the process
         yield ';'.join(
             [
                 str(StatsManager.connections_counter.value),
