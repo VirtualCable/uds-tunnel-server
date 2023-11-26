@@ -93,7 +93,7 @@ class TunnelProtocol(asyncio.Protocol):
         # If other_side is given, we are the client part (that is, the tunnel from us to remote machine)
         # In this case, only do_proxy is used
         self.client = None
-        self.stats_manager = stats.StatsManager(owner.ns)
+        self.stats_manager = stats.StatsManager()
         # We start processing command
         # After command, we can process stats or do_proxy, that is the "normal" operation
         self.runner = self.do_command
@@ -190,7 +190,7 @@ class TunnelProtocol(asyncio.Protocol):
             self.transport.write(consts.RESPONSE_FORBIDDEN)
             return
 
-        data = stats.GlobalStats.get_stats(self.owner.ns)
+        data = self.stats_manager.get_stats()
 
         for v in data:
             logger.debug('SENDING %s', v)
@@ -288,9 +288,9 @@ class TunnelProtocol(asyncio.Protocol):
                 'TERMINATED %s to %s, s:%s, r:%s, t:%s',
                 self.pretty_source(),
                 self.pretty_destination(),
-                self.stats_manager.sent,
-                self.stats_manager.recv,
-                int(self.stats_manager.current_time - self.stats_manager.start_time),
+                self.stats_manager.local.sent.value,
+                self.stats_manager.local.recv.value,
+                int(self.stats_manager.elapsed_time),
             )
             # Notify end to uds, using a task becase we are not an async function
             asyncio.get_event_loop().create_task(
@@ -391,5 +391,5 @@ class TunnelProtocol(asyncio.Protocol):
             cfg,
             ticket,
             'stop',
-            {'sent': str(stats_mngr.sent), 'recv': str(stats_mngr.recv)},
+            {'sent': str(stats_mngr.local.sent.value), 'recv': str(stats_mngr.local.recv.value)},
         )

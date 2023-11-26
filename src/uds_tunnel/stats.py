@@ -29,6 +29,7 @@
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
 import multiprocessing
+import multiprocessing.sharedctypes
 import socket
 import time
 import logging
@@ -36,6 +37,7 @@ import typing
 import io
 import asyncio
 import ssl
+import ctypes
 
 
 from . import config
@@ -62,20 +64,28 @@ class StatsSingleCounter:
         return self
 
 
+class StatsCounters(typing.NamedTuple):
+    sent: ctypes.c_int64
+    recv: ctypes.c_int64
+
+
 class StatsManager:
-    ns: 'Namespace'
-    last_sent: int
-    sent: int
-    last_recv: int
-    recv: int
+    connections_counter: typing.ClassVar[ctypes.c_int64] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+    connections_total: typing.ClassVar[ctypes.c_int64] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+
+    accum: typing.ClassVar[StatsCounters] = StatsCounters(
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
+    )
+    local: typing.ClassVar[StatsCounters] = StatsCounters(
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
+    )
     last: float  # timestamp, from time.monotonic()
     start_time: float  # timestamp, from time.monotonic()
     end_time: float  # timestamp, from time.monotonic()
 
-    def __init__(self, ns: 'Namespace'):
-        self.ns = ns
-        self.sent = self.last_sent = 0
-        self.recv = self.last_recv = 0
+    def __init__(self):
         self.last = time.monotonic()
         self.start_time = time.monotonic()
         self.end_time = self.start_time
@@ -83,33 +93,28 @@ class StatsManager:
     @property
     def current_time(self) -> float:
         return time.monotonic()
-
-    def update(self, force: bool = False):
-        now = time.monotonic()
-        if force or now - self.last > INTERVAL:
-            self.last = now
-            self.ns.recv += self.recv - self.last_recv
-            self.ns.sent += self.sent - self.last_sent
-            self.last_sent = self.sent
-            self.last_recv = self.recv
+    
+    @property
+    def elapsed_time(self) -> float:
+        return self.current_time - self.start_time
 
     def add_recv(self, size: int) -> None:
-        self.recv += size
-        self.update()
+        self.accum.recv.value += size
+        self.local.recv.value += size
 
     def add_sent(self, size: int) -> None:
-        self.sent += size
-        self.update()
+        self.accum.sent.value += size
+        self.local.sent.value += size
 
     def decrement_connections(self):
         # Decrement current runing connections
-        self.ns.current -= 1
+        self.connections_counter.value -= 1
 
     def increment_connections(self):
         # Increment current runing connections
         # Also, increment total connections
-        self.ns.current += 1
-        self.ns.total += 1
+        self.connections_counter.value += 1
+        self.connections_total.value += 1
 
     @property
     def as_sent_counter(self) -> 'StatsSingleCounter':
@@ -120,35 +125,19 @@ class StatsManager:
         return StatsSingleCounter(self, True)
 
     def close(self):
-        self.update(True)
         self.decrement_connections()
         self.end_time = time.monotonic()
 
-
-# Stats collector thread
-class GlobalStats:
-    manager: 'SyncManager'
-    ns: 'Namespace'
-    counter: int
-
-    def __init__(self):
-        super().__init__()
-        self.manager = multiprocessing.Manager()
-        self.ns = self.manager.Namespace()
-
-        # Counters
-        self.ns.current = 0
-        self.ns.total = 0
-        self.ns.sent = 0
-        self.ns.recv = 0
-        self.counter = 0
-
-    def info(self) -> typing.Iterable[str]:
-        return GlobalStats.get_stats(self.ns)
-
     @staticmethod
-    def get_stats(ns: 'Namespace') -> typing.Iterable[str]:
-        yield ';'.join([str(ns.current), str(ns.total), str(ns.sent), str(ns.recv)])
+    def get_stats() -> typing.Generator['str', None, None]:
+        yield ';'.join(
+            [
+                str(StatsManager.connections_counter.value),
+                str(StatsManager.connections_total.value),
+                str(StatsManager.accum.sent.value),
+                str(StatsManager.accum.recv.value),
+            ]
+        )
 
 
 # Stats processor, invoked from command line

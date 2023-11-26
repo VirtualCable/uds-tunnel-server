@@ -34,13 +34,8 @@ import pwd
 import sys
 import asyncio
 import argparse
-import signal
-import ssl
 import socket
-import threading  # event for stop notification
-import typing
 import logging
-from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -57,188 +52,9 @@ except ImportError:
     setproctitle = None  # type: ignore
 
 
-from uds_tunnel import config, proxy, consts, processes, stats
-
-if typing.TYPE_CHECKING:
-    from multiprocessing.connection import Connection
-    from multiprocessing.managers import Namespace
-
+from uds_tunnel import config, consts, processes, stats, log, tunnel_proc
 
 logger = logging.getLogger(__name__)
-
-do_stop: threading.Event = threading.Event()
-
-
-def stop_signal(signum: int, frame: typing.Any) -> None:
-    do_stop.set()
-    logger.debug('SIGNAL %s, frame: %s', signum, frame)
-
-
-def setup_log(cfg: config.ConfigurationType) -> None:
-    # Update logging if needed
-    if cfg.logfile:
-        fileh = RotatingFileHandler(
-            filename=cfg.logfile,
-            mode='a',
-            maxBytes=cfg.logsize,
-            backupCount=cfg.lognumber,
-        )
-        formatter = logging.Formatter(consts.LOGFORMAT)
-        fileh.setFormatter(formatter)
-        log = logging.getLogger()
-        log.setLevel(cfg.loglevel)
-        # for hdlr in log.handlers[:]:
-        #     log.removeHandler(hdlr)
-        log.addHandler(fileh)
-    else:
-        # Setup basic logging
-        log = logging.getLogger()
-        log.setLevel(cfg.loglevel)
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setLevel(cfg.loglevel)
-        formatter = logging.Formatter('%(levelname)s - %(message)s')  # Basic log format, nice for syslog
-        handler.setFormatter(formatter)
-        log.addHandler(handler)
-
-    # If debug, print config
-    if cfg.loglevel.lower() == 'debug':
-        logger.debug('Configuration: %s', cfg)
-
-
-async def tunnel_proc_async(pipe: 'Connection', cfg: config.ConfigurationType, ns: 'Namespace') -> None:
-    loop = asyncio.get_running_loop()
-
-    tasks: typing.List[asyncio.Task] = []
-
-    def add_autoremovable_task(task: asyncio.Task) -> None:
-        tasks.append(task)
-
-        def remove_task(task: asyncio.Task) -> None:
-            logger.debug('Removing task %s', task)
-            tasks.remove(task)
-
-        task.add_done_callback(remove_task)
-
-    def get_socket() -> typing.Tuple[typing.Optional[socket.socket], typing.Optional[typing.Tuple[str, int]]]:
-        try:
-            while True:
-                # Clear back event, for next data
-                msg: typing.Optional[typing.Tuple[socket.socket, typing.Tuple[str, int]]] = pipe.recv()
-                if msg:
-                    return msg
-        except EOFError:
-            logger.debug('Parent process closed connection')
-            pipe.close()
-            return None, None
-        except Exception:
-            logger.exception('Receiving data from parent process')
-            pipe.close()
-            return None, None
-
-    async def run_server() -> None:
-        # Generate SSL context
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        args: typing.Dict[str, typing.Any] = {
-            'certfile': cfg.ssl_certificate,
-        }
-        if cfg.ssl_certificate_key:
-            args['keyfile'] = cfg.ssl_certificate_key
-        if cfg.ssl_password:
-            args['password'] = cfg.ssl_password
-
-        context.load_cert_chain(**args)
-
-        # Set min version from string (1.2 or 1.3) as ssl.TLSVersion.TLSv1_2 or ssl.TLSVersion.TLSv1_3
-        if cfg.ssl_min_tls_version in ('1.2', '1.3'):
-            try:
-                context.minimum_version = getattr(
-                    ssl.TLSVersion, f'TLSv1_{cfg.ssl_min_tls_version.split(".")[1]}'
-                )
-            except Exception as e:
-                logger.exception('Setting min tls version failed: %s. Using defaults', e)
-                context.minimum_version = ssl.TLSVersion.TLSv1_2
-        # Any other value will be ignored
-
-        if cfg.ssl_ciphers:
-            try:
-                context.set_ciphers(cfg.ssl_ciphers)
-            except Exception as e:
-                logger.exception('Setting ciphers failed: %s. Using defaults', e)
-
-        if cfg.ssl_dhparam:
-            try:
-                context.load_dh_params(cfg.ssl_dhparam)
-            except Exception as e:
-                logger.exception('Loading dhparams failed: %s. Using defaults', e)
-
-        try:
-            while True:
-                address: typing.Optional[typing.Tuple[str, int]] = ('', 0)
-                try:
-                    (sock, address) = await loop.run_in_executor(None, get_socket)
-                    if not sock:
-                        break  # No more sockets, exit
-                    logger.debug('CONNECTION from %s (pid: %s)', address, os.getpid())
-                    # Due to proxy contains an "event" to stop, we need to create a new one for each connection
-                    add_autoremovable_task(
-                        asyncio.create_task(proxy.Proxy(cfg, ns)(sock, context), name=f'proxy-{address}')
-                    )
-                except asyncio.CancelledError:  # pylint: disable=try-except-raise
-                    raise  # Stop, but avoid generic exception
-                except Exception:
-                    logger.error('NEGOTIATION ERROR from %s', address[0] if address else 'unknown')
-        except asyncio.CancelledError:
-            pass  # Stop
-
-    # create task for server
-
-    add_autoremovable_task(asyncio.create_task(run_server(), name='server'))
-
-    try:
-        while tasks and not do_stop.is_set():
-            to_wait = tasks[:]  # Get a copy of the list
-            # Wait for "to_wait" tasks to finish, stop every 2 seconds to check if we need to stop
-            # done, _ =
-            await asyncio.wait(to_wait, return_when=asyncio.FIRST_COMPLETED, timeout=2)
-    except asyncio.CancelledError:
-        logger.info('Task cancelled')
-        do_stop.set()  # ensure we stop
-    except Exception:
-        logger.exception('Error in main loop')
-        do_stop.set()
-
-    logger.debug('Out of loop, stopping tasks: %s, running: %s', tasks, do_stop.is_set())
-
-    # If any task is still running, cancel it
-    for task in tasks:
-        try:
-            task.cancel()
-        except asyncio.CancelledError:
-            pass  # Ignore, we are stopping
-
-    # for task in tasks:
-    #    task.cancel()
-
-    # Wait for all tasks to finish
-    await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
-
-    logger.info('PROCESS %s stopped', os.getpid())
-
-
-def process_connection(client: socket.socket, addr: typing.Tuple[str, str], conn: 'Connection') -> None:
-    data: bytes = b''
-    try:
-        # First, ensure handshake (simple handshake) and command
-        data = client.recv(len(consts.HANDSHAKE_V1))
-
-        if data != consts.HANDSHAKE_V1:
-            raise Exception(f'Invalid data from {addr[0]}: {data.hex()}')  # Invalid handshake
-        conn.send((client, addr))
-        del client  # Ensure socket is controlled on child process
-    except Exception as e:
-        logger.error('HANDSHAKE invalid from %s: %s', addr[0], e)
-        # Close Source and continue
-        client.close()
 
 
 def tunnel_main(args: 'argparse.Namespace') -> None:
@@ -270,7 +86,7 @@ def tunnel_main(args: 'argparse.Namespace') -> None:
             # os.setgid(pwu.pw_gid)
             os.setuid(pwu.pw_uid)
 
-        setup_log(cfg)
+        log.setup_log(cfg)
 
         logger.info('Starting tunnel server on %s:%s', cfg.listen_address, cfg.listen_port)
         if setproctitle:
@@ -286,22 +102,13 @@ def tunnel_main(args: 'argparse.Namespace') -> None:
         logger.error('MAIN: %s', e)
         return
 
-    # Setup signal handlers
-    try:
-        signal.signal(signal.SIGINT, stop_signal)
-        signal.signal(signal.SIGTERM, stop_signal)
-    except Exception as e:
-        # Signal not available on threads, and we use threads on tests,
-        # so we will ignore this because on tests signals are not important
-        logger.warning('Signal not available: %s', e)
+    tunnel_proc.setup_signal_handlers()
 
-    stats_collector = stats.GlobalStats()
-
-    prcs = processes.Processes(tunnel_proc_async, cfg, stats_collector.ns)
+    prcs = processes.Processes(tunnel_proc.tunnel_proc_async, cfg)
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         try:
-            while not do_stop.is_set():
+            while not tunnel_proc.do_stop.is_set():
                 try:
                     client, addr = sock.accept()
                     # logger.info('CONNECTION from %s', addr)
@@ -312,7 +119,7 @@ def tunnel_main(args: 'argparse.Namespace') -> None:
                     # Note: We use a thread pool here because we want to
                     #       ensure no denial of service is possible, or at least
                     #       we try to limit it (if connection delays too long, we will close it on the thread)
-                    executor.submit(process_connection, client, addr, prcs.best_child())
+                    executor.submit(tunnel_proc.process_connection, client, addr, prcs.best_child())
                 except socket.timeout:
                     pass  # Continue and retry
                 except Exception as e:

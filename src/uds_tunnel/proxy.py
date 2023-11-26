@@ -45,12 +45,10 @@ logger = logging.getLogger(__name__)
 
 class Proxy:
     cfg: 'config.ConfigurationType'
-    ns: 'Namespace'
     finished: asyncio.Event
 
-    def __init__(self, cfg: 'config.ConfigurationType', ns: 'Namespace') -> None:
+    def __init__(self, cfg: 'config.ConfigurationType') -> None:
         self.cfg = cfg
-        self.ns = ns
         self.finished = asyncio.Event()
 
     # Method responsible of proxying requests

@@ -45,7 +45,7 @@ import copy
 from unittest import mock
 
 import udstunnel
-from uds_tunnel import config, consts, stats, tunnel
+from uds_tunnel import config, consts, stats, tunnel, log, tunnel_proc
 
 from . import certs, conf, fixtures, tools
 
@@ -119,7 +119,6 @@ async def create_tunnel_proc(
         ]
     ] = None,
     use_fake_http_server: bool = False,
-    global_stats: typing.Optional[stats.GlobalStats] = None,
     # Configuration parameters
     **kwargs,
 ) -> collections.abc.AsyncGenerator[
@@ -192,18 +191,16 @@ async def create_tunnel_proc(
         cfg = config.read(cfgfile)
 
         async with provider() as possible_queue:
-            # Stats collector
-            global_stats = global_stats or stats.GlobalStats()  # If none provided, create a new one
             # Pipe to send data to tunnel
             own_end, other_end = multiprocessing.Pipe()
 
-            udstunnel.setup_log(cfg)
+            log.setup_log(cfg)
 
             # Clear the stop flag
-            udstunnel.do_stop.clear()
+            tunnel_proc.do_stop.clear()
 
             # Create the tunnel task
-            task = asyncio.create_task(udstunnel.tunnel_proc_async(other_end, cfg, global_stats.ns))
+            task = asyncio.create_task(tunnel_proc.tunnel_proc_async(other_end, cfg))
 
             # Server listening for connections
             server_socket = socket.socket(

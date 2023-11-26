@@ -45,7 +45,7 @@ if typing.TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ProcessType = typing.Callable[
-    ['Connection', config.ConfigurationType, 'Namespace'],
+    ['Connection', config.ConfigurationType],
     typing.Coroutine[typing.Any, None, None],
 ]
 
@@ -62,15 +62,13 @@ class Processes:
     ]
     process: ProcessType
     cfg: config.ConfigurationType
-    ns: 'Namespace'
 
     def __init__(
-        self, process: ProcessType, cfg: config.ConfigurationType, ns: 'Namespace'
+        self, process: ProcessType, cfg: config.ConfigurationType
     ) -> None:
         self.children = []
         self.process = process  # type: ignore
         self.cfg = cfg
-        self.ns = ns
 
         for _ in range(cfg.workers):
             self.add_child_pid()
@@ -79,7 +77,7 @@ class Processes:
         own_conn, child_conn = multiprocessing.Pipe()
         task = multiprocessing.Process(
             target=Processes.runner,
-            args=(self.process, child_conn, self.cfg, self.ns),
+            args=(self.process, child_conn, self.cfg),
         )
         task.start()
         logger.debug('ADD CHILD PID: %s', task.pid)
@@ -153,7 +151,6 @@ class Processes:
         proc: ProcessType,
         conn: 'Connection',
         cfg: config.ConfigurationType,
-        ns: 'Namespace',
     ) -> None:
         if cfg.use_uvloop:
             try:
@@ -161,12 +158,12 @@ class Processes:
 
                 if sys.version_info >= (3, 11):
                     with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
-                        runner.run(proc(conn, cfg, ns))
+                        runner.run(proc(conn, cfg))
                 else:
                     uvloop.install()
-                    asyncio.run(proc(conn, cfg, ns))
+                    asyncio.run(proc(conn, cfg))
             except ImportError:
                 logger.warning('uvloop not found, using default asyncio')
-                asyncio.run(proc(conn, cfg, ns))
+                asyncio.run(proc(conn, cfg))
         else:
-            asyncio.run(proc(conn, cfg, ns))
+            asyncio.run(proc(conn, cfg))
