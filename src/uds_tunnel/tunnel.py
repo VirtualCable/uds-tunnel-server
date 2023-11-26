@@ -29,14 +29,13 @@
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
 import asyncio
-import typing
 import logging
 import socket
+import typing
 
 import aiohttp
 
-from . import consts, config, stats, tunnel_client
-
+from . import config, consts, stats, tunnel_client
 
 logger = logging.getLogger(__name__)
 
@@ -279,7 +278,7 @@ class TunnelProtocol(asyncio.Protocol):
                 self.transport.close()
         except AttributeError:  # not initialized transport, fine...
             pass
-        except Exception as e:   # nosec: best effort
+        except Exception as e:  # nosec: best effort
             logger.error('ERROR closing connection: %s', e)
 
     def notify_end(self):
@@ -288,8 +287,8 @@ class TunnelProtocol(asyncio.Protocol):
                 'TERMINATED %s to %s, s:%s, r:%s, t:%s',
                 self.pretty_source(),
                 self.pretty_destination(),
-                self.stats_manager.local.sent.value,
-                self.stats_manager.local.recv.value,
+                self.stats_manager.local.sent,
+                self.stats_manager.local.recv,
                 int(self.stats_manager.elapsed_time),
             )
             # Notify end to uds, using a task becase we are not an async function
@@ -391,5 +390,5 @@ class TunnelProtocol(asyncio.Protocol):
             cfg,
             ticket,
             'stop',
-            {'sent': str(stats_mngr.local.sent.value), 'recv': str(stats_mngr.local.recv.value)},
+            {'sent': str(stats_mngr.local.sent), 'recv': str(stats_mngr.local.recv)},
         )

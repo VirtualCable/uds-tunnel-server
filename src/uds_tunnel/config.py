@@ -28,10 +28,10 @@
 '''
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
-import hashlib
-import multiprocessing
 import configparser
+import hashlib
 import logging
+import multiprocessing
 import typing
 
 from .consts import CONFIGFILE

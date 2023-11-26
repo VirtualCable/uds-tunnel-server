@@ -29,11 +29,9 @@
 '''
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
-import sys
 import logging
+import sys
 from logging.handlers import RotatingFileHandler
-from concurrent.futures import ThreadPoolExecutor
-
 
 from uds_tunnel import config, consts
 

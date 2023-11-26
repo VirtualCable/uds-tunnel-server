@@ -28,21 +28,18 @@
 '''
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
+import asyncio
+import ctypes
+import io
+import logging
 import multiprocessing
 import multiprocessing.sharedctypes
 import socket
-import time
-import logging
-import typing
-import io
-import asyncio
 import ssl
-import ctypes
+import time
+import typing
 
-
-from . import config
-from . import consts
-
+from . import config, consts
 
 INTERVAL = 2  # Interval in seconds between stats update
 
@@ -68,6 +65,15 @@ class StatsCounters(typing.NamedTuple):
     recv: 'multiprocessing.sharedctypes.Synchronized[int]'
 
 
+class LocalStatsCounters:
+    sent: int
+    recv: int
+
+    def __init__(self) -> None:
+        self.sent = 0
+        self.recv = 0
+
+
 class StatsManager:
     connections_counter: typing.ClassVar[
         'multiprocessing.sharedctypes.Synchronized[int]'
@@ -80,10 +86,8 @@ class StatsManager:
         multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
         multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
     )
-    local: typing.ClassVar[StatsCounters] = StatsCounters(
-        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
-        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
-    )
+    # No locking nor sharing needed for local stats
+    local: typing.ClassVar[LocalStatsCounters] = LocalStatsCounters()
     last: float  # timestamp, from time.monotonic()
     start_time: float  # timestamp, from time.monotonic()
     end_time: float  # timestamp, from time.monotonic()
@@ -104,14 +108,12 @@ class StatsManager:
     def add_recv(self, size: int) -> None:
         with self.accum.recv:
             self.accum.recv.value += size
-        with self.local.recv:
-            self.local.recv.value += size
+        self.local.recv += size
 
     def add_sent(self, size: int) -> None:
         with self.accum.sent:
             self.accum.sent.value += size
-        with self.local.sent:
-            self.local.sent.value += size
+        self.local.sent += size
 
     def decrement_connections(self):
         # Decrement current runing connections

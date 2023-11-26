@@ -29,16 +29,15 @@
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
 import asyncio
-import socket
 import logging
+import socket
 import typing
 
-from . import config
-from . import tunnel
+from . import config, tunnel
 
 if typing.TYPE_CHECKING:
-    from multiprocessing.managers import Namespace
     import ssl
+    from multiprocessing.managers import Namespace
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +62,7 @@ class Proxy:
                 addr = source.getpeername()
             except Exception:
                 addr = 'Unknown'
-            logger.exception(
-                'Proxy error from %s: %s (%s--%s)', addr, e, source, context
-            )
+            logger.exception('Proxy error from %s: %s (%s--%s)', addr, e, source, context)
 
     async def proxy(self, source: socket.socket, context: 'ssl.SSLContext') -> None:
         loop = asyncio.get_running_loop()
@@ -73,7 +70,9 @@ class Proxy:
         # the protocol controller do the rest
 
         # Store source ip and port, for logging purposes in case of error
-        src_ip, src_port = (source.getpeername() if source else ('Unknown', 0))[:2]   # May be ipv4 or ipv6, so we get only first two elements
+        src_ip, src_port = (source.getpeername() if source else ('Unknown', 0))[
+            :2
+        ]  # May be ipv4 or ipv6, so we get only first two elements
 
         # Upgrade connection to SSL, and use asyncio to handle the rest
         tun: typing.Optional[tunnel.TunnelProtocol] = None
@@ -81,7 +80,9 @@ class Proxy:
             tun = tunnel.TunnelProtocol(self)
             # (connect accepted loop not present on AbastractEventLoop definition < 3.10), that's why we use ignore
             await loop.connect_accepted_socket(  # type: ignore
-                lambda: tun, source, ssl=context,
+                lambda: tun,
+                source,
+                ssl=context,
                 ssl_handshake_timeout=3,
             )
 

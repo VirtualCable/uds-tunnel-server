@@ -29,13 +29,13 @@
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
 import asyncio
-import typing
 import logging
+import typing
 
 logger = logging.getLogger(__name__)
 
 if typing.TYPE_CHECKING:
-    from . import tunnel, stats
+    from . import stats, tunnel
 
 
 # Protocol
@@ -45,9 +45,7 @@ class TunnelClientProtocol(asyncio.Protocol):
     receiver: 'tunnel.TunnelProtocol'
     destination: typing.Tuple[str, int]
 
-    def __init__(
-        self, receiver: 'tunnel.TunnelProtocol'
-    ) -> None:
+    def __init__(self, receiver: 'tunnel.TunnelProtocol') -> None:
         # If no other side is given, we are the server part
         super().__init__()
         # transport is undefined until connection_made is called

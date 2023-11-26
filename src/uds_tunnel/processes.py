@@ -28,10 +28,10 @@
 '''
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
-import multiprocessing
 import asyncio
-import sys
 import logging
+import multiprocessing
+import sys
 import typing
 
 import psutil
@@ -57,15 +57,11 @@ class Processes:
     This class is used to store the processes that are used by the tunnel.
     """
 
-    children: typing.List[
-        typing.Tuple['Connection', multiprocessing.Process, psutil.Process]
-    ]
+    children: typing.List[typing.Tuple['Connection', multiprocessing.Process, psutil.Process]]
     process: ProcessType
     cfg: config.ConfigurationType
 
-    def __init__(
-        self, process: ProcessType, cfg: config.ConfigurationType
-    ) -> None:
+    def __init__(self, process: ProcessType, cfg: config.ConfigurationType) -> None:
         self.children = []
         self.process = process  # type: ignore
         self.cfg = cfg
@@ -81,9 +77,7 @@ class Processes:
         )
         task.start()
         logger.debug('ADD CHILD PID: %s', task.pid)
-        self.children.append(
-            (typing.cast('Connection', own_conn), task, psutil.Process(task.pid))
-        )
+        self.children.append((typing.cast('Connection', own_conn), task, psutil.Process(task.pid)))
 
     def best_child(self) -> 'Connection':
         best: typing.Tuple[float, 'Connection'] = (NO_CPU_PERCENT, self.children[0][0])
@@ -119,11 +113,7 @@ class Processes:
             logger.debug('Regenerating missing processes: %s', len(missingProcesses))
             # Regenerate childs and recreate new proceeses for requests...
             # Remove missing processes
-            self.children[:] = [
-                child
-                for i, child in enumerate(self.children)
-                if i not in missingProcesses
-            ]
+            self.children[:] = [child for i, child in enumerate(self.children) if i not in missingProcesses]
             # Now add new children
             for (
                 _

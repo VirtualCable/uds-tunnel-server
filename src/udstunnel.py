@@ -29,15 +29,14 @@
 '''
 Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
+import argparse
+import asyncio
+import logging
 import os
 import pwd
-import sys
-import asyncio
-import argparse
 import socket
-import logging
+import sys
 from concurrent.futures import ThreadPoolExecutor
-
 
 try:
     import uvloop  # type: ignore
@@ -52,7 +51,7 @@ except ImportError:
     setproctitle = None  # type: ignore
 
 
-from uds_tunnel import config, consts, processes, stats, log, tunnel_proc
+from uds_tunnel import config, consts, log, processes, stats, tunnel_proc
 
 logger = logging.getLogger(__name__)
 

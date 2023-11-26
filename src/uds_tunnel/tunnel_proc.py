@@ -61,9 +61,9 @@ do_stop: threading.Event = threading.Event()
 def stop_signal(signum: int, frame: typing.Any) -> None:
     do_stop.set()
     logger.debug('SIGNAL %s, frame: %s', signum, frame)
-    
 
-def setup_signal_handlers() -> None:    
+
+def setup_signal_handlers() -> None:
     # Setup signal handlers
     try:
         signal.signal(signal.SIGINT, stop_signal)
@@ -72,7 +72,6 @@ def setup_signal_handlers() -> None:
         # Signal not available on threads, and we use threads on tests,
         # so we will ignore this because on tests signals are not important
         logger.warning('Signal not available: %s', e)
-
 
 
 async def tunnel_proc_async(pipe: 'Connection', cfg: config.ConfigurationType) -> None:
