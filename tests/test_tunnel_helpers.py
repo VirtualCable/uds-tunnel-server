@@ -78,7 +78,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
 
                 with self.assertRaises(ValueError):
                     await tunnel.TunnelProtocol.get_ticket_from_uds(
-                        cfg, ticket.encode(), conf.CALLER_HOST
+                        cfg, ticket.encode(), conf.CALLER_HOST, 'tunne_id_test'
                     )
 
             ticket = conf.NOTIFY_TICKET  # Samle ticket
@@ -86,7 +86,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
                 # Now some requests with valid tickets
                 # Ensure no exception is raised
                 ret_value = await tunnel.TunnelProtocol.get_ticket_from_uds(
-                    cfg, ticket.encode(), conf.CALLER_HOST
+                    cfg, ticket.encode(), conf.CALLER_HOST, 'tunnel_id_test'
                 )
                 # Ensure data returned is correct {host, port, notify} from mock
                 self.assertEqual(ret_value, conf.UDS_GET_TICKET_RESPONSE(*conf.REMOTE_HOST))
@@ -113,8 +113,8 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
         ) as m:
             m.side_effect = uds_response
             counter = mock.MagicMock()
-            counter.sent = 123456789
-            counter.recv = 987654321
+            counter.local.sent = 123456789
+            counter.local.recv = 987654321
 
             ticket = conf.NOTIFY_TICKET.encode()
             for i in range(0, 100):
@@ -127,7 +127,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
                 self.assertEqual(m.call_args[0][2], 'stop')
                 self.assertEqual(
                     m.call_args[0][3],
-                    {'sent': str(counter.sent), 'recv': str(counter.recv)},
+                    {'sent': str(counter.local.sent), 'recv': str(counter.local.recv)},
                 )
 
             # mock should have been called 100 times

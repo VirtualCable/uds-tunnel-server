@@ -34,7 +34,7 @@ import logging
 import multiprocessing
 from unittest import IsolatedAsyncioTestCase, mock
 
-from udstunnel import process_connection
+from udstunnel import tunnel_proc
 from uds_tunnel import consts
 
 from .utils import tuntools
@@ -89,7 +89,7 @@ class TestTunnel(IsolatedAsyncioTestCase):
                             self.assertIn('ERROR', logger_mock.error.call_args[0][0])
                             # Info should have been called with connection info and
                             self.assertIn(
-                                'CONNECT FROM', logger_mock.info.call_args_list[0][0][0]
+                                'CONNECT', logger_mock.info.call_args_list[0][0][0]
                             )  # First call to info
 
     def test_tunnel_invalid_handshake(self) -> None:
@@ -108,9 +108,9 @@ class TestTunnel(IsolatedAsyncioTestCase):
             # Set timeout to 1 seconds
             bad_handshake = bytes(random.randint(0, 255) for _ in range(i))  # nosec not for security
             logger_mock = mock.MagicMock()
-            with mock.patch('udstunnel.logger', logger_mock):
+            with mock.patch('udstunnel.tunnel_proc.logger', logger_mock):
                 wsock.sendall(bad_handshake)
-                process_connection(rsock, ('host', 'port'), own_conn)
+                tunnel_proc.process_connection(rsock, ('host', 'port'), own_conn)
 
             # Check that logger has been called
             logger_mock.error.assert_called_once()
@@ -131,7 +131,7 @@ class TestTunnel(IsolatedAsyncioTestCase):
         logger_mock = mock.MagicMock()
         with mock.patch('udstunnel.logger', logger_mock):
             wsock.sendall(consts.HANDSHAKE_V1)
-            process_connection(rsock, ('host', 'port'), own_conn)
+            tunnel_proc.process_connection(rsock, ('host', 'port'), own_conn)
 
         # Check that logger has not been called
         logger_mock.error.assert_not_called()

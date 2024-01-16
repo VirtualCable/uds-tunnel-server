@@ -32,6 +32,7 @@ import asyncio
 import logging
 import socket
 import typing
+import time
 
 import aiohttp
 
@@ -42,16 +43,16 @@ logger = logging.getLogger(__name__)
 if typing.TYPE_CHECKING:
     from . import proxy
 
-
 # Protocol
 class TunnelProtocol(asyncio.Protocol):
+   
     # owner Proxy class
     owner: 'proxy.Proxy'
 
     # Transport and client
     transport: 'asyncio.transports.Transport'
     client: typing.Optional['tunnel_client.TunnelClientProtocol']
-
+    
     # Current state, could be:
     # - do_command: Waiting for command
     # - do_proxy: Proxying data
@@ -70,6 +71,9 @@ class TunnelProtocol(asyncio.Protocol):
     tls_version: str
     # cipher used
     tls_cipher: str
+
+    # own tunnel id, for logging purposes
+    tunnel_id: str
 
     # Counters & stats related
     stats_manager: stats.StatsManager
@@ -96,6 +100,9 @@ class TunnelProtocol(asyncio.Protocol):
         # We start processing command
         # After command, we can process stats or do_proxy, that is the "normal" operation
         self.runner = self.do_command
+        
+        # Tunnel id is get from current timestamp with microseconds, in hex upper case
+        self.tunnel_id = hex(int(time.time() * 1000000))[2:].upper()
 
     def process_open(self) -> None:
         # Open Command has the ticket behind it
@@ -119,9 +126,9 @@ class TunnelProtocol(asyncio.Protocol):
 
         async def open_client() -> None:
             try:
-                result = await TunnelProtocol.get_ticket_from_uds(self.owner.cfg, ticket, self.source)
+                result = await TunnelProtocol.get_ticket_from_uds(self.owner.cfg, ticket, self.source, self.tunnel_id)
             except Exception as e:
-                logger.error('ERROR %s', e.args[0] if e.args else e)
+                logger.error('ERROR (%s) %s', self.tunnel_id, e.args[0] if e.args else e)
                 self.transport.write(consts.RESPONSE_ERROR_TICKET)
                 self.transport.close()  # And force close
                 return
@@ -131,7 +138,8 @@ class TunnelProtocol(asyncio.Protocol):
             self.notify_ticket = result['notify'].encode()
 
             logger.info(
-                'OPEN TUNNEL FROM %s to %s',
+                'OPEN TUNNEL (%s) FROM %s to %s',
+                self.tunnel_id,
                 self.pretty_source(),
                 self.pretty_destination(),
             )
@@ -155,7 +163,7 @@ class TunnelProtocol(asyncio.Protocol):
                 self.transport.write(b'OK')
                 self.stats_manager.increment_connections()  # Increment connections counters
             except Exception as e:
-                logger.error('CONNECTION FAILED: %s', e)
+                logger.error('CONNECTION FAILED (%s): %s', self.tunnel_id, e)
                 self.close_connection()
 
         # add open other side to the loop
@@ -170,7 +178,7 @@ class TunnelProtocol(asyncio.Protocol):
 
         # Clean timeout now, we have received all data
         self.clean_timeout()
-        logger.info('COMMAND: %s', self.cmd[: consts.COMMAND_LENGTH].decode())
+        logger.info('COMMAND (%s): %s', self.tunnel_id, self.cmd[: consts.COMMAND_LENGTH].decode())
 
         # Check valid source ip
         if self.transport.get_extra_info('peername')[0] not in self.owner.cfg.allow:
@@ -192,14 +200,14 @@ class TunnelProtocol(asyncio.Protocol):
         data = self.stats_manager.get_stats()
 
         for v in data:
-            logger.debug('SENDING %s', v)
+            logger.debug('SENDING (%s) %s', self.tunnel_id, v)
             self.transport.write(v.encode() + b'\n')
 
     async def timeout(self, wait: float) -> None:
         """Timeout can only occur while waiting for a command (or OPEN command ticket)."""
         try:
             await asyncio.sleep(wait)
-            logger.error('TIMEOUT FROM %s', self.pretty_source())
+            logger.error('TIMEOUT (%s) FROM %s', self.tunnel_id, self.pretty_source())
             try:
                 self.transport.write(consts.RESPONSE_ERROR_TIMEOUT)
             except Exception:  # nosec: Transport not available, ignore
@@ -228,7 +236,7 @@ class TunnelProtocol(asyncio.Protocol):
 
     def do_command(self, data: bytes) -> None:
         if self.cmd == b'':
-            logger.info('CONNECT FROM %s (%s/%s)', self.pretty_source(), self.tls_version, self.tls_cipher)
+            logger.info('CONNECT (%s) FROM %s (%s/%s)', self.tunnel_id, self.pretty_source(), self.tls_version, self.tls_cipher)
 
         # We have at most self.owner.cfg.command_timeout seconds to receive the command and the ticket if needed
         self.cmd += data
@@ -241,7 +249,7 @@ class TunnelProtocol(asyncio.Protocol):
                     return
                 if command == consts.COMMAND_TEST:
                     self.clean_timeout()  # Stop timeout
-                    logger.info('COMMAND: TEST')
+                    logger.info('COMMAND (%s): TEST', self.tunnel_id)
                     self.transport.write(consts.RESPONSE_OK)
                     return
                 if command in (consts.COMMAND_STAT, consts.COMMAND_INFO):
@@ -250,11 +258,11 @@ class TunnelProtocol(asyncio.Protocol):
                     try:
                         self.process_stats(full=command == consts.COMMAND_STAT)
                     except Exception as e:
-                        logger.error('ERROR processing stats: %s', e.args[0] if e.args else e)
+                        logger.error('ERROR (%s) processing stats: %s', self.tunnel_id, e.args[0] if e.args else e)
                     return
                 raise Exception('Invalid command')
             except Exception:
-                logger.error('ERROR from %s', self.pretty_source())
+                logger.error('ERROR (%s) from %s', self.tunnel_id, self.pretty_source())
                 self.transport.write(consts.RESPONSE_ERROR_COMMAND)
                 self.close_connection()
                 return
@@ -278,12 +286,13 @@ class TunnelProtocol(asyncio.Protocol):
         except AttributeError:  # not initialized transport, fine...
             pass
         except Exception as e:  # nosec: best effort
-            logger.error('ERROR closing connection: %s', e)
+            logger.error('ERROR (%s) closing connection: %s', self.tunnel_id, e)
 
     def notify_end(self):
         if self.notify_ticket:
             logger.info(
-                'TERMINATED %s to %s, s:%s, r:%s, t:%s',
+                'TERMINATED (%s) %s to %s, s:%s, r:%s, t:%s',
+                self.tunnel_id,
                 self.pretty_source(),
                 self.pretty_destination(),
                 self.stats_manager.local.sent,
@@ -296,7 +305,7 @@ class TunnelProtocol(asyncio.Protocol):
             )
             self.notify_ticket = b''  # Clean up so no more notifications
         else:
-            logger.info('TERMINATED %s', self.pretty_source())
+            logger.info('TERMINATED (%s) %s', self.tunnel_id, self.pretty_source())
 
         self.stats_manager.close()
         self.owner.finished.set()
@@ -310,7 +319,7 @@ class TunnelProtocol(asyncio.Protocol):
         self.transport = typing.cast('asyncio.transports.Transport', transport)
         # Get source
         self.source = self.transport.get_extra_info('peername')
-        logger.debug('Connection made: %s', self.source)
+        logger.debug('Connection made (%s): %s', self.tunnel_id, self.source)
 
         # Try to get the cipher used to show it in the logs
         try:
@@ -325,7 +334,7 @@ class TunnelProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
         if exc:
-            logger.error('CONNECTION LOST: %s', exc)
+            logger.error('CONNECTION LOST (%s): %s', self.tunnel_id, exc)
         # Ensure close other side if not server_side
         if self.client:
             self.client.close_connection()
@@ -375,11 +384,11 @@ class TunnelProtocol(asyncio.Protocol):
 
     @staticmethod
     async def get_ticket_from_uds(
-        cfg: config.ConfigurationType, ticket: bytes, address: typing.Tuple[str, int]
+        cfg: config.ConfigurationType, ticket: bytes, address: typing.Tuple[str, int], tunnel_id: str
     ) -> typing.MutableMapping[str, typing.Any]:
         # Check ticket using re
         if consts.TICKET_REGEX.match(ticket.decode(errors='replace')) is None:
-            raise ValueError(f'TICKET INVALID ({ticket.decode(errors="replace")})')
+            raise ValueError(f'TICKET INVALID (%s): {ticket.decode(errors="replace")}')
 
         return await TunnelProtocol._read_from_uds(cfg, ticket, address[0])
 

@@ -177,9 +177,9 @@ def main() -> None:
     if args.tunnel:
         tunnel_main(args)
     elif args.detailed_stats:
-        asyncio.run(stats.getServerStats(True))
+        asyncio.run(stats.get_server_stats(True))
     elif args.stats:
-        asyncio.run(stats.getServerStats(False))
+        asyncio.run(stats.get_server_stats(False))
     else:
         parser.print_help()
 

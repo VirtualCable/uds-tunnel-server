@@ -188,16 +188,19 @@ class TestUDSTunnelApp(IsolatedAsyncioTestCase):
             return int(data.split(b'bX0bwmb')[1])
 
         for host in ('127.0.0.1', '::1'):
-
+            # Reset stats values
+            stats.StatsManager.accum.recv.value = 0
+            stats.StatsManager.accum.sent.value = 0
+            stats.StatsManager.connections_total.value = 0
+           
             req_queue = asyncio.Queue()  # clear queue
             # Use tunnel proc for testing
-            stats_collector = stats.GlobalStats()
+            
             async with tuntools.create_tunnel_proc(
                 host,
                 tunnel_server_port,
                 response=lambda data: conf.UDS_GET_TICKET_RESPONSE(host, extract_port(data)),  # pylint: disable=cell-var-from-loop
                 command_timeout=16,  # Increase command timeout because heavy load we will create,
-                global_stats=stats_collector,
             ) as _:  # (_ is a tuple, but not used here, just the context)
                 # Create a "bunch" of clients
                 tasks = [
@@ -215,6 +218,6 @@ class TestUDSTunnelApp(IsolatedAsyncioTestCase):
                 self.assertEqual(req_queue.qsize(), concurrent_tasks * 2)
 
             # Check stats
-            self.assertEqual(stats_collector.ns.recv, concurrent_tasks * 12)
-            self.assertEqual(stats_collector.ns.sent, concurrent_tasks * 4122)
-            self.assertEqual(stats_collector.ns.total, concurrent_tasks)
+            self.assertEqual(stats.StatsManager.accum.recv.value, concurrent_tasks * 12)
+            self.assertEqual(stats.StatsManager.accum.sent.value, concurrent_tasks * 4122)
+            self.assertEqual(stats.StatsManager.connections_total.value, concurrent_tasks)

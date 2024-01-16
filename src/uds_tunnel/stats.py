@@ -30,6 +30,7 @@ Author: Adolfo Gómez, dkmaster at dkmon dot com
 '''
 import asyncio
 import ctypes
+import dataclasses
 import io
 import logging
 import multiprocessing
@@ -60,7 +61,8 @@ class StatsSingleCounter:
         return self
 
 
-class StatsCounters(typing.NamedTuple):
+@dataclasses.dataclass
+class StatsCounters:
     sent: 'multiprocessing.sharedctypes.Synchronized[int]'
     recv: 'multiprocessing.sharedctypes.Synchronized[int]'
 
@@ -77,14 +79,14 @@ class LocalStatsCounters:
 class StatsManager:
     connections_counter: typing.ClassVar[
         'multiprocessing.sharedctypes.Synchronized[int]'
-    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)  # type: ignore
     connections_total: typing.ClassVar[
         'multiprocessing.sharedctypes.Synchronized[int]'
-    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)
+    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)  # type: ignore
 
     accum: typing.ClassVar[StatsCounters] = StatsCounters(
-        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
-        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),  # type: ignore
+        multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),  # type: ignore
     )
     # No locking nor sharing needed for local stats
     local: typing.ClassVar[LocalStatsCounters] = LocalStatsCounters()
@@ -173,7 +175,7 @@ class StatsManager:
 
 
 # Stats processor, invoked from command line
-async def getServerStats(detailed: bool = False) -> None:
+async def get_server_stats(detailed: bool = False) -> None:
     cfg = config.read()
 
     # Context for local connection (ignores cert hostname)
