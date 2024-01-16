@@ -243,15 +243,14 @@ class TunnelProtocol(asyncio.Protocol):
                     self.clean_timeout()  # Stop timeout
                     logger.info('COMMAND: TEST')
                     self.transport.write(consts.RESPONSE_OK)
-                    self.close_connection()
                     return
                 if command in (consts.COMMAND_STAT, consts.COMMAND_INFO):
+                    self.clean_timeout()  # Stop timeout
                     # This is an stats requests
                     try:
                         self.process_stats(full=command == consts.COMMAND_STAT)
                     except Exception as e:
                         logger.error('ERROR processing stats: %s', e.args[0] if e.args else e)
-                    self.close_connection()
                     return
                 raise Exception('Invalid command')
             except Exception:
@@ -325,6 +324,8 @@ class TunnelProtocol(asyncio.Protocol):
         self.runner(data)  # send data to current runner (command or proxy)
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
+        if exc:
+            logger.error('CONNECTION LOST: %s', exc)
         # Ensure close other side if not server_side
         if self.client:
             self.client.close_connection()
