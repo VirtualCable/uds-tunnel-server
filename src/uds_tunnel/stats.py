@@ -50,13 +50,13 @@ logger = logging.getLogger(__name__)
 class StatsSingleCounter:
     adder: typing.Callable[[int], None]
 
-    def __init__(self, parent: 'StatsManager', for_receiving=True) -> None:
-        if for_receiving:
+    def __init__(self, parent: 'StatsManager', for_receiver: bool=True) -> None:
+        if for_receiver:
             self.adder = parent.add_recv
         else:
             self.adder = parent.add_sent
 
-    def add(self, value: int):
+    def add(self, value: int) -> 'StatsSingleCounter':
         self.adder(value)
         return self
 
@@ -79,10 +79,14 @@ class LocalStatsCounters:
 class StatsManager:
     connections_counter: typing.ClassVar[
         'multiprocessing.sharedctypes.Synchronized[int]'
-    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)  # type: ignore
+    ] = multiprocessing.sharedctypes.Value(
+        ctypes.c_int64, 0
+    )  # type: ignore
     connections_total: typing.ClassVar[
         'multiprocessing.sharedctypes.Synchronized[int]'
-    ] = multiprocessing.sharedctypes.Value(ctypes.c_int64, 0)  # type: ignore
+    ] = multiprocessing.sharedctypes.Value(
+        ctypes.c_int64, 0
+    )  # type: ignore
 
     accum: typing.ClassVar[StatsCounters] = StatsCounters(
         multiprocessing.sharedctypes.Value(ctypes.c_int64, 0),  # type: ignore
@@ -96,7 +100,7 @@ class StatsManager:
     start_time: float  # timestamp, from time.monotonic()
     end_time: float  # timestamp, from time.monotonic()
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.last = self.start_time = self.end_time = self.current_time
 
     @property
@@ -107,7 +111,7 @@ class StatsManager:
     def elapsed_time(self) -> float:
         return self.current_time - self.start_time
 
-    def update(self, force: bool = False):
+    def update(self, force: bool = False) -> None:
         """
         In order to keep stats updated, we will update them only if a certain time has passed
         or if force is True
@@ -134,12 +138,12 @@ class StatsManager:
         self.local.sent += size
         self.update()
 
-    def decrement_connections(self):
+    def decrement_connections(self) -> None:
         # Decrement current runing connections
         with self.connections_counter:
             self.connections_counter.value -= 1
 
-    def increment_connections(self):
+    def increment_connections(self) -> None:
         # Increment current runing connections
         # Also, increment total connections
         with self.connections_counter:
@@ -155,7 +159,7 @@ class StatsManager:
     def as_recv_counter(self) -> 'StatsSingleCounter':
         return StatsSingleCounter(self, True)
 
-    def close(self):
+    def close(self) -> None:
         self.decrement_connections()
         self.end_time = time.monotonic()
         self.update(True)  # Ensure that last values are updated

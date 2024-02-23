@@ -79,7 +79,7 @@ class TunnelProtocol(asyncio.Protocol):
     stats_manager: stats.StatsManager
 
     # If there is a timeout task running
-    timeout_task: typing.Optional[asyncio.Task] = None
+    timeout_task: typing.Optional[asyncio.Task[None]] = None
 
     def __init__(self, owner: 'proxy.Proxy') -> None:
         # If no other side is given, we are the server part
@@ -278,7 +278,7 @@ class TunnelProtocol(asyncio.Protocol):
         self.stats_manager.as_recv_counter.add(len(data))
         self.transport.write(data)
 
-    def close_connection(self):
+    def close_connection(self) -> None:
         try:
             self.clean_timeout()  # If a timeout is set, clean it
             if not self.transport.is_closing():  # Attribute may alreade not be set
@@ -288,7 +288,7 @@ class TunnelProtocol(asyncio.Protocol):
         except Exception as e:  # nosec: best effort
             logger.error('ERROR (%s) closing connection: %s', self.tunnel_id, e)
 
-    def notify_end(self):
+    def notify_end(self) -> None:
         if self.notify_ticket:
             logger.info(
                 'TERMINATED (%s) %s to %s, s:%s, r:%s, t:%s',
@@ -329,7 +329,7 @@ class TunnelProtocol(asyncio.Protocol):
 
         self.cmd = b''
 
-    def data_received(self, data: bytes):
+    def data_received(self, data: bytes) -> None:
         self.runner(data)  # send data to current runner (command or proxy)
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:

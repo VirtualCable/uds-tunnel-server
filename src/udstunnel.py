@@ -39,14 +39,14 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 try:
-    import uvloop  # type: ignore
+    import uvloop
 
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass  # no uvloop support
 
 try:
-    import setproctitle  # type: ignore
+    import setproctitle
 except ImportError:
     setproctitle = None  # type: ignore
 

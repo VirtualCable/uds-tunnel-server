@@ -53,7 +53,7 @@ class TunnelClientProtocol(asyncio.Protocol):
         self.notify_ticket = b''
         self.destination = ('', 0)
 
-    def data_received(self, data: bytes):
+    def data_received(self, data: bytes) -> None:
         self.receiver.send(data)
 
     def connection_made(self, transport: 'asyncio.transports.BaseTransport') -> None:
@@ -68,10 +68,10 @@ class TunnelClientProtocol(asyncio.Protocol):
         except Exception:
             pass
 
-    def send(self, data: bytes):
+    def send(self, data: bytes) -> None:
         self.transport.write(data)
 
-    def close_connection(self):
+    def close_connection(self) -> None:
         try:
             if not self.transport.is_closing():
                 self.transport.close()

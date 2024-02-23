@@ -63,13 +63,13 @@ class Processes:
 
     def __init__(self, process: ProcessType, cfg: config.ConfigurationType) -> None:
         self.children = []
-        self.process = process  # type: ignore
+        self.process = process
         self.cfg = cfg
 
         for _ in range(cfg.workers):
             self.add_child_pid()
 
-    def add_child_pid(self):
+    def add_child_pid(self) -> None:
         own_conn, child_conn = multiprocessing.Pipe()
         task = multiprocessing.Process(
             target=Processes.runner,
@@ -77,7 +77,7 @@ class Processes:
         )
         task.start()
         logger.debug('ADD CHILD PID: %s', task.pid)
-        self.children.append((typing.cast('Connection', own_conn), task, psutil.Process(task.pid)))
+        self.children.append((own_conn, task, psutil.Process(task.pid)))
 
     def best_child(self) -> 'Connection':
         best: typing.Tuple[float, 'Connection'] = (NO_CPU_PERCENT, self.children[0][0])

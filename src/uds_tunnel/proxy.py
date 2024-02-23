@@ -79,7 +79,7 @@ class Proxy:
         try:
             tun = tunnel.TunnelProtocol(self)
             # (connect accepted loop not present on AbastractEventLoop definition < 3.10), that's why we use ignore
-            await loop.connect_accepted_socket(  # type: ignore
+            await loop.connect_accepted_socket(
                 lambda: tun,
                 source,
                 ssl=context,

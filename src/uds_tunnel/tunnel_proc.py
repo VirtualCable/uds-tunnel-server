@@ -39,8 +39,7 @@ import threading  # event for stop notification
 import typing
 
 try:
-    import uvloop  # type: ignore
-
+    import uvloop 
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass  # no uvloop support
@@ -77,12 +76,12 @@ def setup_signal_handlers() -> None:
 async def tunnel_proc_async(pipe: 'Connection', cfg: config.ConfigurationType) -> None:
     loop = asyncio.get_running_loop()
 
-    tasks: typing.List[asyncio.Task] = []
+    tasks: typing.List[asyncio.Task[None]] = []
 
-    def add_autoremovable_task(task: asyncio.Task) -> None:
+    def add_autoremovable_task(task: asyncio.Task[None]) -> None:
         tasks.append(task)
 
-        def remove_task(task: asyncio.Task) -> None:
+        def remove_task(task: asyncio.Task[None]) -> None:
             logger.debug('Removing task %s', task)
             tasks.remove(task)
 
