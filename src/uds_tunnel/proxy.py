@@ -37,7 +37,6 @@ from . import config, tunnel
 
 if typing.TYPE_CHECKING:
     import ssl
-    from multiprocessing.managers import Namespace
 
 logger = logging.getLogger(__name__)
 

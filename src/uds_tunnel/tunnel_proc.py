@@ -45,11 +45,10 @@ except ImportError:
     pass  # no uvloop support
 
 
-from uds_tunnel import config, consts, log, processes, proxy, stats
+from uds_tunnel import config, consts, proxy
 
 if typing.TYPE_CHECKING:
     from multiprocessing.connection import Connection
-    from multiprocessing.managers import Namespace
 
 
 logger = logging.getLogger(__name__)

@@ -35,7 +35,7 @@ import typing
 logger = logging.getLogger(__name__)
 
 if typing.TYPE_CHECKING:
-    from . import stats, tunnel
+    from . import tunnel
 
 
 # Protocol

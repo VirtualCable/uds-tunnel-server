@@ -40,7 +40,6 @@ from . import config
 
 if typing.TYPE_CHECKING:
     from multiprocessing.connection import Connection
-    from multiprocessing.managers import Namespace
 
 logger = logging.getLogger(__name__)
 
