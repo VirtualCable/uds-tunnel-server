@@ -95,7 +95,7 @@ class TestTunnel(IsolatedAsyncioTestCase):
     def test_tunnel_invalid_handshake(self) -> None:
         # Not async test, executed on main thread without event loop
         # Pipe for testing
-        own_conn, other_conn = multiprocessing.Pipe()  # pylint: disable=unused-variable
+        own_conn, _other_conn = multiprocessing.Pipe()  # pylint: disable=unused-variable
 
         # Some random data to send on each test, all invalid
         # 0 bytes will make timeout to be reached

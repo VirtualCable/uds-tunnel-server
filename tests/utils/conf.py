@@ -31,7 +31,7 @@ Author: Adolfo Gómez, dkmaster at dkmon dot com
 import typing
 
 NOTIFY_TICKET = '0123456789cdef01456789abcdebcdef0123456789abcdef'
-UDS_GET_TICKET_RESPONSE = lambda host, port: {
+UDS_GET_TICKET_RESPONSE: typing.Callable[[typing.Any, typing.Any], typing.Any] = lambda host, port: {
     'host': host,
     'port': port,
     'notify': NOTIFY_TICKET,

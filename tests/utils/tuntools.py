@@ -44,8 +44,7 @@ import typing
 import copy
 from unittest import mock
 
-import udstunnel
-from uds_tunnel import config, consts, stats, tunnel, log, tunnel_proc
+from uds_tunnel import config, consts, tunnel, log, tunnel_proc
 
 from . import certs, conf, fixtures, tools
 
@@ -59,7 +58,7 @@ if typing.TYPE_CHECKING:
 def create_config_file(
     listen_host: str,
     listen_port: int,
-    **kwargs,
+    **kwargs: typing.Any,
 ) -> typing.Generator[str, None, None]:
     cert, key, password = certs.selfSignedCert(listen_host, use_password=True)
     # Create the certificate file on /tmp
@@ -85,7 +84,7 @@ def create_config_file(
             'ssl_dhparam': '',
         }
     )
-    values, cfg = fixtures.get_config(  # pylint: disable=unused-variable
+    values, _cfg = fixtures.get_config(
         **values,
     )
     # Write config file
@@ -120,7 +119,7 @@ async def create_tunnel_proc(
     ] = None,
     use_fake_http_server: bool = False,
     # Configuration parameters
-    **kwargs,
+    **kwargs: typing.Any,
 ) -> collections.abc.AsyncGenerator[
     typing.Tuple['config.ConfigurationType', typing.Optional[asyncio.Queue[bytes]]],
     None,
@@ -361,7 +360,7 @@ async def create_fake_broker_server(
 
     async with tools.AsyncTCPServer(
         host=host, port=port, processor=processor, name='create_fake_broker_server'
-    ) as server:  # pylint: disable=unused-variable
+    ):
         try:
             yield requests
         finally:

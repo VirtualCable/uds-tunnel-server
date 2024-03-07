@@ -64,7 +64,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                 '127.0.0.1',
                 13579,  # A port not used by any other test
                 command_timeout=0.1,
-            ) as (cfg, queue):  # pylint: disable=unused-variable
+            ) as (cfg, _queue):  # pylint: disable=unused-variable
                 for i in range(0, 8192, 128):
                     # Set timeout to 1 seconds
                     bad_cmd = bytes(random.randint(0, 255) for _ in range(i))  # nosec:  Some garbage
@@ -93,7 +93,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                 7891,
                 '127.0.0.1',
                 13581,
-            ) as (cfg, queue):  # pylint: disable=unused-variable
+            ) as (cfg, _queue):  # pylint: disable=unused-variable
                 for _ in range(10):  # Several times
                     # On full, we need the handshake to be done, before connecting
                     # Our "test" server will simple "eat" the handshake, but we need to do it
@@ -118,7 +118,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                     server.host,
                     server.port,
                     command_timeout=0.1,
-                ) as (cfg, queue):  # pylint: disable=unused-variable
+                ) as (cfg, _queue):  # pylint: disable=unused-variable
                     for i in range(
                         0, consts.TICKET_LENGTH - 1, 4
                     ):  # All will fail. Any longer will be processed, and mock will return correct don't matter the ticket

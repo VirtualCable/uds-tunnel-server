@@ -3,7 +3,6 @@
         "src"
     ],
     "exclude": [
-        "**/scripts",
         "**/__pycache__",
     ],
     "typeCheckingMode": "strict",

@@ -101,7 +101,7 @@ command_timeout = {command_timeout}
 use_uvloop = {use_uvloop}
 '''
 
-def get_config(**overrides) -> typing.Tuple[typing.Dict[str, typing.Any], config.ConfigurationType]:
+def get_config(**overrides: typing.Any) -> typing.Tuple[typing.Dict[str, typing.Any], config.ConfigurationType]:
     rand_number = random.randint(0, 100)
     values: typing.Dict[str, typing.Any] = {
         'pidfile': f'/tmp/uds_tunnel_{random.randint(0, 100)}.pid',  # Random pid file

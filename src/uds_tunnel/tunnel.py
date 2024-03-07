@@ -104,7 +104,7 @@ class TunnelProtocol(asyncio.Protocol):
         # Tunnel id is get from current timestamp with microseconds, in hex upper case
         self.tunnel_id = hex(int(time.time() * 1000000))[2:].upper()
 
-    def process_open(self) -> None:
+    def handle_open_command(self) -> None:
         # Open Command has the ticket behind it
 
         if len(self.cmd) < consts.TICKET_LENGTH + consts.COMMAND_LENGTH:
@@ -245,7 +245,7 @@ class TunnelProtocol(asyncio.Protocol):
             command = self.cmd[: consts.COMMAND_LENGTH]
             try:
                 if command == consts.COMMAND_OPEN:
-                    self.process_open()
+                    self.handle_open_command()
                     return
                 if command == consts.COMMAND_TEST:
                     self.clean_timeout()  # Stop timeout
