@@ -23,7 +23,7 @@ TICKET_LENGTH = 48
 # Protocol
 class TunnelProtocol(asyncio.Protocol):
     # future to mark eof
-    finished: asyncio.Future
+    finished: asyncio.Future[bool]
     transport: 'asyncio.transports.Transport'
     other_side: 'TunnelProtocol'
     state: int
@@ -63,10 +63,10 @@ class TunnelProtocol(asyncio.Protocol):
 
                 async def open_other_side() -> None:
                     try:
-                        (transport, protocol) = await loop.create_connection(
+                        (_transport, protocol) = await loop.create_connection(
                             lambda: TunnelProtocol(self), 'www.google.com', 80
                         )
-                        self.other_side = typing.cast('TunnelProtocol', protocol)
+                        self.other_side = protocol
                         self.other_side.transport.write(
                             b'GET / HTTP/1.0\r\nHost: www.google.com\r\n\r\n'
                         )
@@ -120,7 +120,7 @@ async def main():
     loop = asyncio.get_running_loop()
 
     # Accepts connections
-    client, addr = sock.accept()
+    client, _addr = sock.accept()
     logger.debug('Accepted connection')
     data = client.recv(4)
     print(data)
