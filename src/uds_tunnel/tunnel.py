@@ -272,9 +272,12 @@ class TunnelProtocol(asyncio.Protocol):
     def do_proxy(self, data: bytes) -> None:
         self.stats_manager.as_sent_counter.add(len(data))
         # do_proxy will only be called if other_side is set to the other side of the tunnel, no None is possible
+        # Sends the data to the other side of the tunnel, that is the connected endpoint
         typing.cast('tunnel_client.TunnelClientProtocol', self.client).send(data)
 
     def send(self, data: bytes) -> None:
+        # Invoked from the other side of the tunnel, on TunnelClientProtocol
+        # as soon as data is received from the connected end
         self.stats_manager.as_recv_counter.add(len(data))
         self.transport.write(data)
 
@@ -333,8 +336,11 @@ class TunnelProtocol(asyncio.Protocol):
         self.runner(data)  # send data to current runner (command or proxy)
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
-        if exc:
-            logger.error('CONNECTION LOST (%s): %s', self.tunnel_id, exc)
+        if exc is not None:
+            if not isinstance(exc,(ConnectionResetError, asyncio.CancelledError)):
+                # Only log if not a normal disconnection by peer
+                # This is a relay, so connection reset by peer is normal
+                logger.error('CONNECTION LOST (%s): %s', self.tunnel_id, exc)
         # Ensure close other side if not server_side
         if self.client:
             self.client.close_connection()

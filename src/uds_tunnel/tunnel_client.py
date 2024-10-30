@@ -61,7 +61,10 @@ class TunnelClientProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
         if exc is not None:
-            logger.error('CLIENT CONNECTION LOST: %s', exc)
+            if not isinstance(exc,(ConnectionResetError, asyncio.CancelledError)):
+                # Only log if not a normal disconnection by peer
+                # This is a relay, so connection reset by peer is normal
+                logger.error('CLIENT CONNECTION LOST: %s', exc)
         # Ensure close other side
         try:
             self.receiver.close_connection()
