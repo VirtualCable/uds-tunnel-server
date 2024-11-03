@@ -404,7 +404,7 @@ async def open_tunnel_client(
         # With uvloop this seems to be not needed, but with asyncio it is.
         # upgrade to ssl
         reader, writer = await asyncio.open_connection(
-            sock=sock, ssl=context, server_hostname=cfg.listen_address
+            sock=sock, ssl=context, server_hostname=cfg.listen_address, ssl_handshake_timeout=1
         )
     try:
         yield reader, writer
