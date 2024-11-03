@@ -33,13 +33,14 @@ import hashlib
 import logging
 import multiprocessing
 import typing
+import dataclasses
 
 from .consts import CONFIGFILE
 
 logger = logging.getLogger(__name__)
 
-
-class ConfigurationType(typing.NamedTuple):
+@dataclasses.dataclass
+class ConfigurationType:
     pidfile: str
     user: str
 
@@ -58,9 +59,7 @@ class ConfigurationType(typing.NamedTuple):
     ssl_min_tls_version: str  # Valid values are 1.2, 1.3 (1.0 and 1.1 are not supported)
     ssl_certificate: str
     ssl_certificate_key: str
-    ssl_password: str
     ssl_ciphers: str
-    ssl_dhparam: str
 
     uds_server: str
     uds_token: str
@@ -77,7 +76,7 @@ class ConfigurationType(typing.NamedTuple):
     def __str__(self) -> str:
         return 'Configuration: \n' + '\n'.join(
             f'{k}={v}'
-            for k, v in self._asdict().items()  # pylint: disable=no-member  # python >=3.8 has _asdict
+            for k, v in dataclasses.asdict(self).items()  # pylint: disable=no-member  # python >=3.8 has _asdict
         )
 
 
@@ -130,9 +129,7 @@ def read(cfg_file: typing.Optional[typing.Union[typing.TextIO, str]] = None) -> 
             ssl_min_tls_version=uds.get('ssl_min_tls_version', '1.2'),
             ssl_certificate=uds['ssl_certificate'],
             ssl_certificate_key=uds.get('ssl_certificate_key', ''),
-            ssl_password=uds.get('ssl_password', ''),
             ssl_ciphers=uds.get('ssl_ciphers'),
-            ssl_dhparam=uds.get('ssl_dhparam'),
             uds_server=uds_server,
             uds_token=uds.get('uds_token', 'unauthorized'),
             uds_timeout=int(uds.get('uds_timeout', '10')),

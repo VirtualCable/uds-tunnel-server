@@ -33,7 +33,7 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 
-from uds_tunnel import config, consts
+from udstunnel import config, consts
 
 logger = logging.getLogger(__name__)
 

@@ -33,7 +33,7 @@ import io
 import string
 import random
 
-from uds_tunnel import config
+from udstunnel import config
 
 TEST_CONFIG='''# Sample UDS tunnel configuration
 
@@ -104,21 +104,21 @@ use_uvloop = {use_uvloop}
 def get_config(**overrides: typing.Any) -> typing.Tuple[typing.Dict[str, typing.Any], config.ConfigurationType]:
     rand_number = random.randint(0, 100)
     values: typing.Dict[str, typing.Any] = {
-        'pidfile': f'/tmp/uds_tunnel_{random.randint(0, 100)}.pid',  # Random pid file
+        'pidfile': f'/tmp/udstunnel_{random.randint(0, 100)}.pid',  # Random pid file
         'user': f'user{random.randint(0, 100)}',  # Random user
         'loglevel': random.choice(['DEBUG', 'INFO', 'WARNING', 'ERROR']),  # Random log level
-        'logfile': f'/tmp/uds_tunnel_{random.randint(0, 100)}.log',  # Random log file
+        'logfile': f'/tmp/udstunnel_{random.randint(0, 100)}.log',  # Random log file
         'logsize': random.randint(0, 100),  # Random log size
         'lognumber': random.randint(0, 100),  # Random log number
         'address': f'{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(0, 255)}.{random.randint(0, 255)}',  # Random address
         'port': random.randint(0, 65535),  # Random port
         'ipv6': random.choice([True, False]),  # Random ipv6
         'workers': random.randint(1, 100),  # Random workers, 0 will return as many as cpu cores
-        'ssl_certificate': f'/tmp/uds_tunnel_{rand_number}.crt',  # Random ssl certificate
-        'ssl_certificate_key': f'/tmp/uds_tunnel_{rand_number}.key',  # Random ssl certificate key
+        'ssl_certificate': f'/tmp/udstunnel_{rand_number}.crt',  # Random ssl certificate
+        'ssl_certificate_key': f'/tmp/udstunnel_{rand_number}.key',  # Random ssl certificate key
         'ssl_password': f'password{random.randint(0, 100)}',  # Random ssl password
         'ssl_ciphers': f'ciphers{random.randint(0, 100)}',  # Random ssl ciphers
-        'ssl_dhparam': f'/tmp/uds_tunnel_{rand_number}.dh',  # Random ssl dhparam
+        'ssl_dhparam': f'/tmp/udstunnel_{rand_number}.dh',  # Random ssl dhparam
         'uds_server': f'https://uds_server{rand_number}/some_path',  # Random uds server
         'uds_token': f'uds_token{"".join(random.choices(string.ascii_uppercase + string.digits, k=32))}',  # Random uds token
         'uds_timeout': random.randint(0, 100),  # Random uds timeout

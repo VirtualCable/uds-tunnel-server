@@ -33,7 +33,7 @@ import asyncio
 import logging
 from unittest import IsolatedAsyncioTestCase
 
-from uds_tunnel import consts
+from udstunnel import consts
 
 from .utils import tuntools, tools
 

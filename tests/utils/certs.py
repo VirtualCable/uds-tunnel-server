@@ -46,7 +46,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 
-def selfsigned_cert(ip: str, use_password: bool = True) -> typing.Tuple[str, str, str]:
+def selfsigned_cert(ip: str, *, use_password: bool = True) -> typing.Tuple[str, str, str]:
     key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
@@ -88,7 +88,7 @@ def selfsigned_cert(ip: str, use_password: bool = True) -> typing.Tuple[str, str
     )
 
 
-def generate_ssl_context() -> typing.Tuple[ssl.SSLContext, str, str]:  # pylint: disable=unused-argument
+def generate_ssl_context(*, use_password: bool = True) -> typing.Tuple[ssl.SSLContext, str, str]:  # pylint: disable=unused-argument
     """Returns an ssl context an the certificate & password for an ip
 
     Args:
@@ -101,7 +101,7 @@ def generate_ssl_context() -> typing.Tuple[ssl.SSLContext, str, str]:  # pylint:
     # First, create server cert and key on temp dir
     tmpdir = tempfile.gettempdir()
     tmpname = secrets.token_urlsafe(32)
-    cert, key, password = selfsigned_cert('127.0.0.1')
+    cert, key, password = selfsigned_cert('127.0.0.1', use_password=use_password)
     cert_file = f'{tmpdir}/{tmpname}.pem'
     with open(cert_file, 'w', encoding='utf-8') as f:
         f.write(key)
@@ -116,7 +116,7 @@ def generate_ssl_context() -> typing.Tuple[ssl.SSLContext, str, str]:  # pylint:
     return ssl_ctx, cert_file, password
 
 @contextlib.contextmanager
-def ssl_context() -> typing.Generator[typing.Tuple[ssl.SSLContext, str], None, None]:
+def ssl_context(*, use_password: bool = True) -> typing.Generator[typing.Tuple[ssl.SSLContext, str], None, None]:
     """Returns an ssl context for an ip
 
     Args:
@@ -126,7 +126,7 @@ def ssl_context() -> typing.Generator[typing.Tuple[ssl.SSLContext, str], None, N
         ssl.SSLContext: ssl context
     """
     # First, create server cert and key on temp dir
-    ssl_ctx, cert_file, _password = generate_ssl_context()  # pylint: disable=unused-variable
+    ssl_ctx, cert_file, _password = generate_ssl_context(use_password=use_password)  # pylint: disable=unused-variable
 
     yield ssl_ctx, cert_file
 

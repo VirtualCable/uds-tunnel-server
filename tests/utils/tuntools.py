@@ -44,7 +44,7 @@ import typing
 import copy
 from unittest import mock
 
-from uds_tunnel import config, consts, tunnel, log, tunnel_proc
+from udstunnel import config, consts, tunnel, log, tunnel_proc
 
 from . import certs, conf, fixtures, tools
 
@@ -60,7 +60,7 @@ def create_config_file(
     listen_port: int,
     **kwargs: typing.Any,
 ) -> typing.Generator[str, None, None]:
-    cert, key, password = certs.selfSignedCert(listen_host, use_password=True)
+    cert, key, _password = certs.selfsigned_cert(listen_host, use_password=False)
     # Create the certificate file on /tmp
     cert_file: str = ''
     with tempfile.NamedTemporaryFile(prefix='cert-', mode='w', delete=False) as f:
@@ -79,7 +79,6 @@ def create_config_file(
             'loglevel': 'DEBUG',
             'ssl_certificate': cert_file,
             'ssl_certificate_key': '',
-            'ssl_password': password,
             'ssl_ciphers': '',
             'ssl_dhparam': '',
         }
@@ -168,7 +167,7 @@ async def create_tunnel_proc(
         @contextlib.asynccontextmanager
         async def provider() -> collections.abc.AsyncGenerator[typing.Optional[asyncio.Queue[bytes]], None]:
             with mock.patch(
-                'uds_tunnel.tunnel.TunnelProtocol._read_from_uds',
+                'udstunnel.tunnel.TunnelProtocol._read_from_uds',
                 new_callable=tools.AsyncMock,
             ) as m:
                 if callable(response):
@@ -300,7 +299,7 @@ async def create_test_tunnel(
                 **kwargs,
             )
             with mock.patch(
-                'uds_tunnel.tunnel.TunnelProtocol._read_from_uds',
+                'udstunnel.tunnel.TunnelProtocol._read_from_uds',
                 new_callable=tools.AsyncMock,
             ) as m:
                 m.return_value = conf.UDS_GET_TICKET_RESPONSE(server.host, server.port)
@@ -435,8 +434,7 @@ async def tunnel_app_runner(
         args = args or ['-t', '-c', config_file]
         process = await asyncio.create_subprocess_exec(
             'python3',
-            '-m',
-            'udstunnel',
+            'udstunnel.py',
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

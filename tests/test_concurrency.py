@@ -34,12 +34,9 @@ import random
 import logging
 from unittest import IsolatedAsyncioTestCase, mock
 
-from uds_tunnel import consts, stats
+from udstunnel import consts, stats
 
 from .utils import tuntools, tools, conf
-
-if typing.TYPE_CHECKING:
-    from uds_tunnel import config
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +63,7 @@ class TestUDSTunnelApp(IsolatedAsyncioTestCase):
 
         async with tools.AsyncTCPServer(
             host=host, port=remote_port, callback=callback, name='client_task'
-        ) as server:  # pylint: disable=unused-variable
+        ) as _server:  # pylint: disable=unused-variable
             # Create a random ticket with valid format
             ticket = tuntools.get_correct_ticket(prefix=f'bX0bwmb{remote_port}bX0bwmb')
             # Open and send handshake
@@ -142,7 +139,7 @@ class TestUDSTunnelApp(IsolatedAsyncioTestCase):
                 fake_broker_port,
                 response=lambda data: conf.UDS_GET_TICKET_RESPONSE(host, extract_port(data)),  # pylint: disable=cell-var-from-loop
             ) as req_queue:
-                if req_queue is None:
+                if req_queue is None:  # pyright: ignore
                     raise AssertionError('req_queue is None')
 
                 async with tuntools.tunnel_app_runner(
@@ -155,7 +152,7 @@ class TestUDSTunnelApp(IsolatedAsyncioTestCase):
                     loglevel='DEBUG',
                     workers=4,
                     command_timeout=16,  # Increase command timeout because heavy load we will create
-                ) as process:  # pylint: disable=unused-variable
+                ) as _process:
                     # Create a "bunch" of clients
                     tasks = [
                         asyncio.create_task(self.client_task(host, tunnel_server_port, remote_port + i, use_tunnel_handshake=True))

@@ -45,7 +45,7 @@ except ImportError:
     pass  # no uvloop support
 
 
-from uds_tunnel import config, consts, proxy
+from udstunnel import config, consts, proxy
 
 if typing.TYPE_CHECKING:
     from multiprocessing.connection import Connection
@@ -110,8 +110,6 @@ async def tunnel_proc_async(pipe: 'Connection', cfg: config.ConfigurationType) -
         }
         if cfg.ssl_certificate_key:
             args['keyfile'] = cfg.ssl_certificate_key
-        if cfg.ssl_password:
-            args['password'] = cfg.ssl_password
 
         context.load_cert_chain(**args)
 
@@ -132,12 +130,7 @@ async def tunnel_proc_async(pipe: 'Connection', cfg: config.ConfigurationType) -
             except Exception as e:
                 logger.exception('Setting ciphers failed: %s. Using defaults', e)
 
-        if cfg.ssl_dhparam:
-            try:
-                context.load_dh_params(cfg.ssl_dhparam)
-            except Exception as e:
-                logger.exception('Loading dhparams failed: %s. Using defaults', e)
-
+        context.set_ecdh_curve('secp384r1')
         try:
             while True:
                 address: typing.Optional[typing.Tuple[str, int]] = ('', 0)

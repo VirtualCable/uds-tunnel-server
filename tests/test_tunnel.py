@@ -34,8 +34,7 @@ import logging
 import multiprocessing
 from unittest import IsolatedAsyncioTestCase, mock
 
-from udstunnel import tunnel_proc
-from uds_tunnel import consts
+from udstunnel import tunnel_proc, consts
 
 from .utils import tuntools
 
@@ -66,7 +65,7 @@ class TestTunnel(IsolatedAsyncioTestCase):
             logger.info('Testing invalid command with %s', bad_cmd)
             async with tuntools.create_test_tunnel(callback=lambda x: None, port=7770, remote_port=54555, command_timeout=0.1) as cfg:
                 logger_mock = mock.MagicMock()
-                with mock.patch('uds_tunnel.tunnel.logger', logger_mock):
+                with mock.patch('udstunnel.tunnel.logger', logger_mock):
                     # Open connection to tunnel
                     async with tuntools.open_tunnel_client(cfg) as (reader, writer):
                         # Send data
@@ -129,7 +128,7 @@ class TestTunnel(IsolatedAsyncioTestCase):
 
         # Patch logger to check that it's not called
         logger_mock = mock.MagicMock()
-        with mock.patch('udstunnel.logger', logger_mock):
+        with mock.patch('udstunnel.log', logger_mock):
             wsock.sendall(consts.HANDSHAKE_V1)
             tunnel_proc.process_connection(rsock, ('host', 'port'), own_conn)
 

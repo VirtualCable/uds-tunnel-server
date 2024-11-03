@@ -51,7 +51,7 @@ except ImportError:
     setproctitle = None  # type: ignore
 
 
-from uds_tunnel import config, consts, log, processes, stats, tunnel_proc
+from udstunnel import config, consts, log, processes, stats, tunnel_proc
 
 logger = logging.getLogger(__name__)
 

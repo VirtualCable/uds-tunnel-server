@@ -59,7 +59,7 @@ def get_free_port(ipv6: bool = False) -> int:
     return port
 
 class AsyncMock(mock.MagicMock):
-    async def __call__(self, *args, **kwargs):  # pylint: disable=invalid-overridden-method
+    async def __call__(self, *args: typing.Any, **kwargs: typing.Any) -> None:  # pylint: disable=invalid-overridden-method
         return super().__call__(*args, **kwargs)
 
 
@@ -85,7 +85,7 @@ class AsyncHttpServer:
         self._server = None
         self._response = response
         if use_ssl:
-            self._ssl_ctx, self._ssl_cert_file, pwd = certs.sslContext()  # pylint: disable=unused-variable
+            self._ssl_ctx, self._ssl_cert_file, _pwd = certs.generate_ssl_context(use_password=False)  # pylint: disable=unused-variable
         else:
             self._ssl_ctx = None
             self._ssl_cert_file = None
@@ -95,7 +95,7 @@ class AsyncHttpServer:
         if self._ssl_cert_file:
             os.unlink(self._ssl_cert_file)
 
-    async def _handle(self, reader, writer) -> None:
+    async def _handle(self, reader: typing.Any, writer: typing.Any) -> None:
         data = await reader.read(2048)
         path: bytes = data.split()[1]
         if self._response is not None:
@@ -118,7 +118,7 @@ class AsyncHttpServer:
             )
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -160,7 +160,7 @@ class AsyncTCPServer:
 
         self.data = b''
 
-    async def _handle(self, reader, writer) -> None:
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         logger.debug('Handling connection for %s', self._name)
         if self._processor is not None:
             await self._processor(reader, writer)
@@ -189,7 +189,7 @@ class AsyncTCPServer:
         )
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: typing.Any, exc_val: typing.Any, exc_tb: typing.Any) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -201,7 +201,7 @@ async def get(url: str) -> str:
         options = {
             'ssl': False,
         }
-        async with session.get(url, **options) as r:
+        async with session.get(url, **options) as r:  # pyright: ignore
             r.raise_for_status()
             return await r.text()
 

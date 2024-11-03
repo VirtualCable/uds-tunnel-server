@@ -35,7 +35,7 @@ import logging
 
 from unittest import IsolatedAsyncioTestCase, mock
 
-from uds_tunnel import tunnel, consts
+from udstunnel import tunnel, consts
 
 from .utils import fixtures
 from .utils import tools, conf
@@ -65,7 +65,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
         # Test some invalid tickets
         # Valid ticket are consts.TICKET_LENGTH bytes long, and must be A-Z, a-z, 0-9
         with mock.patch(
-            'uds_tunnel.tunnel.TunnelProtocol._read_from_uds',
+            'udstunnel.tunnel.TunnelProtocol._read_from_uds',
             new_callable=tools.AsyncMock,
         ) as m:
             m.side_effect = uds_response
@@ -108,7 +108,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
     async def test_notify_end_to_uds_broker(self) -> None:
         _, cfg = fixtures.get_config()
         with mock.patch(
-            'uds_tunnel.tunnel.TunnelProtocol._read_from_uds',
+            'udstunnel.tunnel.TunnelProtocol._read_from_uds',
             new_callable=tools.AsyncMock,
         ) as m:
             m.side_effect = uds_response
@@ -117,7 +117,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
             counter.local.recv = 987654321
 
             ticket = conf.NOTIFY_TICKET.encode()
-            for i in range(0, 100):
+            for _ in range(0, 100):
                 await tunnel.TunnelProtocol.notify_end_to_uds(cfg, ticket, counter)
 
                 self.assertEqual(m.call_args[0][0], cfg)
@@ -160,7 +160,7 @@ class TestTunnelHelpers(IsolatedAsyncioTestCase):
                         '{"result":"ok"}',
                     )
                     # Now, tests _read_from_uds
-                    for i in range(100):
+                    for _ in range(100):
                         ret = await tunnel.TunnelProtocol._read_from_uds(
                             cfg, conf.NOTIFY_TICKET.encode(), 'test', {'param': 'value'}
                         )
