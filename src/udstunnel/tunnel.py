@@ -160,9 +160,11 @@ class TunnelProtocol(asyncio.Protocol):
                 # Resume reading
                 self.transport.resume_reading()
                 # send OK to client
-                self.transport.write(b'OK')
+                self.transport.write(consts.RESPONSE_OK)
                 self.stats_manager.increment_connections()  # Increment connections counters
             except Exception as e:
+                self.transport.resume_reading()
+                self.transport.write(consts.RESPONSE_CONNECT_ERROR)
                 logger.error('CONNECTION FAILED (%s): %s', self.tunnel_id, e)
                 self.close_connection()
 

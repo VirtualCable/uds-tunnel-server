@@ -66,6 +66,7 @@ COMMAND_INFO: typing.Final[bytes] = b'INFO'  # Basic stats, currently same as FU
 RESPONSE_ERROR_TICKET: typing.Final[bytes] = b'ERROR_TICKET'
 RESPONSE_ERROR_COMMAND: typing.Final[bytes] = b'ERROR_COMMAND'
 RESPONSE_ERROR_TIMEOUT: typing.Final[bytes] = b'TIMEOUT'
+RESPONSE_CONNECT_ERROR: typing.Final[bytes] = b'CONNECT_ERROR'
 RESPONSE_FORBIDDEN: typing.Final[bytes] = b'FORBIDDEN'
 
 RESPONSE_OK: typing.Final[bytes] = b'OK'
