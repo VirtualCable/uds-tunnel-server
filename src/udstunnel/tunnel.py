@@ -43,20 +43,23 @@ logger = logging.getLogger(__name__)
 if typing.TYPE_CHECKING:
     from . import proxy
 
+
 # Protocol
 class TunnelProtocol(asyncio.Protocol):
-   
+
     # owner Proxy class
     owner: 'proxy.Proxy'
 
     # Transport and client
     transport: 'asyncio.transports.Transport'
     client: typing.Optional['tunnel_client.TunnelClientProtocol']
-    
+
     # Current state, could be:
     # - do_command: Waiting for command
     # - do_proxy: Proxying data
-    runner: typing.Any  # In fact, typing.Callable[[bytes], None], but mypy complains on checking variables that are callables on classes
+    runner: (
+        typing.Any
+    )  # In fact, typing.Callable[[bytes], None], but mypy complains on checking variables that are callables on classes
     # Command buffer
     cmd: bytes
 
@@ -92,6 +95,9 @@ class TunnelProtocol(asyncio.Protocol):
         self.destination = ('', 0)
         self.tls_version = ''
         self.tls_cipher = ''
+        self.transport = typing.cast(
+            'asyncio.Transport', None
+        )  # Just a hint for mypy, will be set on connection_made
 
         # If other_side is given, we are the client part (that is, the tunnel from us to remote machine)
         # In this case, only do_proxy is used
@@ -100,7 +106,7 @@ class TunnelProtocol(asyncio.Protocol):
         # We start processing command
         # After command, we can process stats or do_proxy, that is the "normal" operation
         self.runner = self.do_command
-        
+
         # Tunnel id is get from current timestamp with microseconds, in hex upper case
         self.tunnel_id = hex(int(time.time() * 1000000))[2:].upper()
 
@@ -126,7 +132,9 @@ class TunnelProtocol(asyncio.Protocol):
 
         async def open_client() -> None:
             try:
-                result = await TunnelProtocol.get_ticket_from_uds(self.owner.cfg, ticket, self.source, self.tunnel_id)
+                result = await TunnelProtocol.get_ticket_from_uds(
+                    self.owner.cfg, ticket, self.source, self.tunnel_id
+                )
             except Exception as e:
                 logger.error('ERROR (%s) %s', self.tunnel_id, e.args[0] if e.args else e)
                 self.transport.write(consts.RESPONSE_ERROR_TICKET)
@@ -238,7 +246,13 @@ class TunnelProtocol(asyncio.Protocol):
 
     def do_command(self, data: bytes) -> None:
         if self.cmd == b'':
-            logger.info('CONNECT (%s) FROM %s (%s/%s)', self.tunnel_id, self.pretty_source(), self.tls_version, self.tls_cipher)
+            logger.info(
+                'CONNECT (%s) FROM %s (%s/%s)',
+                self.tunnel_id,
+                self.pretty_source(),
+                self.tls_version,
+                self.tls_cipher,
+            )
 
         # We have at most self.owner.cfg.command_timeout seconds to receive the command and the ticket if needed
         self.cmd += data
@@ -260,7 +274,9 @@ class TunnelProtocol(asyncio.Protocol):
                     try:
                         self.process_stats(full=command == consts.COMMAND_STAT)
                     except Exception as e:
-                        logger.error('ERROR (%s) processing stats: %s', self.tunnel_id, e.args[0] if e.args else e)
+                        logger.error(
+                            'ERROR (%s) processing stats: %s', self.tunnel_id, e.args[0] if e.args else e
+                        )
                     return
                 raise Exception('Invalid command')
             except Exception:
@@ -282,16 +298,6 @@ class TunnelProtocol(asyncio.Protocol):
         # as soon as data is received from the connected end
         self.stats_manager.as_recv_counter.add(len(data))
         self.transport.write(data)
-
-    def close_connection(self) -> None:
-        try:
-            self.clean_timeout()  # If a timeout is set, clean it
-            if not self.transport.is_closing():  # Attribute may alreade not be set
-                self.transport.close()
-        except AttributeError:  # not initialized transport, fine...
-            pass
-        except Exception as e:  # nosec: best effort
-            logger.error('ERROR (%s) closing connection: %s', self.tunnel_id, e)
 
     def notify_end(self) -> None:
         if self.notify_ticket:
@@ -334,12 +340,21 @@ class TunnelProtocol(asyncio.Protocol):
 
         self.cmd = b''
 
-    def data_received(self, data: bytes) -> None:
-        self.runner(data)  # send data to current runner (command or proxy)
+    def close_connection(self) -> None:
+        try:
+            self.clean_timeout()  # If a timeout is set, clean it
+            if self.transport and not self.transport.is_closing():  # Attribute may alreade not be set
+                self.transport.close()
+
+            # Close client connection
+            if self.client and self.client.transport and not self.client.transport.is_closing():
+                self.client.transport.close()
+        except Exception as e:  # nosec: best effort
+            logger.error('ERROR (%s) closing connection: %s', self.tunnel_id, e)
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
         if exc is not None:
-            if not isinstance(exc,(ConnectionResetError, asyncio.CancelledError)):
+            if not isinstance(exc, (ConnectionResetError, asyncio.CancelledError)):
                 # Only log if not a normal disconnection by peer
                 # This is a relay, so connection reset by peer is normal
                 logger.error('CONNECTION LOST (%s): %s', self.tunnel_id, exc)
@@ -348,6 +363,9 @@ class TunnelProtocol(asyncio.Protocol):
             self.client.close_connection()
 
         self.notify_end()
+
+    def data_received(self, data: bytes) -> None:
+        self.runner(data)  # send data to current runner (command or proxy)
 
     # *****************
     # *    Helpers    *

@@ -42,32 +42,33 @@ if typing.TYPE_CHECKING:
 class TunnelClientProtocol(asyncio.Protocol):
     # Transport and other side of tunnel
     transport: 'asyncio.transports.Transport'
-    receiver: 'tunnel.TunnelProtocol'
+    proxy: 'tunnel.TunnelProtocol'
     destination: typing.Tuple[str, int]
 
     def __init__(self, receiver: 'tunnel.TunnelProtocol') -> None:
         # If no other side is given, we are the server part
         super().__init__()
         # transport is undefined until connection_made is called
-        self.receiver = receiver
+        self.proxy = receiver
         self.notify_ticket = b''
         self.destination = ('', 0)
 
     def data_received(self, data: bytes) -> None:
-        self.receiver.send(data)
+        self.proxy.send(data)
 
     def connection_made(self, transport: 'asyncio.transports.BaseTransport') -> None:
         self.transport = typing.cast('asyncio.transports.Transport', transport)
 
     def connection_lost(self, exc: typing.Optional[Exception]) -> None:
         if exc is not None:
-            if not isinstance(exc,(ConnectionResetError, asyncio.CancelledError)):
+            if not isinstance(exc, (ConnectionResetError, asyncio.CancelledError)):
                 # Only log if not a normal disconnection by peer
                 # This is a relay, so connection reset by peer is normal
                 logger.error('CLIENT CONNECTION LOST: %s', exc)
         # Ensure close other side
         try:
-            self.receiver.close_connection()
+            if self.proxy:
+                self.proxy.close_connection()
         except Exception:
             pass
 
@@ -80,3 +81,9 @@ class TunnelClientProtocol(asyncio.Protocol):
                 self.transport.close()
         except Exception:
             pass  # Ignore errors
+
+        try:
+            if self.proxy and self.proxy.transport and not self.proxy.transport.is_closing():
+                self.proxy.transport.close()
+        except Exception:
+            pass
