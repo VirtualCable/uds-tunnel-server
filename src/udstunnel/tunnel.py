@@ -425,9 +425,13 @@ class TunnelProtocol(asyncio.Protocol):
     async def notify_end_to_uds(
         cfg: config.ConfigurationType, ticket: bytes, stats_mngr: stats.StatsManager
     ) -> None:
-        await TunnelProtocol._read_from_uds(
-            cfg,
-            ticket,
-            'stop',
-            {'sent': str(stats_mngr.local.sent), 'recv': str(stats_mngr.local.recv)},
-        )
+        try:
+            await TunnelProtocol._read_from_uds(
+                cfg,
+                ticket,
+                'stop',
+                {'sent': str(stats_mngr.local.sent), 'recv': str(stats_mngr.local.recv)},
+            )
+        except Exception as e:
+            logger.error('ERROR NOTIFYING END %s: %s', ticket, e)
+            return
