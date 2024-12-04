@@ -345,7 +345,10 @@ class TunnelProtocol(asyncio.Protocol):
             self.clean_timeout()  # If a timeout is set, clean it
             if self.transport and not self.transport.is_closing():  # Attribute may alreade not be set
                 self.transport.close()
+        except Exception as e:  # nosec: best effort
+            logger.error('ERROR (%s) closing connection: %s', self.tunnel_id, e)
 
+        try:
             # Close client connection
             if self.client and self.client.transport and not self.client.transport.is_closing():
                 self.client.transport.close()
