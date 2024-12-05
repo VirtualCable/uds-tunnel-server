@@ -205,6 +205,7 @@ class TunnelProtocol(asyncio.Protocol):
         if passwd.decode(errors='ignore') != self.owner.cfg.secret:
             # Invalid password
             self.transport.write(consts.RESPONSE_FORBIDDEN)
+            self.transport.close()
             return
 
         data = self.stats_manager.get_stats()
@@ -212,6 +213,13 @@ class TunnelProtocol(asyncio.Protocol):
         for v in data:
             logger.debug('SENDING (%s) %s', self.tunnel_id, v)
             self.transport.write(v.encode() + b'\n')
+
+        self.transport.close()
+        
+        # Increment connections counters.
+        # Concurrent connections will be decremented on connection manager close call
+        # but global counter will be kept incremented as it should
+        self.stats_manager.increment_connections()  
 
     async def timeout(self, wait: float) -> None:
         """Timeout can only occur while waiting for a command (or OPEN command ticket)."""
