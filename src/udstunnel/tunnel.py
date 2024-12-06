@@ -215,11 +215,6 @@ class TunnelProtocol(asyncio.Protocol):
             self.transport.write(v.encode() + b'\n')
 
         self.transport.close()
-        
-        # Increment connections counters.
-        # Concurrent connections will be decremented on connection manager close call
-        # but global counter will be kept incremented as it should
-        self.stats_manager.increment_connections()  
 
     async def timeout(self, wait: float) -> None:
         """Timeout can only occur while waiting for a command (or OPEN command ticket)."""
@@ -275,6 +270,7 @@ class TunnelProtocol(asyncio.Protocol):
                     self.clean_timeout()  # Stop timeout
                     logger.info('COMMAND (%s): TEST', self.tunnel_id)
                     self.transport.write(consts.RESPONSE_OK)
+                    self.transport.close()
                     return
                 if command in (consts.COMMAND_STAT, consts.COMMAND_INFO):
                     self.clean_timeout()  # Stop timeout

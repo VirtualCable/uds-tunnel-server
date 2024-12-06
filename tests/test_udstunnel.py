@@ -33,7 +33,7 @@ import asyncio
 import logging
 from unittest import IsolatedAsyncioTestCase
 
-from udstunnel import consts
+from udstunnel import consts, stats
 
 from .utils import tuntools, tools
 
@@ -44,6 +44,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         # Disable logging os slow tests
         logging.disable(logging.WARNING)
+        stats.StatsManager.reset()
         return await super().asyncSetUp()
 
     async def test_run_app_help(self) -> None:
@@ -64,7 +65,10 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                 '127.0.0.1',
                 13579,  # A port not used by any other test
                 command_timeout=0.1,
-            ) as (cfg, _queue):  # pylint: disable=unused-variable
+            ) as (
+                cfg,
+                _queue,
+            ):  # pylint: disable=unused-variable
                 for i in range(0, 8192, 128):
                     # Set timeout to 1 seconds
                     bad_cmd = bytes(random.randint(0, 255) for _ in range(i))  # nosec:  Some garbage
@@ -85,6 +89,10 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                         else:
                             self.assertEqual(data, consts.RESPONSE_ERROR_TIMEOUT)
 
+        # Do not count this, as it's not a valid connection
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
+
     async def test_tunnel_test(self) -> None:
         for host in ('127.0.0.1', '::1'):
             # Remote is not really important in this tests, will return ok before using it (this is a TEST command, not OPEN)
@@ -93,7 +101,10 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                 7891,
                 '127.0.0.1',
                 13581,
-            ) as (cfg, _queue):  # pylint: disable=unused-variable
+            ) as (
+                cfg,
+                _queue,
+            ):  # pylint: disable=unused-variable
                 for _ in range(10):  # Several times
                     # On full, we need the handshake to be done, before connecting
                     # Our "test" server will simple "eat" the handshake, but we need to do it
@@ -107,6 +118,10 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                         data = await creader.read(1024)
                         self.assertEqual(data, consts.RESPONSE_OK)
 
+        # Test command does not count as a connection
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
+
     async def test_tunnel_fail_open(self) -> None:
         for host in ('127.0.0.1', '::1'):
             # Remote is NOT important in this tests
@@ -118,7 +133,10 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                     server.host,
                     server.port,
                     command_timeout=0.1,
-                ) as (cfg, _queue):  # pylint: disable=unused-variable
+                ) as (
+                    cfg,
+                    _queue,
+                ):  # pylint: disable=unused-variable
                     for i in range(
                         0, consts.TICKET_LENGTH - 1, 4
                     ):  # All will fail. Any longer will be processed, and mock will return correct don't matter the ticket
@@ -138,6 +156,9 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                             # Read response
                             data = await creader.read(1024)
                             self.assertEqual(data, consts.RESPONSE_ERROR_TIMEOUT)
+
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
 
     async def test_tunnel_open(self) -> None:
         for host in ('127.0.0.1', '::1'):
@@ -206,7 +227,9 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                                 # One single write will ensure all data is on same packet
                                 test_str = (
                                     b'Some Random Data'
-                                    + bytes(random.randint(0, 255) for _ in range(8192))  # nosec: some random data, not used for security
+                                    + bytes(
+                                        random.randint(0, 255) for _ in range(8192)
+                                    )  # nosec: some random data, not used for security
                                     + b'STREAM_END'
                                 )
                                 # Clean received data
@@ -220,6 +243,11 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                                 # Wait for callback to be invoked
                                 await callback_invoked.wait()
                                 self.assertEqual(received, test_str)
+
+        # Counts 16 connections fo 2 tunnel hosts for 2 server hosts
+        # Concurrent should be 0, but connections total should be 16 * 2 * 2
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 16 * 2 * 2)
 
     async def test_tunnel_no_remote(self) -> None:
         for host in ('127.0.0.1', '::1'):
@@ -244,7 +272,13 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                         await cwriter.drain()
                         # Read response
                         data = await creader.read(1024)
-                        self.assertEqual(data, b'', f'Tunnel host: {tunnel_host}, server host: {host}')
+                        self.assertEqual(
+                            data, b'CONNECT_ERROR', f'Tunnel host: {tunnel_host}, server host: {host}'
+                        )
+
+        # Do not count this, as it's not a valid connection
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
 
     async def test_tunnel_invalid_ssl_handshake(self) -> None:
         for tunnel_host in ('127.0.0.1', '::1'):
@@ -254,10 +288,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
                 'localhost',
                 17222,  # Any non used port will do the trick
             ) as (cfg, _):
-                async with tuntools.open_tunnel_client(cfg, skip_ssl=True) as (
-                    creader,
-                    cwriter
-                ):
+                async with tuntools.open_tunnel_client(cfg, skip_ssl=True) as (creader, cwriter):
                     cwriter.write(consts.COMMAND_OPEN)  # Will fail, not ssl connection, this is invalid in fact
 
                     await cwriter.drain()
@@ -267,3 +298,7 @@ class TestUDSTunnelMainProc(IsolatedAsyncioTestCase):
 
                     self.assertEqual(data, b'')
                     self.assertTrue(creader.at_eof())
+                    
+        # Do not count this, as it's not a valid connection
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)

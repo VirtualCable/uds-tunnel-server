@@ -99,9 +99,12 @@ class StatsManager:
     last: float  # timestamp, from time.monotonic()
     start_time: float  # timestamp, from time.monotonic()
     end_time: float  # timestamp, from time.monotonic()
+    
+    incremented: bool
 
     def __init__(self) -> None:
         self.last = self.start_time = self.end_time = self.current_time
+        self.incremented = False
 
     @property
     def current_time(self) -> float:
@@ -146,11 +149,12 @@ class StatsManager:
     def increment_connections(self) -> None:
         # Increment current runing connections
         # Also, increment total connections
+        self.incremented = True
         with self.connections_counter:
             self.connections_counter.value += 1
         with self.connections_total:
             self.connections_total.value += 1
-
+            
     @property
     def as_sent_counter(self) -> 'StatsSingleCounter':
         return StatsSingleCounter(self, False)
@@ -160,9 +164,10 @@ class StatsManager:
         return StatsSingleCounter(self, True)
 
     def close(self) -> None:
-        self.decrement_connections()
-        self.end_time = time.monotonic()
-        self.update(True)  # Ensure that last values are updated
+        if self.incremented:
+            self.decrement_connections()
+            self.end_time = time.monotonic()
+            self.update(True)  # Ensure that last values are updated
 
     @staticmethod
     def get_stats() -> typing.Generator['str', None, None]:
@@ -176,6 +181,13 @@ class StatsManager:
                 str(StatsManager.accum.recv.value),
             ]
         )
+        
+    @staticmethod
+    def reset() -> None:
+        StatsManager.connections_counter.value = 0
+        StatsManager.connections_total.value = 0
+        StatsManager.accum.sent.value = 0
+        StatsManager.accum.recv.value = 0
 
 
 # Stats processor, invoked from command line

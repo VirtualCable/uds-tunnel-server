@@ -34,7 +34,7 @@ import logging
 import multiprocessing
 from unittest import IsolatedAsyncioTestCase, mock
 
-from udstunnel import tunnel_proc, consts
+from udstunnel import stats, tunnel_proc, consts
 
 from .utils import tuntools
 
@@ -115,6 +115,9 @@ class TestTunnel(IsolatedAsyncioTestCase):
             logger_mock.error.assert_called_once()
             # And ensure that error contains 'HANDSHAKE invalid'
             self.assertIn('HANDSHAKE invalid', logger_mock.error.call_args[0][0])
+            
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
 
     def test_valid_handshake(self) -> None:
         # Not async test
@@ -137,3 +140,6 @@ class TestTunnel(IsolatedAsyncioTestCase):
         # and that other_conn has received a ('host', 'port') tuple
         # recv()[0] will be a copy of the socket, we don't care about it
         self.assertEqual(other_conn.recv()[1], ('host', 'port'))
+
+        self.assertEqual(stats.StatsManager.connections_counter.value, 0)
+        self.assertEqual(stats.StatsManager.connections_total.value, 0)
