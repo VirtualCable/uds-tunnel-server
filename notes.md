@@ -26,3 +26,5 @@ The workflow will be:
 Notes:
   Tunnel connects to broker, authenticated, to validate the ticket, get conneciton data, shared secret, nonce, etc.. The client will never sent these data directly to the tunnel server, only the ticket_id.
   
+Keys:
+    - We can use HKDF to derive the nonces, 2 keys (for assymetric encryption) from the shared secret generated using KEM.
