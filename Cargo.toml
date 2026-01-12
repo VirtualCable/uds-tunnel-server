@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/testing"]
+members = ["crates/shared","crates/testing"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -47,24 +47,7 @@ gettext = "0.4.0"
 rust-embed = "8.9.0"
 sys-locale = "0.3.2"
 
-# Graphics/UI
-eframe = { version = "0.33.2", features = ["glow"] }
-image = { version = "0.25.8", features = ["png"] }
-winit = { version = "0.30.12" }
-
-# Sound
-cpal = "0.17.1"
-
-# For opening links
-open = "5.3"
-
-# ML-DSA verification
-libcrux-ml-dsa = "0.0.4"
-libcrux-ml-kem = "0.0.4"
-
-# key derivation
-hkdf = "0.12"
-sha2 = "0.10"
+# Encryption
 aes-gcm = "0.10.3"
 
 # regex
