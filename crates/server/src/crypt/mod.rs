@@ -16,13 +16,12 @@ impl Crypt {
         Crypt { cipher, counter: 0 }
     }
 
-    /// Increments and returns the current counter value.
+    /// Increments and returns the internal counter.
     /// Note: the encrypt method automatically calls this method to get a unique counter for each encryption.
     /// Returns the incremented counter value.
     pub fn next_counter(&mut self) -> u64 {
-        let counter = self.counter;
         self.counter += 1;
-        counter
+        self.counter
     }
 
     /// Returns the current counter value without incrementing it.
@@ -67,6 +66,15 @@ impl Crypt {
         length: u16,
         buffer: &'a mut types::PacketBuffer,
     ) -> Result<&'a [u8]> {
+        if counter < self.counter {
+            return Err(anyhow::anyhow!(
+                "replay attack detected: counter {} < current {}",
+                counter,
+                self.counter
+            ));
+        }
+        self.counter = counter; // Update to last used counter
+
         let len = length as usize;
         let buffer = buffer.as_mut_slice();
 
