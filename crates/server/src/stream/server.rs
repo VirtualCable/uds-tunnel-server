@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-// TODO: Remove allow dead_code when the module is fully implemented
-
 use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::{
@@ -179,7 +176,7 @@ impl TunnelServerOutboundStream {
         let encrypted = self.crypt.encrypt(chunk.len(), &mut self.buffer)?;
 
         // Header
-        let counter = self.crypt.get_counter();
+        let counter = self.crypt.current_seq();
         let length = encrypted.len() as u16;
 
         let mut header = [0u8; HEADER_LENGTH];
@@ -207,42 +204,92 @@ impl TunnelServerOutboundStream {
     }
 }
 
-pub fn run_tunnel_stream(
+/// Runs a tunnel stream with inbound and outbound processing
+/// # Arguments
+/// * `stream` - The TCP stream to handle
+/// * `inbound_crypt` - Crypt object for inbound data decryption
+/// * `inbound_channel` - Receiver channel for inbound data (from Server side)
+/// * `outbound_crypt` - Crypt object for outbound data encryption
+/// * `outbound_channel` - Sender channel for outbound data (to Server side)
+/// * `stop` - Trigger to stop the stream
+/// # Returns
+/// Nothing, runs indefinitely until stopped
+///
+/// Note: "Server side" is the side that communicates with the remote Server
+pub struct TunnelServerStream {
     stream: TcpStream,
     inbound_crypt: Crypt,
+    inbound_channel: Receiver<Vec<u8>>,
     outbound_crypt: Crypt,
+    outbound_channel: Sender<Vec<u8>>,
     stop: Trigger,
-) {
-    let (read_half, write_half) = stream.into_split();
-    let (sender, receiver) = flume::unbounded();
-    let local_stop = Trigger::new();
+}
 
-    let mut inbound =
-        TunnelServerInboundStream::new(read_half, inbound_crypt, sender, local_stop.clone());
-
-    let mut outbound =
-        TunnelServerOutboundStream::new(write_half, outbound_crypt, receiver, local_stop.clone());
-
-    tokio::spawn(async move {
-        if let Err(e) = inbound.run().await {
-            log::error!("Inbound stream error: {:?}", e);
+impl TunnelServerStream {
+    pub fn new(
+        stream: TcpStream,
+        inbound_crypt: Crypt,
+        inbound_channel: Receiver<Vec<u8>>,
+        outbound_crypt: Crypt,
+        outbound_channel: Sender<Vec<u8>>,
+        stop: Trigger,
+    ) -> Self {
+        Self {
+            stream,
+            inbound_crypt,
+            inbound_channel,
+            outbound_crypt,
+            outbound_channel,
+            stop,
         }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = outbound.run().await {
-            log::error!("Outbound stream error: {:?}", e);
-        }
-    });
+    }
 
-    // Global or local stop can stop both inbound and outbound streams
-    tokio::spawn(async move {
-        tokio::select! {
-            _ = stop.async_wait() => {
-                local_stop.set();
+    pub async fn run(self) {
+        let Self {
+            stream,
+            inbound_crypt,
+            inbound_channel,
+            outbound_crypt,
+            outbound_channel,
+            stop,
+        } = self;
+
+        let (read_half, write_half) = stream.into_split();
+        let local_stop = Trigger::new();
+
+        let mut inbound = TunnelServerInboundStream::new(
+            read_half,
+            inbound_crypt,
+            outbound_channel,
+            local_stop.clone(),
+        );
+
+        let mut outbound = TunnelServerOutboundStream::new(
+            write_half,
+            outbound_crypt,
+            inbound_channel,
+            local_stop.clone(),
+        );
+
+        tokio::spawn(async move {
+            if let Err(e) = inbound.run().await {
+                log::error!("Inbound stream error: {:?}", e);
             }
-            _ = local_stop.async_wait() => {
-                // do nothing, just wait for local stop
+        });
+
+        tokio::spawn(async move {
+            if let Err(e) = outbound.run().await {
+                log::error!("Outbound stream error: {:?}", e);
             }
-        }
-    });
+        });
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.async_wait() => {
+                    local_stop.set();
+                }
+                _ = local_stop.async_wait() => {}
+            }
+        });
+    }
 }

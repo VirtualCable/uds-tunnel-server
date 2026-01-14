@@ -2,6 +2,7 @@ pub mod crypt;
 pub mod log;
 pub mod stream;
 pub mod system;
+pub mod proxy_v2_protocol;
 
 
 // TODO: implement real main

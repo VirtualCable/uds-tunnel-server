@@ -19,3 +19,6 @@ tokio = { workspace = true }
 
 # channel
 flume = { workspace = true }
+
+[dev-dependencies]
+tokio-test = { workspace = true }
