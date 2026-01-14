@@ -93,7 +93,7 @@ impl<'a> fmt::MakeWriter<'a> for RotatingWriter {
             .append(true)
             .open(&self.path)
             .unwrap_or_else(|_e| {
-                let temp_path = std::env::temp_dir().join("udsactor-fallback.log");
+                let temp_path = std::env::temp_dir().join("udstunnel-fallback.log");
                 OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -112,8 +112,8 @@ pub enum LogType {
 impl std::fmt::Display for LogType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LogType::Tunnel => write!(f, "launcher"),
-            LogType::Tests => write!(f, "launcher-tests"),
+            LogType::Tunnel => write!(f, "tunnel"),
+            LogType::Tests => write!(f, "tunnel-tests"),
         }
     }
 }
@@ -121,7 +121,7 @@ impl std::fmt::Display for LogType {
 // Our log system wil also hook panics to log them
 pub fn setup_panic_hook() {
     panic::set_hook(Box::new(|info| {
-        let temp_log = std::env::temp_dir().join("udslauncher-panic.log");
+        let temp_log = std::env::temp_dir().join("udstunnel-panic.log");
         log::error!("Panic occurred, writing details to {:?}", temp_log);
         let mut f = OpenOptions::new()
             .create(true)
@@ -148,10 +148,10 @@ pub fn setup_panic_hook() {
         // Backtrace
         let bt = Backtrace::capture();
 
-        writeln!(f, "Panic occurred at {}: {}", loc, msg).ok();
+        writeln!(f, "Guru Meditation :{}: {}", loc, msg).ok();
         writeln!(f, "Backtrace:\n{:?}", bt).ok();
 
-        error!("Guru Meditation (😕): {} at {}", msg, loc);
+        error!("Guru Meditation: {} at {}", msg, loc);
         error!("Backtrace:\n{:?}", bt);
         // Exit process
         std::process::exit(1);
@@ -264,7 +264,7 @@ mod tests {
         let temp_dir = std::env::temp_dir();
         unsafe { std::env::set_var("UDSTUNNEL_TESTS_LOG_PATH", &temp_dir) }
         setup_logging("debug", LogType::Tests);
-        let log_file = temp_dir.join("udsactor-tests.log");
+        let log_file = temp_dir.join("udstunnel-tests.log");
         // Write enough logs to exceed 16MB
         for i in 0..20000 {
             info!("Log entry number: {} - {}", i, "A".repeat(1024)); // Each entry ~1KB
@@ -272,7 +272,7 @@ mod tests {
         // Check if log file exists
         assert!(log_file.exists());
         // Check if rotated file exists
-        let rotated_file = temp_dir.join("udsactor-tests.log.1");
+        let rotated_file = temp_dir.join("udstunnel-tests.log.1");
         assert!(rotated_file.exists()); // Rotated file should exist
         // Check if log file has been rotated
         let meta = fs::metadata(&log_file).unwrap();
