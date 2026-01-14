@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/shared","crates/testing"]
+members = ["crates/server"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -31,6 +31,9 @@ tokio = { version = "1.49.0", features = [
 ] }
 futures = "0.3.31"
 async-trait = "0.1.89"
+
+# channel
+flume = "0.12.0"
 
 # HTTP client
 reqwest = { version = "0.13.1", features = ["json", "rustls", "system-proxy"] }
