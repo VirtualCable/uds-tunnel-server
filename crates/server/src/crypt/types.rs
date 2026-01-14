@@ -25,13 +25,33 @@ impl PacketBuffer {
         if size <= consts::MAX_PACKET_SIZE as usize {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Buffer too small: {} < {}", self.buffer.len(), size))
+            Err(anyhow::anyhow!(
+                "Buffer too small: {} < {}",
+                self.buffer.len(),
+                size
+            ))
         }
+    }
+
+    pub fn copy_from_slice(&mut self, data: &[u8]) -> Result<()> {
+        let len = data.len();
+        self.ensure_capacity(len)?;
+        self.buffer[..len].copy_from_slice(data);
+        Ok(())
     }
 }
 
 impl Default for PacketBuffer {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<&[u8]> for PacketBuffer {
+    fn from(data: &[u8]) -> Self {
+        let mut packet_buffer = PacketBuffer::new();
+        let len = data.len().min(consts::MAX_PACKET_SIZE as usize);
+        packet_buffer.buffer[..len].copy_from_slice(&data[..len]);
+        packet_buffer
     }
 }
