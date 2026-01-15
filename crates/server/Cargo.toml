@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 # utilities
 anyhow = { workspace = true }
+num_enum = { workspace = true }
+
+# Encryption
 aes-gcm = { workspace = true }
 
 # Logging
