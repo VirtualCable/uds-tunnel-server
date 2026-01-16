@@ -9,6 +9,7 @@ use tokio::{
 };
 
 use crate::{
+    consts::SERVER_RECOVERY_GRACE_SECS,  // global crate consts
     crypt::{
         Crypt, build_header,
         consts::{CRYPT_PACKET_SIZE, HEADER_LENGTH},
@@ -16,6 +17,7 @@ use crate::{
         types::PacketBuffer,
     },
     log,
+    session::{SessionId, get_session_manager},
     system::trigger::Trigger,
 };
 
@@ -217,57 +219,60 @@ impl TunnelServerOutboundStream {
 ///
 /// Note: "Server side" is the side that communicates with the remote Server
 pub struct TunnelServerStream {
+    session_id: SessionId,
     stream: TcpStream,
     inbound_crypt: Crypt,
-    inbound_channel: Receiver<Vec<u8>>,
     outbound_crypt: Crypt,
-    outbound_channel: Sender<Vec<u8>>,
-    stop: Trigger,
 }
 
 impl TunnelServerStream {
     pub fn new(
+        session_id: SessionId,
         stream: TcpStream,
         inbound_crypt: Crypt,
-        inbound_channel: Receiver<Vec<u8>>,
         outbound_crypt: Crypt,
-        outbound_channel: Sender<Vec<u8>>,
-        stop: Trigger,
     ) -> Self {
         Self {
+            session_id,
             stream,
             inbound_crypt,
-            inbound_channel,
             outbound_crypt,
-            outbound_channel,
-            stop,
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self) -> Result<()> {
         let Self {
+            session_id,
             stream,
             inbound_crypt,
-            inbound_channel,
             outbound_crypt,
-            outbound_channel,
-            stop,
         } = self;
 
         let (read_half, write_half) = stream.into_split();
+        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
+        {
+            (
+                session.get_stop_trigger(),
+                session.get_client_channels().await?,
+            )
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            return Ok(());
+        };
+
         let local_stop = Trigger::new();
 
         let mut inbound = TunnelServerInboundStream::new(
             read_half,
             inbound_crypt,
-            outbound_channel,
+            channels.0,
             local_stop.clone(),
         );
 
         let mut outbound = TunnelServerOutboundStream::new(
             write_half,
             outbound_crypt,
-            inbound_channel,
+            channels.1,
             local_stop.clone(),
         );
 
@@ -284,12 +289,44 @@ impl TunnelServerStream {
         });
 
         tokio::spawn(async move {
+            // Notify starting server side
+            if let Err(e) = get_session_manager().start_server(&session_id).await {
+                log::error!("Failed to start server session {:?}: {:?}", session_id, e);
+                local_stop.set();
+                // Note: Server side does not trigger stop of the session on failure
+                //       as it is recoverable.
+                return;
+            }
             tokio::select! {
                 _ = stop.async_wait() => {
                     local_stop.set();
                 }
                 _ = local_stop.async_wait() => {}
             }
+            // Notify stopping server side
+            if let Err(e) = get_session_manager().stop_server(&session_id).await {
+                log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
+            }
+
+            // Insert a task that, after a couple of seconds, sets the stop trigger
+            // if the session already exists and the server is not running
+            tokio::spawn({
+                let stop = stop.clone();
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
+                        .await;
+                    if let Some(session) = get_session_manager().get_session(&session_id)
+                        && !session.is_server_running()
+                    {
+                        log::info!(
+                            "Server side not running for session {:?}, setting stop trigger",
+                            session_id
+                        );
+                        stop.set();
+                    }
+                }
+            });
         });
+        Ok(())
     }
 }

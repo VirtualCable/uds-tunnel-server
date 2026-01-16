@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
+use anyhow::Result;
+
 use super::session_id::{Session, SessionId};
 
 pub static SESSION_MANAGER: OnceLock<SessionManager> = OnceLock::new();
@@ -32,38 +34,42 @@ impl SessionManager {
         sessions.remove(id);
     }
 
-    pub fn start_server(&self, id: &SessionId) {
+    pub async fn start_server(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.start_server();
+            session.start_server().await?;
         }
+        Ok(())
     }
 
-    pub fn stop_server(&self, id: &SessionId) {
+    pub async fn stop_server(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.stop_server();
+            session.stop_server().await?;
             // Alreasy knows that server is not running
             if !session.is_client_running() {
                 self.remove_session(id);
             }
         }
+        Ok(())
     }
 
     // Client is the outgoing connection to the remote server
     // This side is not recoverable, so if it stops, the session is finished
-    pub fn start_client(&self, id: &SessionId) {
+    pub async fn start_client(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.start_client();
+            session.start_client().await?;
         }
+        Ok(())
     }
 
-    pub fn stop_client(&self, id: &SessionId) {
+    pub async fn stop_client(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.stop_client();
-            // Remove the session. It's if fien even if any check against
+            session.stop_client().await?;
+            // Remove the session. It's fine even if any check against
             // this session is done after this point.
             // Note: drop of session will invoke trigger stop
             self.remove_session(id);
         }
+        Ok(())
     }
 
     pub fn store_sequence_numbers(&self, id: &SessionId, seq_tx: u64, seq_rx: u64) {
@@ -114,7 +120,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_running() {
         let session = Session::new([0u8; 32], Trigger::new());
-        session.start_server();
+        session.start_server().await.unwrap();
         assert!(session.is_server_running());
         assert!(!session.is_client_running());
     }
@@ -158,13 +164,13 @@ mod tests {
             assert_eq!(sess.is_client_running(), expected_client_is_running);
         }
         manager.add_session(session_id, session);
-        manager.start_server(&session_id);
+        manager.start_server(&session_id).await.unwrap();
         test_state(&manager, &session_id, true, false);
-        manager.start_client(&session_id);
+        manager.start_client(&session_id).await.unwrap();
         test_state(&manager, &session_id, true, true);
-        manager.stop_server(&session_id);
+        manager.stop_server(&session_id).await.unwrap();
         test_state(&manager, &session_id, false, true);
-        manager.stop_client(&session_id);
+        manager.stop_client(&session_id).await.unwrap();
         assert!(manager.get_session(&session_id).is_none());
     }
 
@@ -175,24 +181,23 @@ mod tests {
 
         manager.add_session(id, Session::new([0u8; 32], Trigger::new()));
         // Start servers first
-        manager.start_server(&id);
-        manager.start_client(&id);
+        manager.start_server(&id).await.unwrap();
+        manager.start_client(&id).await.unwrap();
 
-        manager.stop_server(&id);
+        manager.stop_server(&id).await.unwrap();
         assert!(manager.get_session(&id).is_some());
 
-        manager.stop_client(&id);
+        manager.stop_client(&id).await.unwrap();
         assert!(manager.get_session(&id).is_none());
 
         // Any aditional stops should be no-ops
-        manager.stop_server(&id);
-        manager.stop_client(&id);
+        manager.stop_server(&id).await.unwrap();
+        manager.stop_client(&id).await.unwrap();
     }
 
     #[tokio::test]
     async fn test_concurrent_access() {
         use std::sync::Arc;
-        use std::thread;
 
         let manager = Arc::new(SessionManager::new());
         let session_id = SessionId::new([42u8; TICKET_LENGTH]);
@@ -203,10 +208,10 @@ mod tests {
 
         for _ in 0..20 {
             let manager = manager.clone();
-            handles.push(thread::spawn(move || {
+            handles.push(tokio::task::spawn(async move {
                 for _ in 0..1000 {
-                    manager.start_server(&session_id);
-                    manager.start_client(&session_id);
+                    manager.start_server(&session_id).await.unwrap();
+                    manager.start_client(&session_id).await.unwrap();
                     manager.store_sequence_numbers(&session_id, 10, 20);
                     let _ = manager.get_sequence_numbers(&session_id);
                 }
@@ -214,7 +219,7 @@ mod tests {
         }
 
         for h in handles {
-            h.join().unwrap();
+            h.await.unwrap();
         }
 
         let seq = manager.get_sequence_numbers(&session_id);

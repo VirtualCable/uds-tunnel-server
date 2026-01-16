@@ -9,7 +9,7 @@ pub(super) struct SessionProxyHandle {
 }
 
 impl SessionProxyHandle {
-    pub(super) async fn attach_server(&self) -> Result<ServerEndpoints> {
+    pub async fn attach_server(&self) -> Result<ServerEndpoints> {
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = ProxyCommand::AttachServer { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
@@ -17,7 +17,13 @@ impl SessionProxyHandle {
         Ok(endpoints)
     }
 
-    pub(super) async fn attach_client(&self) -> Result<ClientEndpoints> {
+    pub async fn detach_server(&self) -> Result<()> {
+        let cmd = ProxyCommand::DetachServer;
+        self.ctrl_tx.send_async(cmd).await?;
+        Ok(())
+    }
+
+    pub async fn attach_client(&self) -> Result<ClientEndpoints> {
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = ProxyCommand::AttachClient { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
@@ -29,6 +35,7 @@ impl SessionProxyHandle {
 enum ProxyCommand {
     AttachServer { reply: Sender<ServerEndpoints> },
     AttachClient { reply: Sender<ClientEndpoints> },
+    DetachServer,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +108,9 @@ impl Proxy {
                             let endpoints = ClientEndpoints { tx, rx };
                             client_channels = Some(endpoints.clone());
                             let _ = reply.send(endpoints);
+                        }
+                        Ok(ProxyCommand::DetachServer) => {
+                            server_channels = None;
                         }
                         Err(_) => {
                             break;

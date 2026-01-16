@@ -1,5 +1,6 @@
 use std::sync::{RwLock, atomic::AtomicBool};
 
+use anyhow::Result;
 use flume::{Receiver, Sender};
 
 use super::proxy::{Proxy, SessionProxyHandle};
@@ -44,31 +45,33 @@ impl Session {
         }
     }
 
-    pub async fn get_server_channels(&self) -> Option<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
-        if let Ok(endpoints) = self.session_proxy.attach_server().await {
-            Some((endpoints.tx, endpoints.rx))
-        } else {
-            None
-        }
+    pub async fn get_server_channels(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
+        let endpoints = 
+        self.session_proxy
+            .attach_server()
+            .await?;
+        Ok((endpoints.tx, endpoints.rx))
     }
 
-    pub async fn get_client_channels(&self) -> Option<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
-        if let Ok(endpoints) = self.session_proxy.attach_client().await {
-            Some((endpoints.tx, endpoints.rx))
-        } else {
-            None
-        }
+    pub async fn get_client_channels(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
+        let endpoints = 
+        self.session_proxy
+            .attach_client()
+            .await?;
+        Ok((endpoints.tx, endpoints.rx))
     }
 
-    pub fn start_server(&self) {
+    pub async fn start_server(&self) -> Result<()> {
         self.is_server_running
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
-    pub fn stop_server(&self) {
+    pub async fn stop_server(&self) -> Result<()> {
         self.is_server_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        // Return current is_server_running state
+        // Ensure proxy detaches server channels
+        self.session_proxy.detach_server().await
     }
 
     pub fn is_server_running(&self) -> bool {
@@ -76,14 +79,16 @@ impl Session {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn start_client(&self) {
+    pub async fn start_client(&self) -> Result<()> {
         self.is_client_running
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
-    pub fn stop_client(&self) {
+    pub async fn stop_client(&self) -> Result<()> {
         self.is_client_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     pub fn is_client_running(&self) -> bool {

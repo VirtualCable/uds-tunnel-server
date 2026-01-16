@@ -102,48 +102,42 @@ impl TunnelClientOutboundStream {
 pub struct TunnelClientStream {
     session_id: SessionId,
     stream: TcpStream,
-    inbound_channel: Receiver<Vec<u8>>,
-    outbound_channel: Sender<Vec<u8>>,
 }
 
 impl TunnelClientStream {
     pub fn new(
         id: SessionId,
         stream: TcpStream,
-        inbound_channel: Receiver<Vec<u8>>,
-        outbound_channel: Sender<Vec<u8>>,
     ) -> Self {
         TunnelClientStream {
             session_id: id,
             stream,
-            inbound_channel,
-            outbound_channel,
         }
     }
 
-    pub async fn run(self) {
+    pub async fn run(self) -> Result<()> {
         let Self {
             session_id,
             stream,
-            inbound_channel,
-            outbound_channel,
         } = self;
 
-        let stop = if let Some(session) = get_session_manager().get_session(&session_id) {
-            session.get_stop_trigger()
+        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id) {
+            (session.get_stop_trigger(), session.get_client_channels().await?)
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
-            return;
+            return Ok(());
         };
 
         let (read_half, write_half) = stream.into_split();
         let local_stop = Trigger::new();
 
+        
+
         let mut inbound =
-            TunnelClientInboundStream::new(read_half, outbound_channel, local_stop.clone());
+            TunnelClientInboundStream::new(read_half, channels.0, local_stop.clone());
 
         let mut outbound =
-            TunnelClientOutboundStream::new(write_half, inbound_channel, local_stop.clone());
+            TunnelClientOutboundStream::new(write_half, channels.1, local_stop.clone());
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);
@@ -156,7 +150,12 @@ impl TunnelClientStream {
         });
         tokio::spawn(async move {
             // Notify starting client side
-            get_session_manager().start_client(&session_id);
+            if let Err(e) = get_session_manager().start_client(&session_id).await {
+                log::error!("Failed to start client session {:?}: {:?}", session_id, e);
+                local_stop.set();
+                stop.set();
+                return;
+            }
             tokio::select! {
                 _ = stop.async_wait() => {
                     local_stop.set();
@@ -166,7 +165,10 @@ impl TunnelClientStream {
                 }
             }
             // Notify stopping client side
-            get_session_manager().stop_client(&session_id);
+            if let Err(e) = get_session_manager().stop_client(&session_id).await {
+                log::error!("Failed to stop client session {:?}: {:?}", session_id, e);
+            }
         });
+        Ok(())
     }
 }

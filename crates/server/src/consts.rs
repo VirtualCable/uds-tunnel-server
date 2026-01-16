@@ -23,3 +23,6 @@ pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
 
 // Channel related constants
 pub const CHANNEL_SIZE: usize = 2048; // 2k messages as much on a channel buffer
+
+// Timeout constants
+pub const SERVER_RECOVERY_GRACE_SECS: u64 = 2; // Time given to recover server connection
