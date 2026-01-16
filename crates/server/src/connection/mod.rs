@@ -8,7 +8,7 @@ pub mod handshake;
 pub async fn handle_connection(mut stream: TcpStream, expect_proxy_v2: bool) -> Result<()> {
     let handshake = timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
-        handshake::parse_handshake(&mut stream, expect_proxy_v2),
+        handshake::Handshake::parse(&mut stream, expect_proxy_v2),
     )
     .await??;
     match handshake.action {

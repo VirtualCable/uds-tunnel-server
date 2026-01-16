@@ -41,38 +41,40 @@ pub struct Handshake {
     pub action: HandshakeAction,
 }
 
-pub async fn parse_handshake<R: AsyncReadExt + Unpin>(
-    reader: &mut R,
-    expect_proxy_v2: bool,
-) -> Result<Handshake> {
-    let ip = if expect_proxy_v2 {
-        let proxy_info = ProxyInfo::read_from_stream(reader).await?;
-        Some(proxy_info.source_addr)
-    } else {
-        None
-    };
-    let mut signature_buf = [0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
-    reader.read_exact(&mut signature_buf).await?;
-    ensure!(
-        signature_buf[..HANDSHAKE_V2_SIGNATURE.len()] == *HANDSHAKE_V2_SIGNATURE,
-        "invalid handshake v2 signature"
-    );
-    let cmd: HandshakeCommand = signature_buf[HANDSHAKE_V2_SIGNATURE.len()].into();
-    match cmd {
-        HandshakeCommand::Test => Ok(Handshake {
-            src_ip: ip,
-            action: HandshakeAction::Test,
-        }),
-        HandshakeCommand::Open | HandshakeCommand::Recover => {
-            let mut ticket_buf = [0u8; TICKET_LENGTH];
-            reader.read_exact(&mut ticket_buf).await?;
-            let action = match cmd {
-                HandshakeCommand::Open => HandshakeAction::Open { ticket: ticket_buf },
-                HandshakeCommand::Recover => HandshakeAction::Recover { ticket: ticket_buf },
-                _ => unreachable!(),
-            };
-            Ok(Handshake { src_ip: ip, action })
+impl Handshake {
+    pub async fn parse<R: AsyncReadExt + Unpin>(
+        reader: &mut R,
+        expect_proxy_v2: bool,
+    ) -> Result<Handshake> {
+        let ip = if expect_proxy_v2 {
+            let proxy_info = ProxyInfo::read_from_stream(reader).await?;
+            Some(proxy_info.source_addr)
+        } else {
+            None
+        };
+        let mut signature_buf = [0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
+        reader.read_exact(&mut signature_buf).await?;
+        ensure!(
+            signature_buf[..HANDSHAKE_V2_SIGNATURE.len()] == *HANDSHAKE_V2_SIGNATURE,
+            "invalid handshake v2 signature"
+        );
+        let cmd: HandshakeCommand = signature_buf[HANDSHAKE_V2_SIGNATURE.len()].into();
+        match cmd {
+            HandshakeCommand::Test => Ok(Handshake {
+                src_ip: ip,
+                action: HandshakeAction::Test,
+            }),
+            HandshakeCommand::Open | HandshakeCommand::Recover => {
+                let mut ticket_buf = [0u8; TICKET_LENGTH];
+                reader.read_exact(&mut ticket_buf).await?;
+                let action = match cmd {
+                    HandshakeCommand::Open => HandshakeAction::Open { ticket: ticket_buf },
+                    HandshakeCommand::Recover => HandshakeAction::Recover { ticket: ticket_buf },
+                    _ => unreachable!(),
+                };
+                Ok(Handshake { src_ip: ip, action })
+            }
+            HandshakeCommand::Unknown => Err(anyhow::anyhow!("unknown handshake command")),
         }
-        HandshakeCommand::Unknown => Err(anyhow::anyhow!("unknown handshake command")),
     }
 }
