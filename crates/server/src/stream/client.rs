@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-// TODO: Remove allow dead_code when the module is fully implemented
-
 use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::{
@@ -11,7 +8,12 @@ use tokio::{
     },
 };
 
-use crate::{crypt::consts::CRYPT_PACKET_SIZE, log, system::trigger::Trigger};
+use crate::{
+    crypt::consts::CRYPT_PACKET_SIZE,
+    log,
+    session::{get_session_manager, SessionId},
+    system::trigger::Trigger,
+};
 
 pub struct TunnelClientInboundStream {
     stop: Trigger,
@@ -52,6 +54,8 @@ impl TunnelClientInboundStream {
                 }
             }
         }
+        // Ensure local stop is set
+        self.stop.set();
         Ok(())
     }
 }
@@ -88,40 +92,49 @@ impl TunnelClientOutboundStream {
                     }
                 }
             }
+            // Ensure local stop is set
+            self.stop.set();
         }
         Ok(())
     }
 }
 
 pub struct TunnelClientStream {
+    session_id: SessionId,
     stream: TcpStream,
     inbound_channel: Receiver<Vec<u8>>,
     outbound_channel: Sender<Vec<u8>>,
-    stop: Trigger,
 }
 
 impl TunnelClientStream {
     pub fn new(
+        id: SessionId,
         stream: TcpStream,
         inbound_channel: Receiver<Vec<u8>>,
         outbound_channel: Sender<Vec<u8>>,
-        stop: Trigger,
     ) -> Self {
         TunnelClientStream {
+            session_id: id,
             stream,
             inbound_channel,
             outbound_channel,
-            stop,
         }
     }
 
     pub async fn run(self) {
         let Self {
+            session_id,
             stream,
             inbound_channel,
             outbound_channel,
-            stop,
         } = self;
+
+        let stop = if let Some(session) = get_session_manager().get_session(&session_id) {
+            session.get_stop_trigger()
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            return;
+        };
 
         let (read_half, write_half) = stream.into_split();
         let local_stop = Trigger::new();
@@ -131,7 +144,6 @@ impl TunnelClientStream {
 
         let mut outbound =
             TunnelClientOutboundStream::new(write_half, inbound_channel, local_stop.clone());
-
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);
@@ -143,8 +155,18 @@ impl TunnelClientStream {
             }
         });
         tokio::spawn(async move {
-            stop.async_wait().await;
-            local_stop.set();
+            // Notify starting client side
+            get_session_manager().start_client(&session_id);
+            tokio::select! {
+                _ = stop.async_wait() => {
+                    local_stop.set();
+                }
+                _ = local_stop.async_wait() => {
+                    stop.set();
+                }
+            }
+            // Notify stopping client side
+            get_session_manager().stop_client(&session_id);
         });
     }
 }

@@ -3,7 +3,7 @@ pub mod consts;
 pub mod crypt;
 pub mod log;
 pub mod proxy_v2_protocol;
-pub mod session_manager;
+pub mod session;
 pub mod stream;
 pub mod system;
 
