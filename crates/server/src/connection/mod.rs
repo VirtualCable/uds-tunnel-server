@@ -1,4 +1,5 @@
-use anyhow::{Result, ensure};
+#![allow(dead_code, unused_variables)]
+use anyhow::Result;
 use tokio::{net::TcpStream, time::Duration, time::timeout};
 
 use crate::consts::HANDSHAKE_TIMEOUT_MS;

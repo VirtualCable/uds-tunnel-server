@@ -39,7 +39,7 @@ impl Crypt {
         len: usize,
         buffer: &'a mut types::PacketBuffer,
     ) -> Result<&'a [u8]> {
-        buffer.ensure_capacity(len + 16)?;
+        buffer.ensure_capacity(len + consts::TAG_LENGTH)?;
 
         let buffer = buffer.as_mut_slice();
 
@@ -60,6 +60,7 @@ impl Crypt {
     /// The nonce is constructed by taking the seq value and padding it to 12 bytes with
     /// zeros. The seq value is also used as associated data (AAD) to ensure integrity.
     /// Returns the decrypted plaintext on success.
+    /// Note: length is the length on encrpypted data WITH the tag
     pub fn decrypt<'a>(
         &mut self,
         seq: u64,
@@ -75,7 +76,7 @@ impl Crypt {
         }
         self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
 
-        let len = length as usize;
+        let len = length as usize - consts::TAG_LENGTH;
         let buffer = buffer.as_mut_slice();
 
         let mut nonce = [0; 12];
@@ -89,7 +90,7 @@ impl Crypt {
         self.cipher
             .decrypt_in_place_detached(Nonce::from_slice(&nonce), aad, ciphertext, tag.into())
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
-        Ok(&buffer[..length as usize])
+        Ok(&buffer[..len])
     }
 }
 
@@ -99,7 +100,7 @@ pub fn parse_header(buffer: &[u8]) -> Result<(u64, u16)> {
     }
     let seq = u64::from_le_bytes(buffer[0..8].try_into().unwrap());
     let length = u16::from_le_bytes(buffer[8..10].try_into().unwrap());
-    if length as usize > consts::MAX_PACKET_SIZE as usize {
+    if length as usize > consts::MAX_PACKET_SIZE {
         return Err(anyhow::anyhow!("invalid packet length: {}", length));
     }
     Ok((seq, length))
@@ -132,19 +133,29 @@ mod tests {
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
-        let plaintext = b"hello world!";
+        let plaintext = b"16 length text!!";
         buf.copy_from_slice(plaintext).unwrap();
 
         let ciphertext = crypt.encrypt(plaintext.len(), &mut buf).unwrap();
 
         // Now decrypt
         let seq = crypt.current_seq();
-        let length = plaintext.len() as u16;
+        let length = ciphertext.len() as u16;
 
         let mut buf2 = types::PacketBuffer::from(ciphertext);
         let decrypted = crypt.decrypt(seq, length, &mut buf2).unwrap();
 
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_parse_build_header() {
+        let mut buf = [0u8; 10];
+        build_header(0x9922334455667788, 0x00AA, &mut buf).unwrap();
+
+        let (seq, len) = parse_header(&buf).unwrap();
+        assert_eq!(seq, 0x9922334455667788);
+        assert_eq!(len, 0x00AA);
     }
 
     #[test]

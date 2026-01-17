@@ -2,10 +2,7 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    net::TcpStream,
 };
 
 use crate::{
@@ -15,15 +12,15 @@ use crate::{
     system::trigger::Trigger,
 };
 
-pub struct TunnelClientInboundStream {
+pub struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
     sender: Sender<Vec<u8>>,
 
-    read_half: OwnedReadHalf,
+    read_half: R,
 }
 
-impl TunnelClientInboundStream {
-    pub fn new(read_half: OwnedReadHalf, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
+impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
+    pub fn new(read_half: R, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
         TunnelClientInboundStream {
             stop,
             sender,
@@ -31,6 +28,7 @@ impl TunnelClientInboundStream {
         }
     }
     pub async fn run(&mut self) -> Result<()> {
+        log::debug!("Starting client inbound stream");
         // Read from read_half, raw, decrypt and send to sender channel, raw
         let mut buffer = [0u8; CRYPT_PACKET_SIZE];
         loop {
@@ -50,27 +48,30 @@ impl TunnelClientInboundStream {
                             self.sender.try_send(buffer[..count].to_vec())?;
                         }
                         Err(e) => {
+                            log::error!("Client inbound read error: {:?}", e);
+                            // Set stop and return error
+                            self.stop.set();
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
                         }
                     }
                 }
             }
         }
-        // Ensure local stop is set
+        // Ensure stop is set
         self.stop.set();
         Ok(())
     }
 }
 
-struct TunnelClientOutboundStream {
+struct TunnelClientOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
     receiver: Receiver<Vec<u8>>,
 
-    write_half: OwnedWriteHalf,
+    write_half: W,
 }
 
-impl TunnelClientOutboundStream {
-    pub fn new(write_half: OwnedWriteHalf, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
+impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
+    pub fn new(write_half: W, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
         TunnelClientOutboundStream {
             stop,
             receiver,
@@ -78,6 +79,8 @@ impl TunnelClientOutboundStream {
         }
     }
     pub async fn run(&mut self) -> Result<()> {
+        // Run on client side is mandatory. If run ends, stop must be set. in any case.
+        log::debug!("Starting client outbound stream");
         loop {
             tokio::select! {
                 _ = self.stop.async_wait() => {
@@ -89,6 +92,8 @@ impl TunnelClientOutboundStream {
                             self.write_half.write_all(&data).await?;
                         }
                         Err(_) => {
+                            log::error!("Client outbound receiver channel closed");
+                            self.stop.set();
                             return Err(anyhow::anyhow!("Receiver channel closed"));
                         }
                     }
@@ -169,3 +174,6 @@ impl TunnelClientStream {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

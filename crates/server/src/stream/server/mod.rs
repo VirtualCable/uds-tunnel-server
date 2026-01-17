@@ -2,14 +2,11 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{
-        TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    net::TcpStream,
 };
 
 use crate::{
-    consts::SERVER_RECOVERY_GRACE_SECS,  // global crate consts
+    consts::SERVER_RECOVERY_GRACE_SECS, // global crate consts
     crypt::{
         Crypt, build_header,
         consts::{CRYPT_PACKET_SIZE, HEADER_LENGTH},
@@ -21,22 +18,17 @@ use crate::{
     system::trigger::Trigger,
 };
 
-struct TunnelServerInboundStream {
+struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
     sender: Sender<Vec<u8>>,
     buffer: PacketBuffer,
     crypt: Crypt,
 
-    read_half: OwnedReadHalf,
+    read_half: R,
 }
 
-impl TunnelServerInboundStream {
-    pub fn new(
-        read_half: OwnedReadHalf,
-        crypt: Crypt,
-        sender: Sender<Vec<u8>>,
-        stop: Trigger,
-    ) -> Self {
+impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
+    pub fn new(read_half: R, crypt: Crypt, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
         TunnelServerInboundStream {
             stop,
             sender,
@@ -46,6 +38,7 @@ impl TunnelServerInboundStream {
         }
     }
     pub async fn run(&mut self) -> Result<()> {
+        log::debug!("Starting server inbound stream");
         let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
 
         loop {
@@ -54,88 +47,89 @@ impl TunnelServerInboundStream {
                 &mut self.read_half,
                 header_buffer.as_mut(),
                 HEADER_LENGTH,
+                false,
             )
             .await?
                 == 0
             {
                 // Connection closed
+                log::info!("Inbound stream closed while reading header");
                 break;
             }
             // Check valid header and get payload length
-            let (counter, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
+            let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
             // Read the encrypted payload + tag
             if Self::read_stream(
                 &self.stop,
                 &mut self.read_half,
                 self.buffer.as_mut_slice(),
                 length as usize,
+                true,
             )
             .await?
                 == 0
             {
                 // Connection closed
+                log::info!("Inbound stream closed while reading payload");
                 break;
             }
             let decrypted_data = self
                 .crypt
-                .decrypt(counter, length, &mut self.buffer)?
+                .decrypt(seq, length, &mut self.buffer)?
                 .to_vec();
             self.sender.try_send(decrypted_data)?;
         }
-        self.stop.set();
         Ok(())
     }
 
     pub async fn read_stream(
         stop: &Trigger,
-        read_half: &mut OwnedReadHalf,
+        read_half: &mut R,
         buffer: &mut [u8],
         length: usize,
+        disallow_eof: bool,
     ) -> Result<usize> {
-        tokio::select! {
-            _ = stop.async_wait() => {
-                log::info!("Inbound stream stopped while reading");
-                Ok(0)  // Indicate end of processing
-            }
-            result = read_half.read_exact(&mut buffer[..length]) => {
-                match result {
-                    Ok(0) => {
-                        // Connection closed
-                        Ok(0)
-                    }
-                    Ok(n) => {
-                        if n == length {
-                            Ok(n)
-                        } else {
-                            // Incomplete read is an error in this context
-                            Err(anyhow::anyhow!("incomplete read"))
+        let mut read = 0;
+
+        while read < length {
+            let n = tokio::select! {
+                _ = stop.async_wait() => {
+                    log::info!("Inbound stream stopped while reading");
+                    return Ok(0);  // Indicate end of processing
+                }
+                result = read_half.read(&mut buffer[read..length]) => {
+                    match result {
+                        Ok(0) => {
+                            if disallow_eof || read != 0 {
+                                return Err(anyhow::anyhow!("connection closed unexpectedly"));
+                            } else {
+                                return Ok(0);  // Connection closed
+                            }
+                        }
+                        Ok(n) => n,
+                        Err(e) => {
+                            return Err(anyhow::format_err!("read error: {:?}", e));
                         }
                     }
-                    Err(e) => {
-                        Err(anyhow::format_err!("read error: {:?}", e))
-                    }
                 }
-            }
+            };
+            read += n;
         }
+        Ok(read)
     }
 }
 
-struct TunnelServerOutboundStream {
+struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
     receiver: Receiver<Vec<u8>>,
     buffer: PacketBuffer,
     crypt: Crypt,
 
-    write_half: OwnedWriteHalf,
+    write_half: W,
 }
 
-impl TunnelServerOutboundStream {
-    pub fn new(
-        write_half: OwnedWriteHalf,
-        crypt: Crypt,
-        receiver: Receiver<Vec<u8>>,
-        stop: Trigger,
-    ) -> Self {
+impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
+    pub fn new(write_half: W, crypt: Crypt, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,
@@ -163,7 +157,6 @@ impl TunnelServerOutboundStream {
                 }
             }
         }
-        self.stop.set();
         Ok(())
     }
 
@@ -278,12 +271,16 @@ impl TunnelServerStream {
             if let Err(e) = inbound.run().await {
                 log::error!("Inbound stream error: {:?}", e);
             }
+            // let's ensure the other side is also stopped
+            inbound.stop.set();
         });
 
         tokio::spawn(async move {
             if let Err(e) = outbound.run().await {
                 log::error!("Outbound stream error: {:?}", e);
             }
+            // let's ensure the other side is also stopped
+            outbound.stop.set();
         });
 
         tokio::spawn(async move {
@@ -328,3 +325,6 @@ impl TunnelServerStream {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

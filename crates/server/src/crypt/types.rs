@@ -3,14 +3,21 @@ use anyhow::Result;
 use super::consts;
 
 pub struct PacketBuffer {
-    buffer: [u8; consts::MAX_PACKET_SIZE as usize],
+    buffer: [u8; consts::MAX_PACKET_SIZE],
 }
 
 impl PacketBuffer {
     pub fn new() -> Self {
         PacketBuffer {
-            buffer: [0u8; consts::MAX_PACKET_SIZE as usize],
+            buffer: [0u8; consts::MAX_PACKET_SIZE],
         }
+    }
+
+    pub fn from_slice(data: &[u8]) -> Self {
+        let mut packet_buffer = PacketBuffer::new();
+        let len = data.len().min(consts::MAX_PACKET_SIZE);
+        packet_buffer.buffer[..len].copy_from_slice(&data[..len]);
+        packet_buffer
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
@@ -22,7 +29,7 @@ impl PacketBuffer {
     }
 
     pub fn ensure_capacity(&mut self, size: usize) -> Result<()> {
-        if size <= consts::MAX_PACKET_SIZE as usize {
+        if size <= consts::MAX_PACKET_SIZE {
             Ok(())
         } else {
             Err(anyhow::anyhow!(
@@ -50,7 +57,7 @@ impl Default for PacketBuffer {
 impl From<&[u8]> for PacketBuffer {
     fn from(data: &[u8]) -> Self {
         let mut packet_buffer = PacketBuffer::new();
-        let len = data.len().min(consts::MAX_PACKET_SIZE as usize);
+        let len = data.len().min(consts::MAX_PACKET_SIZE);
         packet_buffer.buffer[..len].copy_from_slice(&data[..len]);
         packet_buffer
     }
