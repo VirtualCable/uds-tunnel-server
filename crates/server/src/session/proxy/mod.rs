@@ -2,7 +2,7 @@ use anyhow::Result;
 use flume::{Receiver, Sender, bounded};
 use futures::future::{Either, pending};
 
-use crate::{consts::CHANNEL_SIZE, system::trigger::Trigger};
+use crate::{consts::CHANNEL_SIZE, log, system::trigger::Trigger};
 
 pub(super) struct SessionProxyHandle {
     ctrl_tx: Sender<ProxyCommand>,
@@ -51,8 +51,6 @@ pub(super) struct ClientEndpoints {
 }
 
 pub(super) struct Proxy {
-    client_channels: Option<ClientEndpoints>,
-    server_channels: Option<ServerEndpoints>,
     ctrl_rx: Receiver<ProxyCommand>,
     stop: Trigger,
 }
@@ -60,12 +58,7 @@ pub(super) struct Proxy {
 impl Proxy {
     pub fn new(stop: Trigger) -> (Self, SessionProxyHandle) {
         let (ctrl_tx, ctrl_rx) = bounded(4); // Control channel, small buffer
-        let proxy = Proxy {
-            client_channels: None,
-            server_channels: None,
-            ctrl_rx,
-            stop,
-        };
+        let proxy = Proxy { ctrl_rx, stop };
         let handle = SessionProxyHandle { ctrl_tx };
         (proxy, handle)
     }
@@ -75,60 +68,76 @@ impl Proxy {
     }
 
     async fn run_session_proxy(self) -> Result<()> {
-        let Self {
-            mut client_channels,
-            mut server_channels,
-            ctrl_rx,
-            stop,
-        } = self; // Consume self
+        let Self { ctrl_rx, stop } = self;
+
+        // Now we need the other sides for both sides (our sides)
+        let mut our_server_channels: Option<ServerEndpoints> = None;
+        let mut our_client_channels: Option<ClientEndpoints> = None;
+
+        log::debug!("Session proxy started");
 
         loop {
-            let server_recv = match &server_channels {
-                Some(ch) => Either::Left(ch.rx.recv_async()),
-                None => Either::Right(pending()),
+            let (server_recv, client_recv) = if let Some(chs) = &our_server_channels
+                && let Some(chc) = &our_client_channels
+            {
+                (
+                    Either::Left(chs.rx.recv_async()),
+                    Either::Left(chc.rx.recv_async()),
+                )
+            } else {
+                (Either::Right(pending()), Either::Right(pending()))
             };
-            let client_recv = match &client_channels {
-                Some(ch) => Either::Left(ch.rx.recv_async()),
-                None => Either::Right(pending()),
-            };
+
             tokio::select! {
                 _ = stop.async_wait() => {
+                    log::debug!("Session proxy stopping due to stop signal");
                     break;
                 }
+
                 cmd = ctrl_rx.recv_async() => {
                     match cmd {
                         Ok(ProxyCommand::AttachServer { reply }) => {
-                            let (tx, rx) = bounded(CHANNEL_SIZE);
-                            let endpoints = ServerEndpoints { tx, rx };
-                            server_channels = Some(endpoints.clone());
+                            log::debug!("Attaching server to session proxy");
+                            let (server_tx, our_rx) = bounded(CHANNEL_SIZE);
+                            let (our_tx, server_rx) = bounded(CHANNEL_SIZE);
+                            our_server_channels = Some(ServerEndpoints { tx: our_tx, rx: our_rx });
+                            let endpoints = ServerEndpoints { tx: server_tx, rx: server_rx };
                             let _ = reply.send(endpoints);
                         }
                         Ok(ProxyCommand::AttachClient { reply }) => {
-                            let (tx, rx) = bounded(CHANNEL_SIZE);
-                            let endpoints = ClientEndpoints { tx, rx };
-                            client_channels = Some(endpoints.clone());
+                            log::debug!("Attaching client to session proxy");
+                            let (client_tx, our_rx) = bounded(CHANNEL_SIZE);
+                            let (our_tx, client_rx) = bounded(CHANNEL_SIZE);
+                            our_client_channels = Some(ClientEndpoints { tx: our_tx, rx: our_rx });
+                            let endpoints = ClientEndpoints { tx: client_tx, rx: client_rx };
                             let _ = reply.send(endpoints);
                         }
                         Ok(ProxyCommand::DetachServer) => {
-                            server_channels = None;
+                            log::debug!("Detaching server from session proxy");
+                            our_server_channels = None;
                         }
                         Err(_) => {
-                            break;
+                            log::debug!("Control channel closed, stopping session proxy");
+                            break
                         }
                     }
                 }
                 msg = server_recv => {
-                    if let Ok(msg) = msg && let Some(client) = &client_channels {
+                    if let Ok(msg) = msg && let Some(client) = &our_client_channels {
                         let _ = client.tx.send_async(msg).await;
                     }
                 }
                 msg = client_recv => {
-                    if let Ok(msg) = msg && let Some(server) = &server_channels {
+                    if let Ok(msg) = msg && let Some(server) = &our_server_channels {
                         let _ = server.tx.send_async(msg).await;
                     }
                 }
             }
         }
+        log::info!("Session proxy stopped");
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

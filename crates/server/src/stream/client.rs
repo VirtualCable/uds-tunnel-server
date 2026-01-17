@@ -11,7 +11,7 @@ use tokio::{
 use crate::{
     crypt::consts::CRYPT_PACKET_SIZE,
     log,
-    session::{get_session_manager, SessionId},
+    session::{SessionId, get_session_manager},
     system::trigger::Trigger,
 };
 
@@ -45,7 +45,9 @@ impl TunnelClientInboundStream {
                             break;
                         }
                         Ok(count) => {
-                            self.sender.send_async(buffer[..count].to_vec()).await?;
+                            // Send to channel, fail if full or disconnected
+                            // Does not wait for space in channel
+                            self.sender.try_send(buffer[..count].to_vec())?;
                         }
                         Err(e) => {
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
@@ -92,9 +94,9 @@ impl TunnelClientOutboundStream {
                     }
                 }
             }
-            // Ensure local stop is set
-            self.stop.set();
         }
+        // Ensure local stop is set
+        self.stop.set();
         Ok(())
     }
 }
@@ -105,10 +107,7 @@ pub struct TunnelClientStream {
 }
 
 impl TunnelClientStream {
-    pub fn new(
-        id: SessionId,
-        stream: TcpStream,
-    ) -> Self {
+    pub fn new(id: SessionId, stream: TcpStream) -> Self {
         TunnelClientStream {
             session_id: id,
             stream,
@@ -116,13 +115,14 @@ impl TunnelClientStream {
     }
 
     pub async fn run(self) -> Result<()> {
-        let Self {
-            session_id,
-            stream,
-        } = self;
+        let Self { session_id, stream } = self;
 
-        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id) {
-            (session.get_stop_trigger(), session.get_client_channels().await?)
+        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
+        {
+            (
+                session.get_stop_trigger(),
+                session.get_client_channels().await?,
+            )
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
             return Ok(());
@@ -131,10 +131,7 @@ impl TunnelClientStream {
         let (read_half, write_half) = stream.into_split();
         let local_stop = Trigger::new();
 
-        
-
-        let mut inbound =
-            TunnelClientInboundStream::new(read_half, channels.0, local_stop.clone());
+        let mut inbound = TunnelClientInboundStream::new(read_half, channels.0, local_stop.clone());
 
         let mut outbound =
             TunnelClientOutboundStream::new(write_half, channels.1, local_stop.clone());

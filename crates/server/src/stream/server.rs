@@ -80,9 +80,7 @@ impl TunnelServerInboundStream {
                 .crypt
                 .decrypt(counter, length, &mut self.buffer)?
                 .to_vec();
-            self.sender.send(decrypted_data).map_err(|e| {
-                anyhow::anyhow!("failed to send decrypted data to receiver: {:?}", e)
-            })?;
+            self.sender.try_send(decrypted_data)?;
         }
         self.stop.set();
         Ok(())

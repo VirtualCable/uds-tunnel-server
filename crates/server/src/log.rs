@@ -106,14 +106,14 @@ impl<'a> fmt::MakeWriter<'a> for RotatingWriter {
 #[derive(PartialEq)]
 pub enum LogType {
     Tunnel,
-    Tests,
+    Test,
 }
 
 impl std::fmt::Display for LogType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LogType::Tunnel => write!(f, "tunnel"),
-            LogType::Tests => write!(f, "tunnel-tests"),
+            LogType::Test => write!(f, "tunnel-tests"),
         }
     }
 }
@@ -225,7 +225,7 @@ pub fn setup_logging(level: &str, log_type: LogType) {
             .ok();
 
         // Setup panic hook, not if testing
-        if log_type != LogType::Tests {
+        if log_type != LogType::Test {
             setup_panic_hook();
         }
     });
@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn test_logging_on_default_path() {
-        setup_logging("debug", LogType::Tests);
+        setup_logging("debug", LogType::Test);
         info!("This is a test log entry on default path");
         debug!("Debug entry");
         warn!("Warning entry");
@@ -263,7 +263,7 @@ mod tests {
     fn test_logging_rotation() {
         let temp_dir = std::env::temp_dir();
         unsafe { std::env::set_var("UDSTUNNEL_TESTS_LOG_PATH", &temp_dir) }
-        setup_logging("debug", LogType::Tests);
+        setup_logging("debug", LogType::Test);
         let log_file = temp_dir.join("udstunnel-tests.log");
         // Write enough logs to exceed 16MB
         for i in 0..20000 {

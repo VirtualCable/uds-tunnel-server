@@ -1,4 +1,4 @@
-use std::sync::{RwLock, atomic::AtomicBool};
+use std::sync::{Arc, RwLock, atomic::AtomicBool};
 
 use anyhow::Result;
 use flume::{Receiver, Sender};
@@ -27,7 +27,7 @@ pub struct Session {
     is_client_running: AtomicBool,
     // seq numbers for crypto part
     // only updated on server side killed.
-    seq: RwLock<(u64, u64)>,
+    seq: Arc<RwLock<(u64, u64)>>,
 }
 
 impl Session {
@@ -41,7 +41,7 @@ impl Session {
             stop,
             is_server_running: AtomicBool::new(false),
             is_client_running: AtomicBool::new(false),
-            seq: RwLock::new((0, 0)),
+            seq: Arc::new(RwLock::new((0, 0))),
         }
     }
 
