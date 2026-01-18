@@ -6,8 +6,8 @@ use tokio::io::AsyncReadExt;
 
 use crate::{
     consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
-    proxy_v2_protocol::ProxyInfo,
 };
+use super::proxy_v2::ProxyInfo;
 
 // Handshake commands, starting from 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -75,6 +75,104 @@ impl Handshake {
                 Ok(Handshake { src_ip: ip, action })
             }
             HandshakeCommand::Unknown => Err(anyhow::anyhow!("unknown handshake command")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_handshake_parse_no_proxy_test() {
+        let mut data = Vec::new();
+        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Test.into());
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let handshake = Handshake::parse(&mut reader, false).await.unwrap();
+        assert!(handshake.src_ip.is_none());
+        match handshake.action {
+            HandshakeAction::Test => {}
+            _ => panic!("expected Test action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_no_proxy_open() {
+        let mut data = Vec::new();
+        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Open.into());
+        let ticket = [0x42u8; TICKET_LENGTH];
+        data.extend_from_slice(&ticket);
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let handshake = Handshake::parse(&mut reader, false).await.unwrap();
+        assert!(handshake.src_ip.is_none());
+        match handshake.action {
+            HandshakeAction::Open { ticket: t } => {
+                assert_eq!(t, ticket);
+            }
+            _ => panic!("expected Open action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_no_proxy_recover() {
+        let mut data = Vec::new();
+        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Recover.into());
+        let ticket = [0x43u8; TICKET_LENGTH];
+        data.extend_from_slice(&ticket);
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let handshake = Handshake::parse(&mut reader, false).await.unwrap();
+        assert!(handshake.src_ip.is_none());
+        match handshake.action {
+            HandshakeAction::Recover { ticket: t } => {
+                assert_eq!(t, ticket);
+            }
+            _ => panic!("expected Recover action"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_invalid_signature() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"INVALID_SIGNATURE");
+        data.push(HandshakeCommand::Test.into());
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let result = Handshake::parse(&mut reader, false).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_proxy_test() {
+        let mut data = Vec::new();
+        // https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt
+        // PROXY v2 header:
+        // signature (12 bytes)
+        // ver_cmd = 0x21 (version 2, command PROXY)
+        // fam_proto = 0x11 (INET + STREAM)
+        // len = 12 (IPv4 block)
+        let buf = vec![
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+            0x21, // version=2, command=1
+            0x11, // family=1 (IPv4), proto=1 (TCP)
+            0x00, 0x0C, // len = 12
+            // IPv4 block:
+            192, 168, 1, 10, // src IP
+            10, 0, 0, 5, // dst IP
+            0x1F, 0x90, // src port 8080
+            0x00, 0x50, // dst port 80
+        ];
+
+        data.extend_from_slice(&buf);
+        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Test.into());
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let handshake = Handshake::parse(&mut reader, true).await.unwrap();
+        assert!(handshake.src_ip.is_some());
+        match handshake.action {
+            HandshakeAction::Test => {}
+            _ => panic!("expected Test action"),
         }
     }
 }

@@ -2,6 +2,8 @@ use anyhow::{Result, anyhow, ensure};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::io::AsyncReadExt;
 
+// https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt
+
 const PROXY_V2_SIGNATURE: [u8; 12] = [
     0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
