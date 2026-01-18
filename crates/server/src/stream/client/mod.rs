@@ -33,11 +33,13 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
         loop {
             tokio::select! {
                 _ = self.stop.async_wait() => {
+                    log::debug!("Stopping client inbound stream due to stop signal");
                     break;
                 }
                 result = self.reader.read(&mut buffer) => {
                     match result {
                         Ok(0) => {
+                            log::debug!("Client inbound stream reached EOF");
                             // Connection closed
                             break;
                         }

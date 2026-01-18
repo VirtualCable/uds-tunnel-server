@@ -2,9 +2,11 @@ use anyhow::Result;
 
 use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 
+use crate::log;
+
 pub mod consts;
-pub mod types;
 pub mod tunnel;
+pub mod types;
 
 pub struct Crypt {
     cipher: Aes256Gcm,
@@ -34,7 +36,9 @@ impl Crypt {
     /// The nonce is constructed by taking the current seq value and padding it to 12 bytes
     /// with zeros. The seq value is also used as associated data (AAD) to ensure integrity.
     /// Returns the ciphertext on success.
-    /// The encrpyption is done inplace to avoid extra allocations.
+    /// The encryption is done inplace to avoid extra allocations.
+    ///
+    /// Note: length is the length of the plaintext data to encrypt.
     pub fn encrypt<'a>(
         &mut self,
         len: usize,
@@ -77,7 +81,7 @@ impl Crypt {
         }
         self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
 
-        let len = length as usize - consts::TAG_LENGTH;
+        let len = (length as usize).saturating_sub(consts::TAG_LENGTH);
         let buffer = buffer.as_mut_slice();
 
         let mut nonce = [0; 12];
@@ -183,12 +187,16 @@ mod tests {
 
         let mut buf2 = types::PacketBuffer::from(ciphertext);
 
-        // Primer decrypt OK
-        crypt.decrypt(seq, 3, &mut buf2).unwrap();
+        // First decrypt should work
+        crypt
+            .decrypt(seq, ciphertext.len() as u16, &mut buf2)
+            .unwrap();
 
-        // Segundo decrypt con el mismo seq debe fallar
+        // Second decrypt with the same seq should fail
         let mut buf3 = types::PacketBuffer::from(ciphertext);
-        let err = crypt.decrypt(seq, 3, &mut buf3).unwrap_err();
+        let err = crypt
+            .decrypt(seq, ciphertext.len() as u16, &mut buf3)
+            .unwrap_err();
 
         assert!(err.to_string().contains("replay attack"));
     }

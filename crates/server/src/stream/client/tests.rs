@@ -161,7 +161,6 @@ async fn test_full_tunnel_echo() {
     let (client_side, mut server) = tokio::io::duplex(1024);
     let (server_side, mut client) = tokio::io::duplex(1024);
 
-
     let (tx_in, rx_in) = flume::bounded::<Vec<u8>>(10);
     let (tx_out, rx_out) = flume::bounded::<Vec<u8>>(10);
 
@@ -203,6 +202,8 @@ async fn test_full_tunnel_echo() {
 
 #[tokio::test]
 async fn test_inbound_multiple_packets() {
+    log::setup_logging("debug", log::LogType::Test);
+
     let (mut client, server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
@@ -210,18 +211,23 @@ async fn test_inbound_multiple_packets() {
     let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
 
     tokio::spawn(async move {
-        client.write_all(b"one").await.unwrap();
-        client.write_all(b"two").await.unwrap();
-        client.write_all(b"three").await.unwrap();
-    });
-
-    tokio::spawn(async move {
         inbound.run().await.unwrap();
     });
 
-    assert_eq!(rx.recv().unwrap(), b"one");
-    assert_eq!(rx.recv().unwrap(), b"two");
-    assert_eq!(rx.recv().unwrap(), b"three");
+    tokio::spawn(async move {
+        // Without delay, the three may come in a single read, or 2-1, etc.
+        client.write_all(b"111").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // small delay to simulate separate packets
+        client.write_all(b"222").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // small delay to simulate separate packets
+        client.write_all(b"333").await.unwrap();
+    });
+
+    assert_eq!(rx.recv_async().await.unwrap(), b"111");
+    assert_eq!(rx.recv_async().await.unwrap(), b"222");
+    assert_eq!(rx.recv_async().await.unwrap(), b"333");
+    log::debug!("All packets received");
+    stop.set();
 }
 
 #[tokio::test]
@@ -256,4 +262,5 @@ async fn test_outbound_multiple_packets() {
 
     server.read_exact(&mut buf[..5]).await.unwrap();
     assert_eq!(&buf[..5], b"three");
+    stop.set();
 }
