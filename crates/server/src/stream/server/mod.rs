@@ -1,9 +1,6 @@
 use anyhow::Result;
 use flume::{Receiver, Sender};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     consts::SERVER_RECOVERY_GRACE_SECS, // global crate consts
@@ -24,17 +21,17 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
     buffer: PacketBuffer,
     crypt: Crypt,
 
-    read_half: R,
+    reader: R,
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
-    pub fn new(read_half: R, crypt: Crypt, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(reader: R, crypt: Crypt, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
         TunnelServerInboundStream {
             stop,
             sender,
             crypt,
             buffer: PacketBuffer::new(),
-            read_half,
+            reader,
         }
     }
     pub async fn run(&mut self) -> Result<()> {
@@ -44,7 +41,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
         loop {
             if Self::read_stream(
                 &self.stop,
-                &mut self.read_half,
+                &mut self.reader,
                 header_buffer.as_mut(),
                 HEADER_LENGTH,
                 false,
@@ -61,7 +58,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
             // Read the encrypted payload + tag
             if Self::read_stream(
                 &self.stop,
-                &mut self.read_half,
+                &mut self.reader,
                 self.buffer.as_mut_slice(),
                 length as usize,
                 true,
@@ -73,10 +70,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 log::info!("Inbound stream closed while reading payload");
                 break;
             }
-            let decrypted_data = self
-                .crypt
-                .decrypt(seq, length, &mut self.buffer)?
-                .to_vec();
+            let decrypted_data = self.crypt.decrypt(seq, length, &mut self.buffer)?.to_vec();
             self.sender.try_send(decrypted_data)?;
         }
         Ok(())
@@ -125,17 +119,17 @@ struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     buffer: PacketBuffer,
     crypt: Crypt,
 
-    write_half: W,
+    writer: W,
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
-    pub fn new(write_half: W, crypt: Crypt, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(writer: W, crypt: Crypt, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,
             crypt,
             buffer: PacketBuffer::new(),
-            write_half,
+            writer,
         }
     }
 
@@ -176,8 +170,8 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         build_header(counter, length, &mut header)?;
 
         // Send
-        self.write_half.write_all(&header).await?;
-        self.write_half.write_all(encrypted).await?;
+        self.writer.write_all(&header).await?;
+        self.writer.write_all(encrypted).await?;
 
         Ok(())
     }
@@ -209,63 +203,57 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
 /// Nothing, runs indefinitely until stopped
 ///
 /// Note: "Server side" is the side that communicates with the remote Server
-pub struct TunnelServerStream {
+pub struct TunnelServerStream<R, W>
+where
+    R: AsyncReadExt + Send + Unpin + 'static,
+    W: AsyncWriteExt + Send + Unpin + 'static,
+{
     session_id: SessionId,
-    stream: TcpStream,
-    inbound_crypt: Crypt,
-    outbound_crypt: Crypt,
+    reader: R,
+    writer: W,
 }
 
-impl TunnelServerStream {
-    pub fn new(
-        session_id: SessionId,
-        stream: TcpStream,
-        inbound_crypt: Crypt,
-        outbound_crypt: Crypt,
-    ) -> Self {
+impl<R, W> TunnelServerStream<R, W>
+where
+    R: AsyncReadExt + Send + Unpin + 'static,
+    W: AsyncWriteExt + Send + Unpin + 'static,
+{
+    pub fn new(session_id: SessionId, reader: R, writer: W) -> Self {
         Self {
             session_id,
-            stream,
-            inbound_crypt,
-            outbound_crypt,
+            reader,
+            writer,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         let Self {
             session_id,
-            stream,
-            inbound_crypt,
-            outbound_crypt,
+            reader,
+            writer,
         } = self;
 
-        let (read_half, write_half) = stream.into_split();
-        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
-        {
-            (
-                session.get_stop_trigger(),
-                session.get_client_channels().await?,
-            )
-        } else {
-            log::warn!("Session {:?} not found, aborting stream", session_id);
-            return Ok(());
-        };
+        let (stop, channels, inbound_crypt, outbound_crypt) =
+            if let Some(session) = get_session_manager().get_session(&session_id) {
+                let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
+                (
+                    session.get_stop_trigger(),
+                    session.get_client_channels().await?,
+                    inbound_crypt,
+                    outbound_crypt,
+                )
+            } else {
+                log::warn!("Session {:?} not found, aborting stream", session_id);
+                return Ok(());
+            };
 
         let local_stop = Trigger::new();
 
-        let mut inbound = TunnelServerInboundStream::new(
-            read_half,
-            inbound_crypt,
-            channels.0,
-            local_stop.clone(),
-        );
+        let mut inbound =
+            TunnelServerInboundStream::new(reader, inbound_crypt, channels.0, local_stop.clone());
 
-        let mut outbound = TunnelServerOutboundStream::new(
-            write_half,
-            outbound_crypt,
-            channels.1,
-            local_stop.clone(),
-        );
+        let mut outbound =
+            TunnelServerOutboundStream::new(writer, outbound_crypt, channels.1, local_stop.clone());
 
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {

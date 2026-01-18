@@ -4,6 +4,7 @@ use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 
 pub mod consts;
 pub mod types;
+pub mod tunnel;
 
 pub struct Crypt {
     cipher: Aes256Gcm,

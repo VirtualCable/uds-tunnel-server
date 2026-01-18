@@ -115,3 +115,22 @@ async fn test_server_inbound_stop_before_read() {
 
     assert!(rx.try_recv().is_err());
 }
+
+#[tokio::test]
+async fn test_server_stream() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    use crate::{consts, session};
+    let ticket = [0x40u8; consts::TICKET_LENGTH];
+
+    // Create the session
+    let session = session::Session::new([3u8; 32], ticket, Trigger::new());
+
+    // Add session to manager
+    let session_id = session::get_session_manager().add_session(session).unwrap();
+
+    let (client_send, server_recv) = tokio::io::duplex(1024);
+    let (server_send, client_recv) = tokio::io::duplex(1024);
+
+    let tss = TunnelServerStream::new(session_id, client_recv, server_send);
+}

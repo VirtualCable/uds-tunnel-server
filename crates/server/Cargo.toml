@@ -7,9 +7,12 @@ edition = "2024"
 # utilities
 anyhow = { workspace = true }
 num_enum = { workspace = true }
+rand = { workspace = true }
 
 # Encryption
 aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
 
 # Logging
 tracing = { workspace = true }

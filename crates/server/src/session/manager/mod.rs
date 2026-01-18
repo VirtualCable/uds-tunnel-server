@@ -1,14 +1,20 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use super::session_id::{Session, SessionId};
 
+mod consts;
+
 pub static SESSION_MANAGER: OnceLock<SessionManager> = OnceLock::new();
 
 pub struct SessionManager {
     sessions: RwLock<HashMap<SessionId, Arc<Session>>>,
+    // For equivalent sessions mapping
+    equivs: RwLock<HashMap<SessionId, (SessionId, Instant)>>,
+    last_cleanup: RwLock<Instant>,
 }
 
 impl SessionManager {
@@ -16,12 +22,16 @@ impl SessionManager {
     fn new() -> Self {
         SessionManager {
             sessions: RwLock::new(HashMap::new()),
+            equivs: RwLock::new(HashMap::new()),
+            last_cleanup: RwLock::new(Instant::now()),
         }
     }
 
-    pub fn add_session(&self, id: SessionId, session: Session) {
+    pub fn add_session(&self, session: Session) -> Result<SessionId> {
         let mut sessions = self.sessions.write().unwrap();
-        sessions.insert(id, Arc::new(session));
+        let session_id = SessionId::new();
+        sessions.insert(session_id, Arc::new(session));
+        Ok(session_id)
     }
 
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {
@@ -85,6 +95,57 @@ impl SessionManager {
             (0, 0)
         }
     }
+
+    pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
+        // If equivalent session exists, get it. If don't, try to use id as is.
+
+        let target_id = {
+            // Ensure lock scope is limited
+            let equivs = self.equivs.read().unwrap();
+            if let Some(equiv_id) = equivs.get(id) {
+                equiv_id.0
+            } else {
+                *id
+            }
+        };
+        self.get_session(&target_id)
+    }
+
+    pub fn create_equiv_session(&self, to: SessionId) -> Result<SessionId> {
+        // If too many entries, return err
+        {
+            let equivs = self.equivs.read().unwrap();
+            if equivs.len() >= consts::MAX_EQUIV_ENTRIES {
+                anyhow::bail!("Too many equivalent session entries");
+            }
+        }
+        let from = SessionId::new();
+        let mut equivs = self.equivs.write().unwrap();
+        equivs.insert(from, (to, Instant::now()));
+        Ok(from)
+    }
+
+    pub fn remove_equiv_session(&self, from: &SessionId) {
+        let mut equivs = self.equivs.write().unwrap();
+        equivs.remove(from);
+    }
+
+    pub fn cleanup_equiv_sessions(&self, max_age: std::time::Duration) {
+        let mut equivs = self.equivs.write().unwrap();
+        let now = Instant::now();
+        equivs.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < max_age);
+    }
+
+    fn maybe_cleanup_equivs(&self) {
+        let now = Instant::now();
+        let mut last = self.last_cleanup.write().unwrap();
+        if now.duration_since(*last)
+            > Duration::from_secs(consts::CLEANUP_EQUIV_SESSIONS_INTERVAL_SECS)
+        {
+            self.cleanup_equiv_sessions(Duration::from_secs(consts::EQUIV_SESSION_MAX_AGE_SECS));
+            *last = now;
+        }
+    }
 }
 
 impl Default for SessionManager {
@@ -95,7 +156,9 @@ impl Default for SessionManager {
 
 // Get the global session manager instance
 pub fn get_session_manager() -> &'static SessionManager {
-    SESSION_MANAGER.get_or_init(SessionManager::new)
+    let manager = SESSION_MANAGER.get_or_init(SessionManager::new);
+    manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
+    manager
 }
 
 #[cfg(test)]

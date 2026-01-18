@@ -2,12 +2,16 @@ use super::*;
 
 use crate::{consts::TICKET_LENGTH, system::trigger::Trigger};
 
+fn new_session_for_test() -> Session {
+    let ticket = [0x40u8; TICKET_LENGTH];
+    Session::new([0u8; 32], ticket, Trigger::new())
+}
+
 #[tokio::test]
 async fn test_session_manager_add_and_get() {
     let manager = SessionManager::new();
-    let session_id = SessionId::new([0u8; TICKET_LENGTH]);
-    let session = Session::new([0u8; 32], Trigger::new());
-    manager.add_session(session_id, session);
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
     // Fail if session is not found
     let retrieved_session = manager.get_session(&session_id).unwrap();
     assert_eq!(retrieved_session.get_shared_secret(), [0u8; 32]);
@@ -17,7 +21,7 @@ async fn test_session_manager_add_and_get() {
 
 #[tokio::test]
 async fn test_session_running() {
-    let session = Session::new([0u8; 32], Trigger::new());
+    let session = new_session_for_test();
     session.start_server().await.unwrap();
     assert!(session.is_server_running());
     assert!(!session.is_client_running());
@@ -25,7 +29,7 @@ async fn test_session_running() {
 
 #[tokio::test]
 async fn test_session_sequence_numbers() {
-    let session = Session::new([0u8; 32], Trigger::new());
+    let session = new_session_for_test();
     let seq = session.get_seq();
     assert_eq!(seq, (0, 0));
     session.set_seq(5, 10);
@@ -39,9 +43,8 @@ async fn test_get_session_manager() {
     assert!(manager.sessions.read().unwrap().is_empty());
     // Clear the session manager for testing
     manager.sessions.write().unwrap().clear();
-    let session_id = SessionId::new([0u8; TICKET_LENGTH]);
-    let session = Session::new([0u8; 32], Trigger::new());
-    manager.add_session(session_id, session);
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
     let retrieved_session = manager.get_session(&session_id).unwrap();
     assert_eq!(retrieved_session.get_shared_secret(), [0u8; 32]);
 }
@@ -49,8 +52,7 @@ async fn test_get_session_manager() {
 #[tokio::test]
 async fn test_session_lifecycle() {
     let manager = SessionManager::new();
-    let session_id = SessionId::new([1u8; TICKET_LENGTH]);
-    let session = Session::new([0u8; 32], Trigger::new());
+    let session = new_session_for_test();
     fn test_state(
         manager: &SessionManager,
         session_id: &SessionId,
@@ -61,7 +63,7 @@ async fn test_session_lifecycle() {
         assert_eq!(sess.is_server_running(), expected_server_is_running);
         assert_eq!(sess.is_client_running(), expected_client_is_running);
     }
-    manager.add_session(session_id, session);
+    let session_id = manager.add_session(session).unwrap();
     manager.start_server(&session_id).await.unwrap();
     test_state(&manager, &session_id, true, false);
     manager.start_client(&session_id).await.unwrap();
@@ -75,22 +77,22 @@ async fn test_session_lifecycle() {
 #[tokio::test]
 async fn test_session_removed_exactly_once() {
     let manager = SessionManager::new();
-    let id = SessionId::new([9u8; TICKET_LENGTH]);
+    let session = new_session_for_test();
 
-    manager.add_session(id, Session::new([0u8; 32], Trigger::new()));
+    let session_id = manager.add_session(session).unwrap();
     // Start servers first
-    manager.start_server(&id).await.unwrap();
-    manager.start_client(&id).await.unwrap();
+    manager.start_server(&session_id).await.unwrap();
+    manager.start_client(&session_id).await.unwrap();
 
-    manager.stop_server(&id).await.unwrap();
-    assert!(manager.get_session(&id).is_some());
+    manager.stop_server(&session_id).await.unwrap();
+    assert!(manager.get_session(&session_id).is_some());
 
-    manager.stop_client(&id).await.unwrap();
-    assert!(manager.get_session(&id).is_none());
+    manager.stop_client(&session_id).await.unwrap();
+    assert!(manager.get_session(&session_id).is_none());
 
     // Any aditional stops should be no-ops
-    manager.stop_server(&id).await.unwrap();
-    manager.stop_client(&id).await.unwrap();
+    manager.stop_server(&session_id).await.unwrap();
+    manager.stop_client(&session_id).await.unwrap();
 }
 
 #[tokio::test]
@@ -98,9 +100,9 @@ async fn test_concurrent_access() {
     use std::sync::Arc;
 
     let manager = Arc::new(SessionManager::new());
-    let session_id = SessionId::new([42u8; TICKET_LENGTH]);
+    let session = new_session_for_test();
 
-    manager.add_session(session_id, Session::new([1u8; 32], Trigger::new()));
+    let session_id = manager.add_session(session).unwrap();
 
     let mut handles = vec![];
 
@@ -129,7 +131,7 @@ async fn test_sequence_consistency_under_concurrency() {
     use std::sync::Arc;
     use std::thread;
 
-    let session = Arc::new(Session::new([0u8; 32], Trigger::new()));
+    let session = Arc::new(new_session_for_test());
 
     let mut handles = vec![];
 
@@ -165,12 +167,11 @@ async fn test_sequence_consistency_under_concurrency() {
 #[tokio::test]
 async fn test_get_session_returns_arc_clone() {
     let manager = SessionManager::new();
-    let id = SessionId::new([7u8; TICKET_LENGTH]);
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
 
-    manager.add_session(id, Session::new([0u8; 32], Trigger::new()));
-
-    let s1 = manager.get_session(&id).unwrap();
-    let s2 = manager.get_session(&id).unwrap();
+    let s1 = manager.get_session(&session_id).unwrap();
+    let s2 = manager.get_session(&session_id).unwrap();
 
     assert!(Arc::ptr_eq(&s1, &s2));
 }

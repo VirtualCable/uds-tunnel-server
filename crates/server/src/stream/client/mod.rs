@@ -2,7 +2,6 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
 };
 
 use crate::{
@@ -16,15 +15,15 @@ pub struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
     sender: Sender<Vec<u8>>,
 
-    read_half: R,
+    reader: R,
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
-    pub fn new(read_half: R, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(reader: R, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
         TunnelClientInboundStream {
             stop,
             sender,
-            read_half,
+            reader,
         }
     }
     pub async fn run(&mut self) -> Result<()> {
@@ -36,7 +35,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                 _ = self.stop.async_wait() => {
                     break;
                 }
-                result = self.read_half.read(&mut buffer) => {
+                result = self.reader.read(&mut buffer) => {
                     match result {
                         Ok(0) => {
                             // Connection closed
@@ -67,15 +66,15 @@ struct TunnelClientOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
     receiver: Receiver<Vec<u8>>,
 
-    write_half: W,
+    writer: W,
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
-    pub fn new(write_half: W, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(writer: W, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
         TunnelClientOutboundStream {
             stop,
             receiver,
-            write_half,
+            writer,
         }
     }
     pub async fn run(&mut self) -> Result<()> {
@@ -89,7 +88,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(data) => {
-                            self.write_half.write_all(&data).await?;
+                            self.writer.write_all(&data).await?;
                         }
                         Err(_) => {
                             log::error!("Client outbound receiver channel closed");
@@ -106,21 +105,31 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
     }
 }
 
-pub struct TunnelClientStream {
+pub struct TunnelClientStream<R, W>
+where
+    R: AsyncReadExt + Send + Unpin + 'static,
+    W: AsyncWriteExt + Send + Unpin + 'static,
+{
     session_id: SessionId,
-    stream: TcpStream,
+    reader: R,
+    writer: W
 }
 
-impl TunnelClientStream {
-    pub fn new(id: SessionId, stream: TcpStream) -> Self {
+impl<R, W> TunnelClientStream<R, W>
+where
+    R: AsyncReadExt + Send + Unpin + 'static,
+    W: AsyncWriteExt + Send + Unpin + 'static,
+{
+    pub fn new(id: SessionId, reader: R, writer: W) -> Self {
         TunnelClientStream {
             session_id: id,
-            stream,
+            reader,
+            writer,
         }
     }
 
     pub async fn run(self) -> Result<()> {
-        let Self { session_id, stream } = self;
+        let Self { session_id, reader, writer } = self;
 
         let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
         {
@@ -133,13 +142,12 @@ impl TunnelClientStream {
             return Ok(());
         };
 
-        let (read_half, write_half) = stream.into_split();
         let local_stop = Trigger::new();
 
-        let mut inbound = TunnelClientInboundStream::new(read_half, channels.0, local_stop.clone());
+        let mut inbound = TunnelClientInboundStream::new(reader, channels.0, local_stop.clone());
 
         let mut outbound =
-            TunnelClientOutboundStream::new(write_half, channels.1, local_stop.clone());
+            TunnelClientOutboundStream::new(writer, channels.1, local_stop.clone());
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);
