@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::{consts, session};
+
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
     // Why 2? to ensure each crypt is used where expected
@@ -10,6 +12,80 @@ fn make_test_crypts() -> (Crypt, Crypt) {
     let outbound = Crypt::new(&key2);
 
     (inbound, outbound)
+}
+
+async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let ticket = [0x40u8; consts::TICKET_LENGTH];
+
+    // Create the session
+    let session = session::Session::new([3u8; 32], ticket, Trigger::new());
+
+    // Add session to manager
+    let session_id = session::get_session_manager().add_session(session).unwrap();
+
+    let (client_side, tunnel_side) = tokio::io::duplex(1024);
+    let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
+
+    let tss = TunnelServerStream::new(session_id, tunnel_reader, tunnel_writer);
+
+    tokio::spawn(async move {
+        tss.run().await.unwrap();
+    });
+
+    (session_id, client_side)
+}
+
+async fn get_server_stream_components(
+    session_id: &SessionId,
+) -> Result<(
+    Trigger,
+    (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>),
+    Crypt,
+    Crypt,
+)> {
+    let (stop, channels, inbound_crypt, outbound_crypt) =
+        if let Some(session) = get_session_manager().get_session(&session_id) {
+            let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
+            (
+                session.get_stop_trigger(),
+                session.get_client_channels().await?,
+                inbound_crypt,
+                outbound_crypt,
+            )
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            anyhow::bail!("Session not found");
+        };
+    Ok((stop, channels, inbound_crypt, outbound_crypt))
+}
+
+async fn init_server_test() -> (
+    SessionId,
+    tokio::io::DuplexStream,
+    Trigger,
+    flume::Sender<Vec<u8>>,
+    flume::Receiver<Vec<u8>>,
+    Crypt,
+    Crypt,
+) {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (session_id, client) = create_test_server_stream().await;
+
+    let (stop, (tx, rx), inbound_crypt, outbound_crypt) =
+        get_server_stream_components(&session_id).await.unwrap();
+
+    (
+        session_id,
+        client,
+        stop,
+        tx,
+        rx,
+        inbound_crypt,
+        outbound_crypt,
+    )
 }
 
 #[tokio::test]
@@ -117,20 +193,76 @@ async fn test_server_inbound_stop_before_read() {
 }
 
 #[tokio::test]
-async fn test_server_stream() {
-    log::setup_logging("debug", log::LogType::Test);
+async fn test_server_stream_with_invalid_packet() {
+    let (_session_id, mut client, stop, _tx, _rx, _inbound_crypt, _outbound_crypt) =
+        init_server_test().await;
+    // Send some data to tunnel, invalid data
+    let msg = b"Hello, client!";
+    client.write_all(msg).await.unwrap();
 
-    use crate::{consts, session};
-    let ticket = [0x40u8; consts::TICKET_LENGTH];
+    // Trigger should stop the stream on invalid packet
+    if !stop
+        .wait_timeout_async(std::time::Duration::from_secs(2))
+        .await
+    {
+        panic!("Stream did not stop on invalid packet");
+    }
+}
 
-    // Create the session
-    let session = session::Session::new([3u8; 32], ticket, Trigger::new());
+#[tokio::test]
+async fn test_server_stream_valid_packets() -> Result<()> {
+    let (_session_id, mut client, stop, tx, rx, mut inbound_crypt, mut outbound_crypt) =
+        init_server_test().await;
 
-    // Add session to manager
-    let session_id = session::get_session_manager().add_session(session).unwrap();
+    // Note: This is a test, inbound is the crypt used to decrypt data coming FROM client
+    // So client will encrypt with our inbound (their outbound) crypt, and eill decrypt with our outbound (their inbound) crypt
 
-    let (client_send, server_recv) = tokio::io::duplex(1024);
-    let (server_send, client_recv) = tokio::io::duplex(1024);
+    // Prepare and send a valid packet to server inbound
+    let sent_msg = b"Hello, server!";
+    let encrypted1 = {
+        let mut msg_packet = PacketBuffer::from_slice(sent_msg);
+        let encrypted = inbound_crypt
+            .encrypt(sent_msg.len(), &mut msg_packet)
+            .unwrap();
+        encrypted.to_vec()
+    };
+    let counter1 = inbound_crypt.current_seq();
+    let length1 = encrypted1.len() as u16;
 
-    let tss = TunnelServerStream::new(session_id, client_recv, server_send);
+    let mut header1 = [0u8; HEADER_LENGTH];
+    build_header(counter1, length1, &mut header1).unwrap();
+
+    client.write_all(&header1).await.unwrap();
+    client.write_all(&encrypted1).await.unwrap();
+
+    // Should receive on tx on time
+    let recv_msg =
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv_async()).await??;
+    assert_eq!(recv_msg, sent_msg);
+
+    // Stop should not be triggered
+    assert!(!stop.is_triggered());
+
+    // Now, send something that we will receibe crypted in client
+    let sent_msg2 = b"Another message!";
+    tx.send_async(sent_msg2.into()).await?;
+
+    // Read from client the encrypted message
+    let mut header2 = [0u8; HEADER_LENGTH];
+    client.read_exact(&mut header2).await?;
+    let (counter2, length2) = parse_header(&header2)?;
+    let mut encrypted2 = vec![0u8; length2 as usize];
+    client.read_exact(&mut encrypted2).await?;
+
+    // Decrypt the message
+    let mut packet_buffer2 = PacketBuffer::from_slice(&encrypted2);
+    let decrypted2 = outbound_crypt
+        .decrypt(counter2, length2, &mut packet_buffer2)
+        .unwrap();
+
+    assert_eq!(decrypted2, sent_msg2);
+
+    // Trigger stop to end the test
+    stop.trigger();
+    Ok(())
 }

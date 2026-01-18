@@ -238,7 +238,7 @@ where
                 let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
                 (
                     session.get_stop_trigger(),
-                    session.get_client_channels().await?,
+                    session.get_server_channels().await?,
                     inbound_crypt,
                     outbound_crypt,
                 )

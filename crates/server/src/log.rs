@@ -169,19 +169,7 @@ pub fn setup_logging(level: &str, log_type: LogType) {
     );
 
     // To keep compat with old behavior, if .uds-debug-on is on temp or user home, set level to debug
-    let level = if std::path::Path::new(&std::env::temp_dir().join(".uds-debug-on")).exists()
-        || std::path::Path::new(
-            &std::env::home_dir()
-                .unwrap_or_default()
-                .join(".uds-debug-on"),
-        )
-        .exists()
-    {
-        "debug".to_string()
-    } else {
-        // Only if .uds-debug-on is not present, get level from env var or use default passed
-        std::env::var(level_key).unwrap_or_else(|_| level.to_string())
-    };
+    let level= std::env::var(level_key).unwrap_or_else(|_| level.to_string());
 
     let log_path =
         std::env::var(log_path).unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into());
