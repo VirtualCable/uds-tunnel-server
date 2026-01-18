@@ -89,7 +89,7 @@ impl Proxy {
             };
 
             tokio::select! {
-                _ = stop.async_wait() => {
+                _ = stop.wait_async() => {
                     log::debug!("Session proxy stopping due to stop signal");
                     break;
                 }

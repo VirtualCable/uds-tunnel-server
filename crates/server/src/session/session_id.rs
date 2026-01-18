@@ -149,6 +149,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         log::info!("Session dropped, stopping streams");
-        self.stop.set();
+        self.stop.trigger();
     }
 }

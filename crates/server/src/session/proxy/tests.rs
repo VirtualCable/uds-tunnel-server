@@ -16,7 +16,7 @@ async fn attach_detach_basic() -> Result<()> {
 
     handle.detach_server().await?;
 
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -43,7 +43,7 @@ async fn messages_preserve_order() -> Result<()> {
         assert_eq!(num, i);
     }
 
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -64,7 +64,7 @@ async fn backpressure_does_not_panic() -> Result<()> {
     }
 
     // No panic, no deadlock
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -92,7 +92,7 @@ async fn closes_on_full_buffer() -> Result<()> {
     }
 
     // No panic, no deadlock
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -116,7 +116,7 @@ async fn reattach_server_works() -> Result<()> {
     let msg = client.rx.recv_async().await?;
     assert_eq!(msg, b"second");
 
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -139,7 +139,7 @@ async fn fairness_between_sides() -> Result<()> {
         let _ = client.rx.recv_async().await?;
     }
 
-    stop.set();
+    stop.trigger();
     Ok(())
 }
 
@@ -198,7 +198,7 @@ async fn test_proxy_communication() -> Result<()> {
     assert_eq!(received_by_server, response_message);
     log::debug!("Message from client to server verified");
 
-    stop.set();
+    stop.trigger();
 
     Ok(())
 }

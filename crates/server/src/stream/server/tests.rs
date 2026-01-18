@@ -46,8 +46,8 @@ async fn test_server_inbound_basic() {
     inbound.run().await.unwrap();
 
     assert_eq!(rx.recv().unwrap(), msg);
-    // Stop is set on TunnelServerStream, so here must be not set
-    assert!(!stop.is_set());
+    // Stop is set on TunnelServerStream, so here must be unset
+    assert!(!stop.is_triggered());
 }
 
 #[tokio::test]
@@ -67,7 +67,7 @@ async fn test_server_inbound_remote_close_before_header() {
     inbound.run().await.unwrap();
 
     assert!(rx.try_recv().is_err());
-    assert!(!stop.is_set());
+    assert!(!stop.is_triggered());
 }
 
 #[tokio::test]
@@ -94,7 +94,7 @@ async fn test_server_inbound_read_error() {
 
     let res = inbound.run().await;
     assert!(res.is_err());
-    assert!(!stop.is_set());
+    assert!(!stop.is_triggered());
 }
 
 #[tokio::test]
@@ -109,7 +109,7 @@ async fn test_server_inbound_stop_before_read() {
 
     let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone());
 
-    stop.set();
+    stop.trigger();
 
     inbound.run().await.unwrap();
 

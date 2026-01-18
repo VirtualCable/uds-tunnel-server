@@ -87,7 +87,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
 
         while read < length {
             let n = tokio::select! {
-                _ = stop.async_wait() => {
+                _ = stop.wait_async() => {
                     log::info!("Inbound stream stopped while reading");
                     return Ok(0);  // Indicate end of processing
                 }
@@ -136,7 +136,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
     pub async fn run(&mut self) -> Result<()> {
         loop {
             tokio::select! {
-                _ = self.stop.async_wait() => {
+                _ = self.stop.wait_async() => {
                     break;
                 }
                 result = self.receiver.recv_async() => {
@@ -260,7 +260,7 @@ where
                 log::error!("Inbound stream error: {:?}", e);
             }
             // let's ensure the other side is also stopped
-            inbound.stop.set();
+            inbound.stop.trigger();
         });
 
         tokio::spawn(async move {
@@ -268,23 +268,23 @@ where
                 log::error!("Outbound stream error: {:?}", e);
             }
             // let's ensure the other side is also stopped
-            outbound.stop.set();
+            outbound.stop.trigger();
         });
 
         tokio::spawn(async move {
             // Notify starting server side
             if let Err(e) = get_session_manager().start_server(&session_id).await {
                 log::error!("Failed to start server session {:?}: {:?}", session_id, e);
-                local_stop.set();
+                local_stop.trigger();
                 // Note: Server side does not trigger stop of the session on failure
                 //       as it is recoverable.
                 return;
             }
             tokio::select! {
-                _ = stop.async_wait() => {
-                    local_stop.set();
+                _ = stop.wait_async() => {
+                    local_stop.trigger();
                 }
-                _ = local_stop.async_wait() => {}
+                _ = local_stop.wait_async() => {}
             }
             // Notify stopping server side
             if let Err(e) = get_session_manager().stop_server(&session_id).await {
@@ -305,7 +305,7 @@ where
                             "Server side not running for session {:?}, setting stop trigger",
                             session_id
                         );
-                        stop.set();
+                        stop.trigger();
                     }
                 }
             });

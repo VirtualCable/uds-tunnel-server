@@ -34,7 +34,7 @@ async fn test_receive_and_write() {
             log::debug!("Sending data through outbound stream");
             tx.send_async(b"hello".to_vec()).await.unwrap();
             // Wait for stop signal
-            stop.async_wait().await;
+            stop.wait_async().await;
         }
     });
 
@@ -47,7 +47,7 @@ async fn test_receive_and_write() {
     let mut buf = [0u8; 5];
     log::debug!("Waiting to read from server side");
     server.read_exact(&mut buf).await.unwrap();
-    stop.set();
+    stop.trigger();
     log::debug!("Read data: {:?}", &buf);
     assert_eq!(&buf, b"hello");
 }
@@ -67,7 +67,7 @@ async fn test_inbound_remote_close() {
 
     // No debe enviar nada
     assert!(rx.try_recv().is_err());
-    assert!(stop.is_set());
+    assert!(stop.is_triggered());
 }
 
 #[tokio::test]
@@ -91,7 +91,7 @@ async fn test_inbound_read_error() {
 
     let res = inbound.run().await;
     assert!(res.is_err());
-    assert!(stop.is_set());
+    assert!(stop.is_triggered());
 }
 
 #[tokio::test]
@@ -106,7 +106,7 @@ async fn test_outbound_channel_closed() {
 
     let res = outbound.run().await;
     assert!(res.is_err());
-    assert!(stop.is_set());
+    assert!(stop.is_triggered());
 }
 
 #[tokio::test]
@@ -117,10 +117,10 @@ async fn test_outbound_stop_before_data() {
 
     let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
 
-    stop.set(); // detener antes de arrancar
+    stop.trigger(); // detener antes de arrancar
 
     outbound.run().await.unwrap();
-    assert!(stop.is_set());
+    assert!(stop.is_triggered());
 }
 
 #[tokio::test]
@@ -137,7 +137,7 @@ async fn test_outbound_backpressure() {
         async move {
             tx.send_async(b"one".to_vec()).await.unwrap();
             tx.send_async(b"two".to_vec()).await.unwrap();
-            stop.async_wait().await;
+            stop.wait_async().await;
         }
     });
 
@@ -153,7 +153,7 @@ async fn test_outbound_backpressure() {
     server.read_exact(&mut buf2).await.unwrap();
     assert_eq!(&buf2, b"two");
 
-    stop.set();
+    stop.trigger();
 }
 
 #[tokio::test]
@@ -186,7 +186,7 @@ async fn test_full_tunnel_echo() {
             while let Ok(msg) = rx_in.recv_async().await {
                 tx_out.send_async(msg).await.unwrap();
             }
-            stop.set();
+            stop.trigger();
         }
     });
 
@@ -227,7 +227,7 @@ async fn test_inbound_multiple_packets() {
     assert_eq!(rx.recv_async().await.unwrap(), b"222");
     assert_eq!(rx.recv_async().await.unwrap(), b"333");
     log::debug!("All packets received");
-    stop.set();
+    stop.trigger();
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn test_outbound_multiple_packets() {
             tx.send_async(b"one".to_vec()).await.unwrap();
             tx.send_async(b"two".to_vec()).await.unwrap();
             tx.send_async(b"three".to_vec()).await.unwrap();
-            stop.async_wait().await;
+            stop.wait_async().await;
         }
     });
 
@@ -262,5 +262,5 @@ async fn test_outbound_multiple_packets() {
 
     server.read_exact(&mut buf[..5]).await.unwrap();
     assert_eq!(&buf[..5], b"three");
-    stop.set();
+    stop.trigger();
 }

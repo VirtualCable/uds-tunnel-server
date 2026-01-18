@@ -32,7 +32,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
         let mut buffer = [0u8; CRYPT_PACKET_SIZE];
         loop {
             tokio::select! {
-                _ = self.stop.async_wait() => {
+                _ = self.stop.wait_async() => {
                     log::debug!("Stopping client inbound stream due to stop signal");
                     break;
                 }
@@ -51,7 +51,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         Err(e) => {
                             log::error!("Client inbound read error: {:?}", e);
                             // Set stop and return error
-                            self.stop.set();
+                            self.stop.trigger();
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
                         }
                     }
@@ -59,7 +59,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
             }
         }
         // Ensure stop is set
-        self.stop.set();
+        self.stop.trigger();
         Ok(())
     }
 }
@@ -84,7 +84,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
         log::debug!("Starting client outbound stream");
         loop {
             tokio::select! {
-                _ = self.stop.async_wait() => {
+                _ = self.stop.wait_async() => {
                     break;
                 }
                 result = self.receiver.recv_async() => {
@@ -94,7 +94,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                         }
                         Err(_) => {
                             log::error!("Client outbound receiver channel closed");
-                            self.stop.set();
+                            self.stop.trigger();
                             return Err(anyhow::anyhow!("Receiver channel closed"));
                         }
                     }
@@ -102,7 +102,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
             }
         }
         // Ensure local stop is set
-        self.stop.set();
+        self.stop.trigger();
         Ok(())
     }
 }
@@ -164,16 +164,16 @@ where
             // Notify starting client side
             if let Err(e) = get_session_manager().start_client(&session_id).await {
                 log::error!("Failed to start client session {:?}: {:?}", session_id, e);
-                local_stop.set();
-                stop.set();
+                local_stop.trigger();
+                stop.trigger();
                 return;
             }
             tokio::select! {
-                _ = stop.async_wait() => {
-                    local_stop.set();
+                _ = stop.wait_async() => {
+                    local_stop.trigger();
                 }
-                _ = local_stop.async_wait() => {
-                    stop.set();
+                _ = local_stop.wait_async() => {
+                    stop.trigger();
                 }
             }
             // Notify stopping client side
