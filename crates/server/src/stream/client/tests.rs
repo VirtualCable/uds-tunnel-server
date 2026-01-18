@@ -1,5 +1,61 @@
 use super::*;
 
+use crate::{consts, session};
+
+async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let ticket = [0x40u8; consts::TICKET_LENGTH];
+
+    // Create the session
+    let session = session::Session::new([3u8; 32], ticket, Trigger::new());
+
+    // Add session to manager
+    let session_id = session::get_session_manager().add_session(session).unwrap();
+
+    let (client_side, tunnel_side) = tokio::io::duplex(1024);
+    let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
+
+    let tss = TunnelClientStream::new(session_id, tunnel_reader, tunnel_writer);
+
+    tokio::spawn(async move {
+        tss.run().await.unwrap();
+    });
+
+    (session_id, client_side)
+}
+
+async fn get_server_stream_components(
+    session_id: &SessionId,
+) -> Result<(Trigger, (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>))> {
+    let (stop, channels) = if let Some(session) = get_session_manager().get_session(session_id) {
+        (
+            session.get_stop_trigger(),
+            session.get_server_channels().await?,
+        )
+    } else {
+        log::warn!("Session {:?} not found, aborting stream", session_id);
+        anyhow::bail!("Session not found");
+    };
+    Ok((stop, channels))
+}
+
+async fn init_server_test() -> (
+    SessionId,
+    tokio::io::DuplexStream,
+    Trigger,
+    flume::Sender<Vec<u8>>,
+    flume::Receiver<Vec<u8>>,
+) {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (session_id, client) = create_test_server_stream().await;
+
+    let (stop, (tx, rx)) = get_server_stream_components(&session_id).await.unwrap();
+
+    (session_id, client, stop, tx, rx)
+}
+
 #[tokio::test]
 async fn test_read_and_send() {
     let (mut client, server) = tokio::io::duplex(1024);
@@ -263,4 +319,42 @@ async fn test_outbound_multiple_packets() {
     server.read_exact(&mut buf[..5]).await.unwrap();
     assert_eq!(&buf[..5], b"three");
     stop.trigger();
+}
+
+#[tokio::test]
+async fn test_client_stream_valid_packets() -> Result<()> {
+    let (_session_id, mut client, stop, tx, rx) = init_server_test().await;
+
+    let sent_msg = b"Hello, server!";
+    client.write_all(sent_msg).await.unwrap();
+
+    // Should receive on tx on time
+    let recv_msg =
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv_async()).await??;
+    assert_eq!(recv_msg, sent_msg);
+
+    // Stop should not be triggered
+    assert!(!stop.is_triggered());
+
+    // Send response back to client
+    let response_msg = b"Hello, client!";
+    tx.send_async(response_msg.to_vec()).await.unwrap();
+
+    // Read from client the forwarded mesage
+    let mut buf = vec![0u8; response_msg.len()];
+    client.read_exact(&mut buf).await.unwrap();
+    assert_eq!(&buf, response_msg);
+
+    // Trigger stop to end the test
+    stop.trigger();
+    // Wait a bit and theres session should be closed
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if get_session_manager().get_session(&_session_id).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }).await?;
+    Ok(())
 }

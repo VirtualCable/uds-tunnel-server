@@ -93,6 +93,10 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                             self.writer.write_all(&data).await?;
                         }
                         Err(_) => {
+                            // Maybe the receiver "won" the select! but stop is already set. This is fine
+                            if self.stop.is_triggered() {
+                                break;
+                            }
                             log::error!("Client outbound receiver channel closed");
                             self.stop.trigger();
                             return Err(anyhow::anyhow!("Receiver channel closed"));

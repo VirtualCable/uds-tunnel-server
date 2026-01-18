@@ -78,7 +78,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
 
     pub async fn read_stream(
         stop: &Trigger,
-        read_half: &mut R,
+        reader: &mut R,
         buffer: &mut [u8],
         length: usize,
         disallow_eof: bool,
@@ -91,7 +91,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                     log::info!("Inbound stream stopped while reading");
                     return Ok(0);  // Indicate end of processing
                 }
-                result = read_half.read(&mut buffer[read..length]) => {
+                result = reader.read(&mut buffer[read..length]) => {
                     match result {
                         Ok(0) => {
                             if disallow_eof || read != 0 {
@@ -145,6 +145,11 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                             self.send_data(&data).await?
                         }
                         Err(_) => {
+                            // Maybe the receiver "won" the select! but stop is already set. This is fine
+                            if self.stop.is_triggered() {
+                                break;
+                            }
+                            log::error!("Server outbound receiver channel closed");
                             return Err(anyhow::anyhow!("Receiver channel closed"));
                         }
                     }

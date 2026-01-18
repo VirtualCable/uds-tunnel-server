@@ -2,8 +2,6 @@ use anyhow::Result;
 
 use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 
-use crate::log;
-
 pub mod consts;
 pub mod tunnel;
 pub mod types;

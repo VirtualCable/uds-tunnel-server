@@ -175,3 +175,57 @@ async fn test_get_session_returns_arc_clone() {
 
     assert!(Arc::ptr_eq(&s1, &s2));
 }
+
+#[tokio::test]
+async fn test_get_equiv_session_no_equiv() {
+    let manager = SessionManager::new();
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
+
+    let equiv_session = manager.get_equiv_session(&session_id).unwrap();
+    let direct_session = manager.get_session(&session_id).unwrap();
+
+    assert!(Arc::ptr_eq(&equiv_session, &direct_session));
+}
+
+#[tokio::test]
+async fn test_add_equiv_session() {
+    let manager = SessionManager::new();
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
+
+    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+    let equiv_session = manager.get_equiv_session(&equiv_session_id).unwrap();
+    let direct_session = manager.get_session(&session_id).unwrap();
+
+    assert!(Arc::ptr_eq(&equiv_session, &direct_session));
+}
+
+#[tokio::test]
+async fn test_remove_session_removes_equiv_session() {
+    let manager = SessionManager::new();
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
+
+    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+
+    manager.remove_session(&session_id);
+
+    assert!(manager.get_equiv_session(&equiv_session_id).is_none());
+    assert!(manager.get_session(&session_id).is_none());
+}
+
+#[tokio::test]
+async fn test_remove_equiv_session() {
+    let manager = SessionManager::new();
+    let session = new_session_for_test();
+    let session_id = manager.add_session(session).unwrap();
+
+    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+
+    manager.remove_equiv_session(&equiv_session_id);
+
+    // Original session should still exist
+    assert!(manager.get_session(&session_id).is_some());
+    assert!(manager.get_equiv_session(&equiv_session_id).is_none());
+}

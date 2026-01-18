@@ -46,7 +46,7 @@ async fn get_server_stream_components(
     Crypt,
 )> {
     let (stop, channels, inbound_crypt, outbound_crypt) =
-        if let Some(session) = get_session_manager().get_session(&session_id) {
+        if let Some(session) = get_session_manager().get_session(session_id) {
             let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
             (
                 session.get_stop_trigger(),
@@ -264,5 +264,15 @@ async fn test_server_stream_valid_packets() -> Result<()> {
 
     // Trigger stop to end the test
     stop.trigger();
+    // Wait a bit and theres session should be closed
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if get_session_manager().get_session(&_session_id).is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await?;
     Ok(())
 }
