@@ -5,6 +5,7 @@ pub mod log;
 pub mod session;
 pub mod stream;
 pub mod system;
+pub mod broker;
 
 // TODO: implement real main
 #[tokio::main(flavor = "multi_thread")]

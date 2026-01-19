@@ -9,6 +9,11 @@ anyhow = { workspace = true }
 num_enum = { workspace = true }
 rand = { workspace = true }
 
+# http
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 # Encryption
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
@@ -23,6 +28,7 @@ tracing-log = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 
 # channel
 flume = { workspace = true }
