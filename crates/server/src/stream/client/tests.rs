@@ -355,6 +355,7 @@ async fn test_client_stream_valid_packets() -> Result<()> {
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-    }).await?;
+    })
+    .await?;
     Ok(())
 }
