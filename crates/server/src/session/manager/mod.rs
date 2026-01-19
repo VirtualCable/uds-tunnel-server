@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
-use super::session_id::{Session, SessionId};
+use super::{Session, SessionId};
 
 mod consts;
 
