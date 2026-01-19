@@ -16,8 +16,20 @@ mod utils;
 pub struct TicketResponse {
     pub host: String,
     pub port: u16,
-    pub notify: String,
+    pub notify: String,  // Stop notification ticket
     pub shared_secret: Option<String>,
+}
+
+impl TicketResponse {
+    pub fn get_shared_secret_bytes(&self) -> Option<[u8; 32]> {
+        if let Some(ref secret_str) = self.shared_secret
+            && let Ok(secret_bytes) = utils::hex_to_bytes(secret_str)
+        {
+            Some(secret_bytes)
+        } else {
+            None
+        }
+    }
 }
 
 #[async_trait::async_trait]
