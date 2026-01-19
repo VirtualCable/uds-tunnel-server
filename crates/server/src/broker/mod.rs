@@ -183,12 +183,7 @@ mod tests {
         let _m = server
             .mock(
                 "DELETE",
-                format!(
-                    "/{}/stop/{}",
-                    String::from_utf8_lossy(&ticket),
-                    auth_token
-                )
-                .as_str(),
+                format!("/{}/stop/{}", String::from_utf8_lossy(&ticket), auth_token).as_str(),
             )
             .with_status(200)
             .create();

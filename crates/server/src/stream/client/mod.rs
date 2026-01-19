@@ -1,8 +1,6 @@
 use anyhow::Result;
 use flume::{Receiver, Sender};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     crypt::consts::CRYPT_PACKET_SIZE,
@@ -118,7 +116,7 @@ where
 {
     session_id: SessionId,
     reader: R,
-    writer: W
+    writer: W,
 }
 
 impl<R, W> TunnelClientStream<R, W>
@@ -135,7 +133,11 @@ where
     }
 
     pub async fn run(self) -> Result<()> {
-        let Self { session_id, reader, writer } = self;
+        let Self {
+            session_id,
+            reader,
+            writer,
+        } = self;
 
         let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
         {
@@ -152,8 +154,7 @@ where
 
         let mut inbound = TunnelClientInboundStream::new(reader, channels.0, local_stop.clone());
 
-        let mut outbound =
-            TunnelClientOutboundStream::new(writer, channels.1, local_stop.clone());
+        let mut outbound = TunnelClientOutboundStream::new(writer, channels.1, local_stop.clone());
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);

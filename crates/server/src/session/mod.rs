@@ -1,16 +1,15 @@
 use std::sync::{Arc, RwLock, atomic::AtomicBool};
 
-use rand::{Rng, distr::Alphanumeric};
-use flume::{Receiver, Sender};
 use anyhow::Result;
+use flume::{Receiver, Sender};
+use rand::{Rng, distr::Alphanumeric};
 
-use crate::{consts::TICKET_LENGTH, system::trigger::Trigger, crypt, log};
+use crate::{consts::TICKET_LENGTH, crypt, log, system::trigger::Trigger};
 
 mod manager;
 mod proxy;
 
 pub use manager::{SessionManager, get_session_manager};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SessionId([u8; TICKET_LENGTH]);
@@ -42,8 +41,6 @@ impl From<[u8; TICKET_LENGTH]> for SessionId {
         SessionId::from(id)
     }
 }
-
-
 
 pub struct Session {
     ticket: [u8; TICKET_LENGTH],
