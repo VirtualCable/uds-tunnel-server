@@ -1,6 +1,7 @@
+use core::fmt;
 use std::net::SocketAddr;
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use tokio::io::AsyncReadExt;
 
@@ -22,8 +23,8 @@ pub enum HandshakeCommand {
 //   - With or without PROXY protocol v2 header
 //   - HANDSHAKE_V2 | cmd:u8 | payload_cmd_dependent
 //        Test | no payload
-//        Open | ticket[48] | ticket encrpyted with HKDF-derived key
-//        Recover | ticket[48] | ticket encrypted with HKDF-derived key
+//        Open | ticket[48] | ticket encrpyted with HKDF-derived key  --> returns session id for new session
+//        Recover | ticket[48] | ticket encrypted with HKDF-derived key (this ticket is the session id of the lost session) -> returns same as Open (new session id)
 //   - Full handshake should occur on at most 0.2 seconds
 //   - Any failed handhsake, closes without response (hide server presence as much as possible)
 //   - TODO: Make some kind of block by IP if too many failed handshakes in short time
@@ -39,23 +40,49 @@ pub struct Handshake {
     pub action: HandshakeAction,
 }
 
+#[derive(Debug)]
+pub struct HandshakeError {
+    pub src_ip: Option<SocketAddr>,
+    pub message: String,
+}
+
+impl fmt::Display for HandshakeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HandshakeError: {} {:?}", self.message, self.src_ip)
+    }
+}
+
 impl Handshake {
     pub async fn parse<R: AsyncReadExt + Unpin>(
         reader: &mut R,
-        expect_proxy_v2: bool,
-    ) -> Result<Handshake> {
-        let ip = if expect_proxy_v2 {
-            let proxy_info = ProxyInfo::read_from_stream(reader).await?;
+        use_proxy_v2: bool,
+    ) -> Result<Handshake, HandshakeError> {
+        let ip = if use_proxy_v2 {
+            let proxy_info =
+                ProxyInfo::read_from_stream(reader)
+                    .await
+                    .map_err(|e| HandshakeError {
+                        src_ip: None,
+                        message: format!("failed to read PROXY protocol v2 header: {}", e),
+                    })?;
             Some(proxy_info.source_addr)
         } else {
             None
         };
         let mut signature_buf = [0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
-        reader.read_exact(&mut signature_buf).await?;
-        ensure!(
-            signature_buf[..HANDSHAKE_V2_SIGNATURE.len()] == *HANDSHAKE_V2_SIGNATURE,
-            "invalid handshake v2 signature"
-        );
+        reader
+            .read_exact(&mut signature_buf)
+            .await
+            .map_err(|e| HandshakeError {
+                src_ip: ip,
+                message: format!("failed to read handshake signature and command: {}", e),
+            })?;
+        if signature_buf.len() != HANDSHAKE_V2_SIGNATURE.len() + 1 {
+            return Err(HandshakeError {
+                src_ip: ip,
+                message: "incomplete handshake signature and command".to_string(),
+            });
+        }
         let cmd: HandshakeCommand = signature_buf[HANDSHAKE_V2_SIGNATURE.len()].into();
         match cmd {
             HandshakeCommand::Test => Ok(Handshake {
@@ -64,7 +91,13 @@ impl Handshake {
             }),
             HandshakeCommand::Open | HandshakeCommand::Recover => {
                 let mut ticket_buf = [0u8; TICKET_LENGTH];
-                reader.read_exact(&mut ticket_buf).await?;
+                reader
+                    .read_exact(&mut ticket_buf)
+                    .await
+                    .map_err(|e| HandshakeError {
+                        src_ip: ip,
+                        message: format!("failed to read handshake ticket: {}", e),
+                    })?;
                 let action = match cmd {
                     HandshakeCommand::Open => HandshakeAction::Open { ticket: ticket_buf },
                     HandshakeCommand::Recover => HandshakeAction::Recover { ticket: ticket_buf },
@@ -72,7 +105,10 @@ impl Handshake {
                 };
                 Ok(Handshake { src_ip: ip, action })
             }
-            HandshakeCommand::Unknown => Err(anyhow::anyhow!("unknown handshake command")),
+            HandshakeCommand::Unknown => Err(HandshakeError {
+                src_ip: ip,
+                message: "unknown handshake command".to_string(),
+            }),
         }
     }
 }

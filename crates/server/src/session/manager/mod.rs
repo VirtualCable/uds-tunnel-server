@@ -27,10 +27,20 @@ impl SessionManager {
         }
     }
 
+    // A new session is created with a new session id
+    // Also add an idempotent entry in equivs, so wen recovering from this session id works
+    // Without no more checks
     pub fn add_session(&self, session: Session) -> Result<SessionId> {
-        let mut sessions = self.sessions.write().unwrap();
         let session_id = SessionId::new();
-        sessions.insert(session_id, Arc::new(session));
+        {
+            let mut sessions = self.sessions.write().unwrap();
+            sessions.insert(session_id, Arc::new(session));
+        }
+        // Also, insert an idempotent entry in equivs
+        {
+            let mut equivs = self.equivs.write().unwrap();
+            equivs.insert(session_id, (session_id, Instant::now()));
+        }
         Ok(session_id)
     }
 
@@ -96,19 +106,17 @@ impl SessionManager {
         }
     }
 
+    /// Note: equivs will fail if the target session is removed or the equiv entry does not exist
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
         // If equivalent session exists, get it. If don't, try to use id as is.
 
-        let target_id = {
-            // Ensure lock scope is limited
-            let equivs = self.equivs.read().unwrap();
-            if let Some(equiv_id) = equivs.get(id) {
-                equiv_id.0
-            } else {
-                *id
-            }
-        };
-        self.get_session(&target_id)
+        // Ensure lock scope is limited
+        let equivs = self.equivs.read().unwrap();
+        if let Some(equiv_id) = equivs.get(id) {
+            self.get_session(&equiv_id.0)
+        } else {
+            None
+        }
     }
 
     pub fn create_equiv_session(&self, to: SessionId) -> Result<SessionId> {

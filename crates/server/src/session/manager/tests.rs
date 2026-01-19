@@ -177,7 +177,7 @@ async fn test_get_session_returns_arc_clone() {
 }
 
 #[tokio::test]
-async fn test_get_equiv_session_no_equiv() {
+async fn test_get_equiv_session_default() {
     let manager = SessionManager::new();
     let session = new_session_for_test();
     let session_id = manager.add_session(session).unwrap();

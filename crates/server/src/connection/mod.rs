@@ -12,7 +12,8 @@ pub async fn handle_connection(mut stream: TcpStream, expect_proxy_v2: bool) -> 
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
         handshake::Handshake::parse(&mut stream, expect_proxy_v2),
     )
-    .await??;
+    .await?
+    .map_err(|e| anyhow::anyhow!("handshake parsing error: {}", e))?;
     match handshake.action {
         handshake::HandshakeAction::Test => {
             // Just close the connection
