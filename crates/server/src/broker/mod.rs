@@ -1,6 +1,6 @@
 use reqwest::Client;
 
-use crate::consts::TICKET_LENGTH;
+use crate::{consts::TICKET_LENGTH, log};
 
 mod utils;
 
@@ -16,7 +16,7 @@ mod utils;
 pub struct TicketResponse {
     pub host: String,
     pub port: u16,
-    pub notify: String,  // Stop notification ticket
+    pub notify: String, // Stop notification ticket
     pub shared_secret: Option<String>,
 }
 
@@ -33,7 +33,7 @@ impl TicketResponse {
 }
 
 #[async_trait::async_trait]
-pub trait Broker {
+pub trait BrokerApi {
     async fn start_connection(
         &self,
         ticket: &[u8; TICKET_LENGTH],
@@ -42,16 +42,34 @@ pub trait Broker {
     async fn stop_connection(&self, ticket: &[u8; TICKET_LENGTH]) -> reqwest::Result<()>;
 }
 
-pub struct HttpBroker {
+pub struct HttpBrokerApi {
     client: Client,
     auth_token: String,
     ticket_rest_url: String,
 }
 
-impl HttpBroker {
+impl HttpBrokerApi {
     pub fn new(ticket_rest_url: &str, auth_token: &str) -> Self {
-        HttpBroker {
-            client: Client::new(),
+        // Remove trailing slash if present
+        let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
+        log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
+        HttpBrokerApi {
+            client: Client::builder()
+                .user_agent("UDSTunnelServer/5.0")
+                .default_headers({
+                    let mut headers = reqwest::header::HeaderMap::new();
+                    headers.insert(
+                        reqwest::header::ACCEPT,
+                        reqwest::header::HeaderValue::from_static("application/json"),
+                    );
+                    headers.insert(
+                        reqwest::header::CONTENT_TYPE,
+                        reqwest::header::HeaderValue::from_static("application/json"),
+                    );
+                    headers
+                })
+                .build()
+                .unwrap(),
             auth_token: auth_token.to_string(),
             ticket_rest_url: ticket_rest_url.to_string(),
         }
@@ -68,7 +86,7 @@ impl HttpBroker {
 }
 
 #[async_trait::async_trait]
-impl Broker for HttpBroker {
+impl BrokerApi for HttpBrokerApi {
     async fn start_connection(
         &self,
         ticket: &[u8; TICKET_LENGTH],
@@ -78,7 +96,6 @@ impl Broker for HttpBroker {
         let resp: TicketResponse = self
             .client
             .get(&url)
-            .header("Content-Type", "application/json")
             .send()
             .await?
             .error_for_status()?
@@ -91,13 +108,91 @@ impl Broker for HttpBroker {
     async fn stop_connection(&self, ticket: &[u8; TICKET_LENGTH]) -> reqwest::Result<()> {
         let url = self.get_url(ticket, "stop");
         // No response body expected
-        self.client
-            .delete(&url)
-            .header("Content-Type", "application/json")
-            .send()
-            .await?
-            .error_for_status()?;
+        self.client.delete(&url).send().await?.error_for_status()?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use mockito::Server;
+
+    async fn setup_server_and_api(auth_token: &str) -> (mockito::ServerGuard, HttpBrokerApi) {
+        log::setup_logging("debug", log::LogType::Test);
+
+        let server = Server::new_async().await;
+        let url = server.url() + "/"; // For testing, our base URL will be the mockito server
+
+        log::info!("Setting up mock server and API client");
+        let api = HttpBrokerApi::new(&url, auth_token);
+        // Pass the base url (without /ui) to the API
+        (server, api)
+    }
+
+    #[tokio::test]
+    async fn test_http_broker() {
+        let auth_token = "test_token";
+        let (mut server, api) = setup_server_and_api(auth_token).await;
+        let ticket = [b'A'; TICKET_LENGTH];
+        let ip = "172.27.0.1";
+        let ticket_response_json = r#"
+        {
+            "host": "example.com",
+            "port": 12345,
+            "notify": "notify_ticket",
+            "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+        "#;
+        let _m = server
+            .mock(
+                "GET",
+                format!(
+                    "/{}/{}/{}",
+                    String::from_utf8_lossy(&ticket),
+                    ip,
+                    auth_token
+                )
+                .as_str(),
+            )
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(ticket_response_json)
+            .create();
+        let response = api.start_connection(&ticket, ip).await.unwrap();
+        assert_eq!(response.host, "example.com");
+        assert_eq!(response.port, 12345);
+        assert_eq!(response.notify, "notify_ticket");
+        assert_eq!(
+            response.get_shared_secret_bytes().unwrap(),
+            [
+                0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
+                0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,
+                0x89, 0xab, 0xcd, 0xef
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_http_broker_stop() {
+        let auth_token = "test_token";
+        let (mut server, api) = setup_server_and_api(auth_token).await;
+        let ticket = [b'A'; TICKET_LENGTH];
+        let _m = server
+            .mock(
+                "DELETE",
+                format!(
+                    "/{}/stop/{}",
+                    String::from_utf8_lossy(&ticket),
+                    auth_token
+                )
+                .as_str(),
+            )
+            .with_status(200)
+            .create();
+        let result = api.stop_connection(&ticket).await;
+        assert!(result.is_ok());
     }
 }

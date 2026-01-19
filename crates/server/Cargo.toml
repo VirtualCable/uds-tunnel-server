@@ -35,3 +35,4 @@ flume = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+mockito = { workspace = true }
