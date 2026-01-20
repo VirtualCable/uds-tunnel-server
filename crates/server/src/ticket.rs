@@ -28,10 +28,51 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+use anyhow::Result;
+use rand::{Rng, distr::Alphanumeric};
 
-pub const MAX_PACKET_SIZE: usize = 4096; // Hard limit for packet size. Anythig abobe this will be rejected.
-pub const HEADER_LENGTH: usize = 8 + 2; // counter (8 bytes) + length (2 bytes)
-pub const TAG_LENGTH: usize = 16; // AES-GCM tag length
-// IPv6 minimum MTU is 1280 bytes, minus IP (40 bytes) and UDP (8 bytes, future) headers - leaves 1232 bytes for payload
-// We use 1200 + HEADER_LENGTH + TAG_LENGTH = 1226 bytes to have some margin
-pub const CRYPT_PACKET_SIZE: usize = 1200; // This is our preferred packet size for encryption/decryption
+use crate::consts::TICKET_LENGTH;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ticket([u8; TICKET_LENGTH]);
+
+impl Ticket {
+    pub fn new() -> Self {
+        let rng = rand::rng();
+        let id = rng
+            .sample_iter(Alphanumeric)
+            .take(TICKET_LENGTH)
+            .collect::<Vec<u8>>()
+            .try_into()
+            .expect("Failed to create Ticket");
+        Ticket(id)
+    }
+    pub fn from(id: [u8; TICKET_LENGTH]) -> Self {
+        Ticket(id)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !self.0.iter().all(|&c| c.is_ascii_alphanumeric()) {
+            return Err(anyhow::anyhow!("Invalid ticket"));
+        }
+        Ok(())
+    }
+}
+
+impl Default for Ticket {
+    fn default() -> Self {
+        Ticket::new()
+    }
+}
+
+impl From<[u8; TICKET_LENGTH]> for Ticket {
+    fn from(id: [u8; TICKET_LENGTH]) -> Self {
+        Ticket::from(id)
+    }
+}
+
+impl From<&[u8; TICKET_LENGTH]> for Ticket {
+    fn from(id: &[u8; TICKET_LENGTH]) -> Self {
+        Ticket::from(*id)
+    }
+}
