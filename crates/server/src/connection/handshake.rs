@@ -29,7 +29,6 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
-use core::fmt;
 use std::net::SocketAddr;
 
 use anyhow::Result;
@@ -39,6 +38,7 @@ use tokio::io::AsyncReadExt;
 use super::proxy_v2::ProxyInfo;
 use crate::{
     consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
+    errors::ErrorWithAddres,
     ticket::Ticket,
 };
 
@@ -74,31 +74,18 @@ pub struct Handshake {
     pub action: HandshakeAction,
 }
 
-#[derive(Debug)]
-pub struct HandshakeError {
-    pub src_ip: Option<SocketAddr>,
-    pub message: String,
-}
-
-impl fmt::Display for HandshakeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "HandshakeError: {} {:?}", self.message, self.src_ip)
-    }
-}
-
 impl Handshake {
     pub async fn parse<R: AsyncReadExt + Unpin>(
         reader: &mut R,
         use_proxy_v2: bool,
-    ) -> Result<Handshake, HandshakeError> {
+    ) -> Result<Handshake, ErrorWithAddres> {
         let ip = if use_proxy_v2 {
-            let proxy_info =
-                ProxyInfo::read_from_stream(reader)
-                    .await
-                    .map_err(|e| HandshakeError {
-                        src_ip: None,
-                        message: format!("failed to read PROXY protocol v2 header: {}", e),
-                    })?;
+            let proxy_info = ProxyInfo::read_from_stream(reader).await.map_err(|e| {
+                ErrorWithAddres::new(
+                    None,
+                    format!("failed to read PROXY protocol v2 header: {}", e).as_str(),
+                )
+            })?;
             Some(proxy_info.source_addr)
         } else {
             None
@@ -107,12 +94,12 @@ impl Handshake {
         reader
             .read_exact(&mut signature_buf)
             .await
-            .map_err(|e| HandshakeError {
+            .map_err(|e| ErrorWithAddres {
                 src_ip: ip,
                 message: format!("failed to read handshake signature and command: {}", e),
             })?;
         if signature_buf.len() != HANDSHAKE_V2_SIGNATURE.len() + 1 {
-            return Err(HandshakeError {
+            return Err(ErrorWithAddres {
                 src_ip: ip,
                 message: "incomplete handshake signature and command".to_string(),
             });
@@ -125,13 +112,12 @@ impl Handshake {
             }),
             HandshakeCommand::Open | HandshakeCommand::Recover => {
                 let mut ticket_buf = [0u8; TICKET_LENGTH];
-                reader
-                    .read_exact(&mut ticket_buf)
-                    .await
-                    .map_err(|e| HandshakeError {
-                        src_ip: ip,
-                        message: format!("failed to read handshake ticket: {}", e),
-                    })?;
+                reader.read_exact(&mut ticket_buf).await.map_err(|e| {
+                    ErrorWithAddres::new(
+                        ip,
+                        format!("failed to read handshake ticket: {}", e).as_str(),
+                    )
+                })?;
                 let action = match cmd {
                     HandshakeCommand::Open => HandshakeAction::Open {
                         ticket: ticket_buf.into(),
@@ -143,10 +129,7 @@ impl Handshake {
                 };
                 Ok(Handshake { src_ip: ip, action })
             }
-            HandshakeCommand::Unknown => Err(HandshakeError {
-                src_ip: ip,
-                message: "unknown handshake command".to_string(),
-            }),
+            HandshakeCommand::Unknown => Err(ErrorWithAddres::new(ip, "unknown handshake command")),
         }
     }
 }

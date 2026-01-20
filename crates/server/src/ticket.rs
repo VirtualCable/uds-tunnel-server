@@ -26,12 +26,18 @@
 // CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+//
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+
+use std::net::SocketAddr;
+
 use anyhow::Result;
 use rand::{Rng, distr::Alphanumeric};
 
-use crate::consts::TICKET_LENGTH;
+use crate::{
+    broker::{self, BrokerApi},
+    consts::TICKET_LENGTH,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket([u8; TICKET_LENGTH]);
@@ -57,11 +63,26 @@ impl Ticket {
         }
         Ok(())
     }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.0).expect("Ticket is not valid UTF-8")
+    }
+
+    pub async fn retrieve_from_broker(&self, ip: SocketAddr) -> Result<broker::TicketResponse> {
+        let broker_api = broker::get_broker_api();
+        broker_api.start_connection(self, ip).await
+    }
 }
 
 impl Default for Ticket {
     fn default() -> Self {
         Ticket::new()
+    }
+}
+
+impl AsRef<[u8; TICKET_LENGTH]> for Ticket {
+    fn as_ref(&self) -> &[u8; TICKET_LENGTH] {
+        &self.0
     }
 }
 

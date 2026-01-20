@@ -37,53 +37,56 @@ use tokio::{
     time::timeout,
 };
 
-use crate::consts::HANDSHAKE_TIMEOUT_MS;
+use crate::{consts::HANDSHAKE_TIMEOUT_MS, errors::ErrorWithAddres, log};
 
 pub mod handshake;
 pub mod proxy_v2;
 
+mod connect;
+mod recover;
+
 pub async fn handle_connection<R, W>(
     mut reader: R,
     writer: W,
-    connection_ip: Option<std::net::SocketAddr>,
+    connection_ip: std::net::SocketAddr,
     use_proxy_v2: bool,
-) -> Result<()>
+) -> Result<(), ErrorWithAddres>
 where
     R: AsyncReadExt + Unpin,
     W: AsyncWriteExt + Unpin,
 {
-    let handshake = match timeout(
+    let (ip, action) = match timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
         handshake::Handshake::parse(&mut reader, use_proxy_v2),
     )
-    .await?
+    .await
+    .map_err(|_| ErrorWithAddres::new(Some(connection_ip), "Handshake timed out"))?
     {
         // If no ip is provided from handshake, use connection ip
-        Ok(h) => handshake::Handshake {
-            src_ip: h.src_ip.or(connection_ip),
-            action: h.action,
-        },
+        Ok(h) => {
+            let ip = h.src_ip.unwrap_or(connection_ip);
+            (ip, h.action)
+        }
         Err(e) => {
-            let ip = e.src_ip.or(connection_ip);
+            let ip = e.src_ip.unwrap_or(connection_ip);
             // Handshake failed
             // TODO: Process failure (e.g., logging, blocking IP, etc.)
-            return Err(anyhow::anyhow!("Handshake failed: {}: {:?}", e.message, ip));
+            return Err(ErrorWithAddres::new(
+                Some(ip),
+                format!("Handshake failed: {}", e).as_str(),
+            ));
         }
     };
 
-    match handshake.action {
+    match action {
         handshake::HandshakeAction::Test => {
             // Just close the connection
             Ok(())
         }
         handshake::HandshakeAction::Open { ticket } => {
-            ticket.validate()?;
-            // TODO: implement
-
-            Ok(())
+            connect::connect(reader, writer, &ticket, ip).await
         }
         handshake::HandshakeAction::Recover { ticket } => {
-            ticket.validate()?;
             // TODO: implement
             Ok(())
         }

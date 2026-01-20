@@ -28,17 +28,18 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
-use std::sync::OnceLock;
+use std::{sync::OnceLock, net::SocketAddr};
 
+use anyhow::Result;
 use reqwest::Client;
 
-use crate::{consts::TICKET_LENGTH, log};
+use crate::{log, ticket::Ticket};
 
 mod utils;
 
 static BROKER_API_INSTANCE: OnceLock<HttpBrokerApi> = OnceLock::new();
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Debug)]
 pub struct TicketResponse {
     pub host: String,
     pub port: u16,
@@ -60,12 +61,8 @@ impl TicketResponse {
 
 #[async_trait::async_trait]
 pub trait BrokerApi {
-    async fn start_connection(
-        &self,
-        ticket: &[u8; TICKET_LENGTH],
-        ip: &str,
-    ) -> reqwest::Result<TicketResponse>;
-    async fn stop_connection(&self, ticket: &[u8; TICKET_LENGTH]) -> reqwest::Result<()>;
+    async fn start_connection(&self, ticket: &Ticket, ip: SocketAddr) -> Result<TicketResponse>;
+    async fn stop_connection(&self, ticket: &Ticket) -> Result<()>;
 }
 
 pub struct HttpBrokerApi {
@@ -104,23 +101,21 @@ impl HttpBrokerApi {
     }
 
     /// Note: All parameters should be already validated/encoded as needed
-    pub fn get_url(&self, ticket: &[u8; TICKET_LENGTH], msg: &str) -> String {
-        let ticket = String::from_utf8_lossy(ticket);
+    pub fn get_url(&self, ticket: &Ticket, msg: &str) -> String {
         format!(
             "{}/{}/{}/{}",
-            self.ticket_rest_url, ticket, msg, self.auth_token
+            self.ticket_rest_url,
+            ticket.as_str(),
+            msg,
+            self.auth_token
         )
     }
 }
 
 #[async_trait::async_trait]
 impl BrokerApi for HttpBrokerApi {
-    async fn start_connection(
-        &self,
-        ticket: &[u8; TICKET_LENGTH],
-        ip: &str,
-    ) -> reqwest::Result<TicketResponse> {
-        let url = self.get_url(ticket, ip);
+    async fn start_connection(&self, ticket: &Ticket, ip: SocketAddr) -> Result<TicketResponse> {
+        let url = self.get_url(ticket, &ip.ip().to_string());
         let resp: TicketResponse = self
             .client
             .get(&url)
@@ -128,15 +123,33 @@ impl BrokerApi for HttpBrokerApi {
             .await?
             .error_for_status()?
             .json()
-            .await?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to parse TicketResponse from broker for ticket {}: {}",
+                    ticket.as_str(),
+                    e
+                )
+            })?;
 
         Ok(resp)
     }
 
-    async fn stop_connection(&self, ticket: &[u8; TICKET_LENGTH]) -> reqwest::Result<()> {
+    async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
         let url = self.get_url(ticket, "stop");
         // No response body expected
-        self.client.delete(&url).send().await?.error_for_status()?;
+        self.client
+            .delete(&url)
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to stop connection for ticket {}: {}",
+                    ticket.as_str(),
+                    e
+                )
+            })?;
 
         Ok(())
     }
@@ -157,6 +170,7 @@ pub fn get_broker_api() -> &'static impl BrokerApi {
 mod tests {
     use super::*;
 
+    use crate::consts::TICKET_LENGTH;
     use mockito::Server;
 
     async fn setup_server_and_api(auth_token: &str) -> (mockito::ServerGuard, HttpBrokerApi) {
@@ -175,7 +189,7 @@ mod tests {
     async fn test_http_broker() {
         let auth_token = "test_token";
         let (mut server, api) = setup_server_and_api(auth_token).await;
-        let ticket = [b'A'; TICKET_LENGTH];
+        let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
         let ip = "172.27.0.1";
         let ticket_response_json = r#"
         {
@@ -188,19 +202,13 @@ mod tests {
         let _m = server
             .mock(
                 "GET",
-                format!(
-                    "/{}/{}/{}",
-                    String::from_utf8_lossy(&ticket),
-                    ip,
-                    auth_token
-                )
-                .as_str(),
+                format!("/{}/{}/{}", ticket.as_str(), ip, auth_token).as_str(),
             )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(ticket_response_json)
             .create();
-        let response = api.start_connection(&ticket, ip).await.unwrap();
+        let response = api.start_connection(&ticket, ip.parse().unwrap()).await.unwrap();
         assert_eq!(response.host, "example.com");
         assert_eq!(response.port, 12345);
         assert_eq!(response.notify, "notify_ticket");
@@ -218,11 +226,11 @@ mod tests {
     async fn test_http_broker_stop() {
         let auth_token = "test_token";
         let (mut server, api) = setup_server_and_api(auth_token).await;
-        let ticket = [b'A'; TICKET_LENGTH];
+        let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
         let _m = server
             .mock(
                 "DELETE",
-                format!("/{}/stop/{}", String::from_utf8_lossy(&ticket), auth_token).as_str(),
+                format!("/{}/stop/{}", ticket.as_str(), auth_token).as_str(),
             )
             .with_status(200)
             .create();
