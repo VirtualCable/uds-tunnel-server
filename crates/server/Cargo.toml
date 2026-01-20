@@ -9,10 +9,14 @@ anyhow = { workspace = true }
 num_enum = { workspace = true }
 rand = { workspace = true }
 
+# serialization
+serde = { workspace = true }
+
 # http
 reqwest = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
+
+toml = { workspace = true }
 
 # Encryption
 aes-gcm = { workspace = true }

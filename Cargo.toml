@@ -37,9 +37,13 @@ flume = { version = "0.12.0", features = ["async"] }
 # HTTP client
 reqwest = { version = "0.13.1", features = ["json", "rustls", "system-proxy"] }
 
-# Json handling
+# Serialization
 serde = { version = "1.0", features = ["derive"] }
+
+# Json handling
 serde_json = "1.0"
+# toml for config
+toml = "0.9.8"
 
 # Encoding/Decoding
 base64 = "0.22.1"
