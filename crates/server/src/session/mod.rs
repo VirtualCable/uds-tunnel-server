@@ -34,7 +34,7 @@ use std::sync::{Arc, RwLock, atomic::AtomicBool};
 use anyhow::Result;
 use flume::{Receiver, Sender};
 
-use crate::{consts::TICKET_LENGTH, crypt, log, system::trigger::Trigger, ticket};
+use crate::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
 
 mod manager;
 mod proxy;
@@ -45,8 +45,8 @@ pub use manager::{SessionManager, get_session_manager};
 pub type SessionId = ticket::Ticket;
 
 pub struct Session {
-    ticket: [u8; TICKET_LENGTH],
-    shared_secret: [u8; 32],
+    ticket: ticket::Ticket,
+    shared_secret: SharedSecret,
     stop: Trigger,
     // Channels for server <-> client communication
     session_proxy: proxy::SessionProxyHandle,
@@ -61,7 +61,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(shared_secret: [u8; 32], ticket: [u8; TICKET_LENGTH], stop: Trigger) -> Self {
+    pub fn new(shared_secret: SharedSecret, ticket: ticket::Ticket, stop: Trigger) -> Self {
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         proxy.run(); // Start proxy task
 
@@ -135,12 +135,12 @@ impl Session {
         }
     }
 
-    pub fn get_ticket(&self) -> &[u8; TICKET_LENGTH] {
+    pub fn get_ticket(&self) -> &ticket::Ticket {
         &self.ticket
     }
 
-    pub fn get_shared_secret(&self) -> [u8; 32] {
-        self.shared_secret
+    pub fn get_shared_secret(&self) -> &SharedSecret {
+        &self.shared_secret
     }
 
     pub fn get_stop_trigger(&self) -> Trigger {

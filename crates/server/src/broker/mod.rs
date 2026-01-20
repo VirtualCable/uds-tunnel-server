@@ -57,6 +57,12 @@ impl TicketResponse {
             None
         }
     }
+
+    pub fn target_addr(&self) -> SocketAddr {
+        format!("{}:{}", self.host, self.port)
+            .parse()
+            .expect("Invalid target address in TicketResponse")
+    }
 }
 
 #[async_trait::async_trait]
@@ -172,6 +178,7 @@ mod tests {
 
     use crate::consts::TICKET_LENGTH;
     use mockito::Server;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     async fn setup_server_and_api(auth_token: &str) -> (mockito::ServerGuard, HttpBrokerApi) {
         log::setup_logging("debug", log::LogType::Test);
@@ -190,7 +197,7 @@ mod tests {
         let auth_token = "test_token";
         let (mut server, api) = setup_server_and_api(auth_token).await;
         let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
-        let ip = "172.27.0.1";
+        let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)),0);
         let ticket_response_json = r#"
         {
             "host": "example.com",
@@ -202,13 +209,13 @@ mod tests {
         let _m = server
             .mock(
                 "GET",
-                format!("/{}/{}/{}", ticket.as_str(), ip, auth_token).as_str(),
+                format!("/{}/{}/{}", ticket.as_str(), ip.ip().to_string().as_str(), auth_token).as_str(),
             )
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(ticket_response_json)
             .create();
-        let response = api.start_connection(&ticket, ip.parse().unwrap()).await.unwrap();
+        let response = api.start_connection(&ticket, ip).await.unwrap();
         assert_eq!(response.host, "example.com");
         assert_eq!(response.port, 12345);
         assert_eq!(response.notify, "notify_ticket");

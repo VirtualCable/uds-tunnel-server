@@ -31,11 +31,10 @@
 
 use super::*;
 
-use crate::{consts::TICKET_LENGTH, system::trigger::Trigger};
+use crate::{system::trigger::Trigger, ticket, crypt::types::SharedSecret};
 
 fn new_session_for_test() -> Session {
-    let ticket = [0x40u8; TICKET_LENGTH];
-    Session::new([0u8; 32], ticket, Trigger::new())
+    Session::new(SharedSecret::new([0u8; 32]), ticket::Ticket::random(), Trigger::new())
 }
 
 #[tokio::test]
@@ -45,7 +44,7 @@ async fn test_session_manager_add_and_get() {
     let session_id = manager.add_session(session).unwrap();
     // Fail if session is not found
     let retrieved_session = manager.get_session(&session_id).unwrap();
-    assert_eq!(retrieved_session.get_shared_secret(), [0u8; 32]);
+    assert_eq!(*retrieved_session.get_shared_secret().as_ref(), [0u8; 32]);
     assert!(!retrieved_session.is_server_running());
     assert!(!retrieved_session.is_client_running());
 }
@@ -77,7 +76,7 @@ async fn test_get_session_manager() {
     let session = new_session_for_test();
     let session_id = manager.add_session(session).unwrap();
     let retrieved_session = manager.get_session(&session_id).unwrap();
-    assert_eq!(retrieved_session.get_shared_secret(), [0u8; 32]);
+    assert_eq!(*retrieved_session.get_shared_secret().as_ref(), [0u8; 32]);
 }
 
 #[tokio::test]

@@ -43,7 +43,11 @@ use crate::{
 pub struct Ticket([u8; TICKET_LENGTH]);
 
 impl Ticket {
-    pub fn new() -> Self {
+    pub fn new(id: [u8; TICKET_LENGTH]) -> Self {
+        Ticket(id)
+    }
+
+    pub fn random() -> Self {
         let rng = rand::rng();
         let id = rng
             .sample_iter(Alphanumeric)
@@ -51,10 +55,7 @@ impl Ticket {
             .collect::<Vec<u8>>()
             .try_into()
             .expect("Failed to create Ticket");
-        Ticket(id)
-    }
-    pub fn from(id: [u8; TICKET_LENGTH]) -> Self {
-        Ticket(id)
+        Self(id)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -74,12 +75,6 @@ impl Ticket {
     }
 }
 
-impl Default for Ticket {
-    fn default() -> Self {
-        Ticket::new()
-    }
-}
-
 impl AsRef<[u8; TICKET_LENGTH]> for Ticket {
     fn as_ref(&self) -> &[u8; TICKET_LENGTH] {
         &self.0
@@ -88,12 +83,12 @@ impl AsRef<[u8; TICKET_LENGTH]> for Ticket {
 
 impl From<[u8; TICKET_LENGTH]> for Ticket {
     fn from(id: [u8; TICKET_LENGTH]) -> Self {
-        Ticket::from(id)
+        Ticket::new(id)
     }
 }
 
 impl From<&[u8; TICKET_LENGTH]> for Ticket {
     fn from(id: &[u8; TICKET_LENGTH]) -> Self {
-        Ticket::from(*id)
+        Ticket::new(*id)
     }
 }

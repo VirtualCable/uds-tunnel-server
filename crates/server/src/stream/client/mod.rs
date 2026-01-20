@@ -40,7 +40,7 @@ use crate::{
     system::trigger::Trigger,
 };
 
-pub struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
+struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
     sender: Sender<Vec<u8>>,
 

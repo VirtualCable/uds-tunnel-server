@@ -62,7 +62,7 @@ impl SessionManager {
     // Also add an idempotent entry in equivs, so wen recovering from this session id works
     // Without no more checks
     pub fn add_session(&self, session: Session) -> Result<SessionId> {
-        let session_id = SessionId::new();
+        let session_id = SessionId::random();
         {
             let mut sessions = self.sessions.write().unwrap();
             sessions.insert(session_id, Arc::new(session));
@@ -158,7 +158,7 @@ impl SessionManager {
                 anyhow::bail!("Too many equivalent session entries");
             }
         }
-        let from = SessionId::new();
+        let from = SessionId::random();
         let mut equivs = self.equivs.write().unwrap();
         equivs.insert(from, (to, Instant::now()));
         Ok(from)

@@ -43,8 +43,8 @@ pub struct Crypt {
 }
 
 impl Crypt {
-    pub fn new(key: &[u8; 32]) -> Self {
-        let cipher = Aes256Gcm::new(key.into());
+    pub fn new(key: &types::SharedSecret) -> Self {
+        let cipher = Aes256Gcm::new(key.as_ref().into());
         Crypt { cipher, seq: 0 }
     }
 
@@ -151,6 +151,8 @@ pub fn build_header(seq: u64, length: u16, buffer: &mut [u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::crypt::types::SharedSecret;
+
     use super::*;
     fn assert_send<T: Send>() {}
     fn assert_sync<T: Sync>() {}
@@ -163,7 +165,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let key = [7u8; 32];
+        let key = SharedSecret::new([7u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
@@ -194,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_sequence_increments() {
-        let key = [1u8; 32];
+        let key = SharedSecret::new([1u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         assert_eq!(crypt.current_seq(), 0);
@@ -205,7 +207,7 @@ mod tests {
 
     #[test]
     fn test_replay_rejected() {
-        let key = [2u8; 32];
+        let key = SharedSecret::new([2u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
@@ -232,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_fails_on_bad_tag() {
-        let key = [3u8; 32];
+        let key = SharedSecret::new([3u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
@@ -252,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_decrypt_fails_on_truncated_ciphertext() {
-        let key = [4u8; 32];
+        let key = SharedSecret::new([4u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
@@ -296,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_encrypt_does_not_overwrite_extra_bytes() {
-        let key = [9u8; 32];
+        let key = SharedSecret::new([9u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf = types::PacketBuffer::new();
@@ -311,7 +313,7 @@ mod tests {
     }
     #[test]
     fn test_encrypt_produces_unique_nonces() {
-        let key = [10u8; 32];
+        let key = SharedSecret::new([10u8; 32]);
         let mut crypt = Crypt::new(&key);
 
         let mut buf1 = types::PacketBuffer::new();

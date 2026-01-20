@@ -31,13 +31,15 @@
 
 use super::*;
 
-use crate::{consts, session};
+use crate::{
+    consts, crypt::types::SharedSecret, session, system::trigger::Trigger, ticket::Ticket,
+};
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
     // Why 2? to ensure each crypt is used where expected
-    let key1: [u8; 32] = [7; 32];
-    let key2: [u8; 32] = [8; 32];
+    let key1 = SharedSecret::new([7; 32]);
+    let key2 = SharedSecret::new([8; 32]);
 
     let inbound = Crypt::new(&key1);
     let outbound = Crypt::new(&key2);
@@ -48,10 +50,11 @@ fn make_test_crypts() -> (Crypt, Crypt) {
 async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
-    let ticket = [0x40u8; consts::TICKET_LENGTH];
+    let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
+    let shared_secret = SharedSecret::new([3u8; 32]);
 
     // Create the session
-    let session = session::Session::new([3u8; 32], ticket, Trigger::new());
+    let session = session::Session::new(shared_secret, ticket, Trigger::new());
 
     // Add session to manager
     let session_id = session::get_session_manager().add_session(session).unwrap();

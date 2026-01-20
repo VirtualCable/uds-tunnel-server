@@ -33,6 +33,29 @@ use anyhow::Result;
 
 use super::consts;
 
+// Hard type for shared secret
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedSecret([u8; 32]);
+
+impl SharedSecret {
+    pub fn new(secret: [u8; 32]) -> Self {
+        SharedSecret(secret)
+    }
+}
+
+impl AsRef<[u8; 32]> for SharedSecret {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl From<[u8; 32]> for SharedSecret {
+    fn from(secret: [u8; 32]) -> Self {
+        SharedSecret(secret)
+    }
+}
+
+// hard limited size buffer for packets
 pub struct PacketBuffer {
     buffer: [u8; consts::MAX_PACKET_SIZE],
 }
