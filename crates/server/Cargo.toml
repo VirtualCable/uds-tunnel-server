@@ -16,6 +16,12 @@ serde = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 
+# SSL/TLS
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+
+
+# toml for config
 toml = { workspace = true }
 
 # Encryption

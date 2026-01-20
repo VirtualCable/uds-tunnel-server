@@ -28,12 +28,15 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+use std::sync::OnceLock;
 
 use reqwest::Client;
 
 use crate::{consts::TICKET_LENGTH, log};
 
 mod utils;
+
+static BROKER_API_INSTANCE: OnceLock<HttpBrokerApi> = OnceLock::new();
 
 #[derive(serde::Deserialize)]
 pub struct TicketResponse {
@@ -72,12 +75,13 @@ pub struct HttpBrokerApi {
 }
 
 impl HttpBrokerApi {
-    pub fn new(ticket_rest_url: &str, auth_token: &str) -> Self {
+    pub fn new(ticket_rest_url: &str, auth_token: &str, verify_ssl: bool) -> Self {
         // Remove trailing slash if present
         let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
         log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
         HttpBrokerApi {
             client: Client::builder()
+                .use_rustls_tls()
                 .user_agent("UDSTunnelServer/5.0")
                 .default_headers({
                     let mut headers = reqwest::header::HeaderMap::new();
@@ -91,6 +95,7 @@ impl HttpBrokerApi {
                     );
                     headers
                 })
+                .danger_accept_invalid_certs(!verify_ssl)
                 .build()
                 .unwrap(),
             auth_token: auth_token.to_string(),
@@ -137,6 +142,17 @@ impl BrokerApi for HttpBrokerApi {
     }
 }
 
+pub fn get_broker_api() -> &'static impl BrokerApi {
+    BROKER_API_INSTANCE.get_or_init(|| {
+        let config = crate::config::get_server_config();
+        HttpBrokerApi::new(
+            &config.ticket_api_url,
+            &config.broker_auth_token,
+            config.verify_ssl.unwrap_or(true),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,7 +166,7 @@ mod tests {
         let url = server.url() + "/"; // For testing, our base URL will be the mockito server
 
         log::info!("Setting up mock server and API client");
-        let api = HttpBrokerApi::new(&url, auth_token);
+        let api = HttpBrokerApi::new(&url, auth_token, false);
         // Pass the base url (without /ui) to the API
         (server, api)
     }
