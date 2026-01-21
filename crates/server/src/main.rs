@@ -39,6 +39,7 @@ pub mod stream;
 pub mod system;
 pub mod ticket;
 pub mod errors;
+pub mod utils;
 
 // TODO: implement real main
 #[tokio::main(flavor = "multi_thread")]

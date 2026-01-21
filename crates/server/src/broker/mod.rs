@@ -28,16 +28,13 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
-use std::{sync::OnceLock, net::SocketAddr};
+use std::net::SocketAddr;
 
 use anyhow::Result;
+use hickory_resolver::{Resolver, config::*, name_server::TokioConnectionProvider};
 use reqwest::Client;
 
-use crate::{crypt::types::SharedSecret, log, ticket::Ticket};
-
-mod utils;
-
-static BROKER_API_INSTANCE: OnceLock<HttpBrokerApi> = OnceLock::new();
+use crate::{config, crypt::types::SharedSecret, log, ticket::Ticket};
 
 #[derive(serde::Deserialize, Debug)]
 pub struct TicketResponse {
@@ -49,19 +46,33 @@ pub struct TicketResponse {
 
 impl TicketResponse {
     pub fn get_shared_secret(&self) -> Result<SharedSecret> {
-        if let Some(ref secret_str) = self.shared_secret
-            && let Ok(secret_bytes) = utils::hex_to_bytes(secret_str)
-        {
-            Ok(SharedSecret::new(secret_bytes))
+        if let Some(ref secret_str) = self.shared_secret {
+            SharedSecret::from_hex(secret_str)
         } else {
             Err(anyhow::anyhow!("Missing or invalid shared secret"))
         }
     }
 
-    pub fn target_addr(&self) -> SocketAddr {
-        format!("{}:{}", self.host, self.port)
-            .parse()
-            .expect("Invalid target address in TicketResponse")
+    pub async fn target_addr(&self) -> Result<SocketAddr> {
+        let resolver = Resolver::builder_with_config(
+            ResolverConfig::default(),
+            TokioConnectionProvider::default(),
+        )
+        .build();
+
+        match resolver.lookup_ip(&self.host).await {
+            Ok(lookup) => {
+                let ip = lookup.iter().next().ok_or_else(|| {
+                    anyhow::anyhow!("No IP addresses found for host: {}", self.host)
+                })?;
+                Ok(SocketAddr::new(ip, self.port))
+            }
+            Err(e) => Err(anyhow::anyhow!(
+                "DNS resolution failed for {}: {}",
+                self.host,
+                e
+            )),
+        }
     }
 }
 
@@ -137,7 +148,6 @@ impl BrokerApi for HttpBrokerApi {
                     e
                 )
             })?;
-
         Ok(resp)
     }
 
@@ -161,15 +171,14 @@ impl BrokerApi for HttpBrokerApi {
     }
 }
 
-pub fn get_broker_api() -> &'static impl BrokerApi {
-    BROKER_API_INSTANCE.get_or_init(|| {
-        let config = crate::config::get_server_config();
-        HttpBrokerApi::new(
-            &config.ticket_api_url,
-            &config.broker_auth_token,
-            config.verify_ssl.unwrap_or(true),
-        )
-    })
+pub fn get() -> impl BrokerApi {
+    let config = config::get();
+    let cfg = config.read().unwrap();
+    HttpBrokerApi::new(
+        &cfg.ticket_api_url,
+        &cfg.broker_auth_token,
+        cfg.verify_ssl.unwrap_or(true),
+    )
 }
 
 #[cfg(test)]
@@ -197,7 +206,7 @@ mod tests {
         let auth_token = "test_token";
         let (mut server, api) = setup_server_and_api(auth_token).await;
         let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
-        let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)),0);
+        let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)), 0);
         let ticket_response_json = r#"
         {
             "host": "example.com",
@@ -209,7 +218,13 @@ mod tests {
         let _m = server
             .mock(
                 "GET",
-                format!("/{}/{}/{}", ticket.as_str(), ip.ip().to_string().as_str(), auth_token).as_str(),
+                format!(
+                    "/{}/{}/{}",
+                    ticket.as_str(),
+                    ip.ip().to_string().as_str(),
+                    auth_token
+                )
+                .as_str(),
             )
             .with_status(200)
             .with_header("content-type", "application/json")

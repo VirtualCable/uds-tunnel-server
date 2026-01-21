@@ -36,7 +36,7 @@ use crate::{crypt::types::SharedSecret, system::trigger::Trigger, ticket};
 fn new_session_for_test() -> Session {
     Session::new(
         SharedSecret::new([0u8; 32]),
-        ticket::Ticket::random(),
+        ticket::Ticket::new_random(),
         Trigger::new(),
     )
 }

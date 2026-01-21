@@ -1,4 +1,7 @@
-use std::{fs::read_to_string, sync::OnceLock};
+use std::{
+    fs::read_to_string,
+    sync::{Arc, OnceLock, RwLock},
+};
 
 use crate::consts::CONFIGFILE_PATH;
 
@@ -18,16 +21,30 @@ impl ServerConfig {
     }
 }
 
-// Global shared configuration, read-only after initialization
-static SERVER_CONFIG: OnceLock<ServerConfig> = OnceLock::new();
+pub fn get() -> Arc<RwLock<ServerConfig>> {
+    // Global shared configuration, maybe modified on runtime (and by tests also)
+    // so it's convenient to have it behind a RwLock
+    static SERVER_CONFIG: OnceLock<Arc<RwLock<ServerConfig>>> = OnceLock::new();
 
-pub fn get_server_config() -> &'static ServerConfig {
-    // Config is a MUST, so we panic if it cannot be read or parsed
-    SERVER_CONFIG.get_or_init(|| {
-        let config_str =
-            read_to_string(CONFIGFILE_PATH).expect("Failed to read server configuration file");
-        ServerConfig::from_toml_str(&config_str).expect("Failed to parse server configuration file")
-    })
+    // Note: Default config is not usable, but allow to start the server without a config file
+    SERVER_CONFIG
+        .get_or_init(|| {
+            if let Ok(config_str) = read_to_string(CONFIGFILE_PATH) {
+                let config = ServerConfig::from_toml_str(&config_str)
+                    .expect("Failed to parse server configuration file");
+                Arc::new(RwLock::new(config))
+            } else {
+                Arc::new(RwLock::new(ServerConfig {
+                    listen_addr: None,
+                    listen_port: None,
+                    use_proxy_protocol: None,
+                    ticket_api_url: "".to_string(),
+                    verify_ssl: None,
+                    broker_auth_token: "".to_string(),
+                }))
+            }
+        })
+        .clone()
 }
 
 #[cfg(test)]
@@ -48,7 +65,10 @@ mod tests {
         assert_eq!(config.listen_addr, Some("127.0.0.1".to_string()));
         assert_eq!(config.listen_port, Some(443));
         assert_eq!(config.use_proxy_protocol, Some(true));
-        assert_eq!(config.ticket_api_url, "https://broker.example.com/uds/rest/ticket".to_string());
+        assert_eq!(
+            config.ticket_api_url,
+            "https://broker.example.com/uds/rest/ticket".to_string()
+        );
         assert_eq!(config.verify_ssl, Some(false));
         assert_eq!(config.broker_auth_token, "test_token".to_string());
     }

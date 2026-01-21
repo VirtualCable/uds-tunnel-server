@@ -47,7 +47,7 @@ impl Ticket {
         Ticket(id)
     }
 
-    pub fn random() -> Self {
+    pub fn new_random() -> Self {
         let rng = rand::rng();
         let id = rng
             .sample_iter(Alphanumeric)
@@ -70,7 +70,7 @@ impl Ticket {
     }
 
     pub async fn retrieve_from_broker(&self, ip: SocketAddr) -> Result<broker::TicketResponse> {
-        let broker_api = broker::get_broker_api();
+        let broker_api = broker::get();
         broker_api.start_connection(self, ip).await
     }
 }

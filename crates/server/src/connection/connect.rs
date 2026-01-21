@@ -29,8 +29,6 @@ where
     let session_manager = SessionManager::get_instance();
     match ticket.retrieve_from_broker(ip).await {
         Ok(ticket_info) => {
-            // Open a connection to the target server using the ticket info
-            let target_stream = TcpStream::connect(ticket_info.target_addr()).await?;
             let stop = Trigger::new();
             let session_id = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
@@ -51,17 +49,24 @@ where
             let mut crypt = session.get_server_tunnel_crypts()?.0;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
-            let data: Ticket = crypt
-                .read(&stop, &mut reader, &mut buffer)
-                .await?
-                .as_slice()
-                .try_into()?;
+            let data: Ticket = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                crypt.read(&stop, &mut reader, &mut buffer),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))??
+            .as_slice()
+            .try_into()?;
+
             if data != *ticket {
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
             // Now the recv seq should be incremented by 1 for next crypt generated
             session.set_inbound_seq(1);
+
+            // Open a connection to the target server using the ticket info
+            let target_stream = TcpStream::connect(ticket_info.target_addr().await?).await?;
 
             // Split the target stream into reader and writer
             let (target_reader, target_writer) = target_stream.into_split();

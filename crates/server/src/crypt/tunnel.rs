@@ -33,17 +33,17 @@ use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::ticket;
+use crate::{log, ticket};
 
 use super::{Crypt, types::SharedSecret};
 
-struct Material {
-    pub _not_used: [u8; 32],
+#[derive(Debug)]
+pub struct Material {
     pub key_receive: SharedSecret,
     pub key_send: SharedSecret,
 }
 
-fn derive_tunnel_material(
+pub fn derive_tunnel_material(
     shared_secret: &SharedSecret,
     ticket: &ticket::Ticket,
 ) -> Result<Material> {
@@ -60,12 +60,14 @@ fn derive_tunnel_material(
     let mut key_send = [0u8; 32];
     let mut key_receive = [0u8; 32];
 
+    // Skipping first 32 bytes being not used here
     _not_used.copy_from_slice(&okm[0..32]);
     key_send.copy_from_slice(&okm[32..64]);
     key_receive.copy_from_slice(&okm[64..96]);
 
+    // Note: The key_send is the key used by sender, so we receive with key_receive
+    //       and send with key_send that the client will use to receive our data
     Ok(Material {
-        _not_used,
         key_receive: key_send.into(),
         key_send: key_receive.into(),
     })
@@ -84,9 +86,14 @@ pub fn get_tunnel_crypts(
     seqs: (u64, u64),
 ) -> Result<(Crypt, Crypt)> {
     let material = derive_tunnel_material(shared_secret, ticket)?;
+    log::debug!(
+        "Derived tunnel material: key_receive={:?}, key_send={:?}",
+        material.key_receive,
+        material.key_send
+    );
 
-    let inbound = Crypt::new(&material.key_send, seqs.0);
-    let outbound = Crypt::new(&material.key_receive, seqs.1);
+    let inbound = Crypt::new(&material.key_receive, seqs.0);
+    let outbound = Crypt::new(&material.key_send, seqs.1);
 
     Ok((inbound, outbound))
 }

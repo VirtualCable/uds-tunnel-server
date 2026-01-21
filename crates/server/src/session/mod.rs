@@ -100,6 +100,11 @@ impl Session {
         Ok((endpoints.tx, endpoints.rx))
     }
 
+    pub async fn stop(&self) {
+        log::info!("Stopping session");
+        self.stop.trigger();
+    }
+
     pub async fn start_server(&self) -> Result<()> {
         self.is_server_running
             .store(true, std::sync::atomic::Ordering::SeqCst);

@@ -33,10 +33,12 @@ use anyhow::Result;
 
 use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 
+use crate::log;
+
 pub mod consts;
+pub mod stream;
 pub mod tunnel;
 pub mod types;
-pub mod stream;
 
 pub struct Crypt {
     cipher: Aes256Gcm,
@@ -45,6 +47,7 @@ pub struct Crypt {
 
 impl Crypt {
     pub fn new(key: &types::SharedSecret, seq: u64) -> Self {
+        log::debug!("Creating Crypt withinitial seq: {}", seq);
         let cipher = Aes256Gcm::new(key.as_ref().into());
         Crypt { cipher, seq }
     }
@@ -95,7 +98,7 @@ impl Crypt {
     /// The nonce is constructed by taking the seq value and padding it to 12 bytes with
     /// zeros. The seq value is also used as associated data (AAD) to ensure integrity.
     /// Returns the decrypted plaintext on success.
-    /// Note: length is the length on encrpypted data WITH the tag
+    /// Note: length is the length on encrpypted data WITH the tag (so, as readed from the stream).
     pub fn decrypt<'a>(
         &mut self,
         seq: u64,

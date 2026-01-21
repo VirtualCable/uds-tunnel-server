@@ -28,10 +28,12 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+use anyhow::Result;
 
-pub fn hex_to_bytes<const N: usize>(input: &str) -> Result<[u8; N], &'static str> {
+
+pub fn hex_to_bytes<const N: usize>(input: &str) -> Result<[u8; N]> {
     if input.len() != N * 2 {
-        return Err("invalid length");
+        anyhow::bail!("Invalid hex string length");
     }
 
     let mut out = [0u8; N];
@@ -44,12 +46,12 @@ pub fn hex_to_bytes<const N: usize>(input: &str) -> Result<[u8; N], &'static str
     Ok(out)
 }
 
-fn hex_val(b: u8) -> Result<u8, &'static str> {
+fn hex_val(b: u8) -> Result<u8> {
     match b {
         b'0'..=b'9' => Ok(b - b'0'),
         b'a'..=b'f' => Ok(b - b'a' + 10),
         b'A'..=b'F' => Ok(b - b'A' + 10),
-        _ => Err("invalid hex"),
+        _ => Err(anyhow::anyhow!("invalid hex")),
     }
 }
 

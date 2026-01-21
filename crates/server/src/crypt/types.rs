@@ -31,6 +31,8 @@
 
 use anyhow::Result;
 
+use crate::utils::hex_to_bytes;
+
 use super::consts;
 
 // Hard type for shared secret
@@ -41,7 +43,13 @@ impl SharedSecret {
     pub fn new(secret: [u8; 32]) -> Self {
         SharedSecret(secret)
     }
+
+    pub fn from_hex(hex_str: &str) -> Result<Self> {
+        let bytes = hex_to_bytes::<32>(hex_str)?;
+        Ok(SharedSecret(bytes))
+    }
 }
+
 
 impl AsRef<[u8; 32]> for SharedSecret {
     fn as_ref(&self) -> &[u8; 32] {

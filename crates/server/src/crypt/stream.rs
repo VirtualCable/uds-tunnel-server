@@ -30,11 +30,11 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
 use anyhow::Result;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{log, system::trigger::Trigger};
+use crate::{crypt::consts::TAG_LENGTH, log, system::trigger::Trigger};
 
-use super::{Crypt, consts::HEADER_LENGTH, parse_header, types::PacketBuffer};
+use super::{Crypt, build_header, consts::HEADER_LENGTH, parse_header, types::PacketBuffer};
 
 impl Crypt {
     async fn read_stream<R: AsyncReadExt + Unpin>(
@@ -49,7 +49,7 @@ impl Crypt {
         while read < length {
             let n = tokio::select! {
                 _ = stop.wait_async() => {
-                    log::info!("Inbound stream stopped while reading");
+                    log::debug!("Inbound stream stopped while reading");
                     return Ok(0);  // Indicate end of processing
                 }
                 result = reader.read(&mut buffer[read..length]) => {
@@ -80,39 +80,44 @@ impl Crypt {
         buffer: &mut PacketBuffer,
     ) -> Result<Vec<u8>> {
         let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
-        if Self::read_stream(
-            stop,
-            reader,
-            header_buffer.as_mut(),
-            HEADER_LENGTH,
-            false,
-        )
-        .await?
-            == 0
+        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0
         {
             // Connection closed
-            log::info!("Inbound stream closed while reading header");
             return Ok(Vec::new()); // Empty vector indicates closed connection
         }
         // Check valid header and get payload length
         let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
         // Read the encrypted payload + tag
-        if Self::read_stream(
-            stop,
-            reader,
-            buffer.as_mut_slice(),
-            length as usize,
-            true,
-        )
-        .await?
-            == 0
+        if Self::read_stream(stop, reader, buffer.as_mut_slice(), length as usize, true).await? == 0
         {
             // Connection closed
-            log::info!("Inbound stream closed while reading payload");
+            log::error!("Inbound stream closed while reading payload");
             return Err(anyhow::anyhow!(
                 "connection closed unexpectedly while reading payload"
             ));
         }
         Ok(self.decrypt(seq, length, buffer)?.to_vec())
+    }
+
+    // Writes data from buffer, encrypting it inplace
+    pub async fn write<W: AsyncWriteExt + Unpin>(
+        &mut self,
+        writer: &mut W,
+        data: &[u8],
+    ) -> Result<()> {
+        let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
+        let length = data.len();
+        let mut data = PacketBuffer::from_slice(data);
+        let encrypted_packet = self.encrypt(length, &mut data)?;
+        log::debug!(
+            "Writing packet: seq={}, length={}, encrypted={:?}",
+            self.current_seq(),
+            length,
+            &encrypted_packet
+        );
+        build_header(self.current_seq(), length as u16 + TAG_LENGTH as u16, &mut header_buffer)?;
+        writer.write_all(&header_buffer).await?;
+        writer.write_all(encrypted_packet).await?;
+        Ok(())
     }
 }
