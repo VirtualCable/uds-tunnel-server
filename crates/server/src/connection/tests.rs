@@ -37,8 +37,23 @@ use mockito::Server;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-    config, connection::handshake::HandshakeCommand, consts::HANDSHAKE_V2_SIGNATURE, crypt::{Crypt, tunnel::derive_tunnel_material, types::{PacketBuffer, SharedSecret}}, log, system::trigger::Trigger, ticket::Ticket
+    config,
+    connection::handshake::HandshakeCommand,
+    consts::HANDSHAKE_V2_SIGNATURE,
+    crypt::{
+        Crypt,
+        tunnel::derive_tunnel_material,
+        types::{PacketBuffer, SharedSecret},
+    },
+    log,
+    system::trigger::Trigger,
+    ticket::Ticket,
 };
+
+// Any accesible server for testing would do the job
+// as long as it has a known response
+const TEST_REMOTE_SERVER: &str = "echo.free.beeceptor.com";
+const TEST_REMOTE_PORT: u16 = 80;
 
 // Creates a fake mocked broker API for testing
 async fn setup_testing_connection(
@@ -60,14 +75,17 @@ async fn setup_testing_connection(
         config.ticket_api_url = url.clone();
     }
 
-    let ticket_response_json = r#"
-        {
-            "host": "echo.free.beeceptor.com",
-            "port": 80,
+    let ticket_response_json = format!(
+        r#"
+        {{
+            "host": "{}",
+            "port": {},
             "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        }
-        "#;
+        }}
+        "#,
+        TEST_REMOTE_SERVER, TEST_REMOTE_PORT
+    );
     let mock = server
         .mock(
             "GET",
@@ -133,16 +151,21 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request =
-        b"GET / HTTP/1.1\r\nHost: echo.free.beeceptor.com\r\nConnection: close\r\n\r\n";
+        format!("GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", TEST_REMOTE_SERVER);
+    let get_request = get_request.as_bytes();
     out_crypt.write(&mut client_stream, get_request).await?;
     // Read response (also encrypted)
     let mut buffer = PacketBuffer::new();
-    let data = in_crypt.read(&stop, &mut client_stream, &mut buffer).await?;
+    let data = in_crypt
+        .read(&stop, &mut client_stream, &mut buffer)
+        .await?;
 
     let response_str = String::from_utf8_lossy(&data);
     log::info!("Received response: {}", response_str);
+    assert!(response_str.contains("HTTP/1.1 200 OK"));
 
-    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    // Slice some time to tokio tasks to complete
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     // Should not have any session on session manager
     let session_manager = crate::session::SessionManager::get_instance();
     assert_eq!(session_manager.count(), 0);
