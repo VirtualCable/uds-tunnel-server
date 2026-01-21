@@ -39,8 +39,8 @@ use tokio::{
 
 use crate::{consts::HANDSHAKE_TIMEOUT_MS, errors::ErrorWithAddres, log};
 
-pub mod handshake;
-pub mod proxy_v2;
+mod handshake;
+mod proxy_v2;
 
 mod connect;
 mod recover;
@@ -52,9 +52,10 @@ pub async fn handle_connection<R, W>(
     use_proxy_v2: bool,
 ) -> Result<(), ErrorWithAddres>
 where
-    R: AsyncReadExt + Unpin,
-    W: AsyncWriteExt + Unpin,
+    R: AsyncReadExt + Unpin + Send + 'static,
+    W: AsyncWriteExt + Unpin + Send + 'static,
 {
+    log::debug!("Starting connection handshake");
     let (ip, action) = match timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
         handshake::Handshake::parse(&mut reader, use_proxy_v2),
@@ -84,7 +85,12 @@ where
             Ok(())
         }
         handshake::HandshakeAction::Open { ticket } => {
-            connect::connect(reader, writer, &ticket, ip).await
+            connect::connect(reader, writer, &ticket, ip).await.map_err(|e| {
+                ErrorWithAddres::new(
+                    Some(ip),
+                    format!("Connection failed: {:?}", e).as_str(),
+                )
+            })
         }
         handshake::HandshakeAction::Recover { ticket } => {
             // TODO: implement

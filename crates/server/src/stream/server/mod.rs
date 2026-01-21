@@ -38,11 +38,10 @@ use crate::{
     crypt::{
         Crypt, build_header,
         consts::{CRYPT_PACKET_SIZE, HEADER_LENGTH},
-        parse_header,
         types::PacketBuffer,
     },
     log,
-    session::{SessionId, get_session_manager},
+    session::{SessionId, SessionManager},
     system::trigger::Trigger,
 };
 
@@ -67,80 +66,20 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
     }
     pub async fn run(&mut self) -> Result<()> {
         log::debug!("Starting server inbound stream");
-        let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
 
         loop {
-            if Self::read_stream(
-                &self.stop,
-                &mut self.reader,
-                header_buffer.as_mut(),
-                HEADER_LENGTH,
-                false,
-            )
-            .await?
-                == 0
-            {
+            let decrypted_data = self
+                .crypt
+                .read(&self.stop, &mut self.reader, &mut self.buffer)
+                .await?;
+            if decrypted_data.is_empty() {
+                log::debug!("Server inbound stream reached EOF");
                 // Connection closed
-                log::info!("Inbound stream closed while reading header");
                 break;
             }
-            // Check valid header and get payload length
-            let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
-            // Read the encrypted payload + tag
-            if Self::read_stream(
-                &self.stop,
-                &mut self.reader,
-                self.buffer.as_mut_slice(),
-                length as usize,
-                true,
-            )
-            .await?
-                == 0
-            {
-                // Connection closed
-                log::info!("Inbound stream closed while reading payload");
-                break;
-            }
-            let decrypted_data = self.crypt.decrypt(seq, length, &mut self.buffer)?.to_vec();
             self.sender.try_send(decrypted_data)?;
         }
         Ok(())
-    }
-
-    pub async fn read_stream(
-        stop: &Trigger,
-        reader: &mut R,
-        buffer: &mut [u8],
-        length: usize,
-        disallow_eof: bool,
-    ) -> Result<usize> {
-        let mut read = 0;
-
-        while read < length {
-            let n = tokio::select! {
-                _ = stop.wait_async() => {
-                    log::info!("Inbound stream stopped while reading");
-                    return Ok(0);  // Indicate end of processing
-                }
-                result = reader.read(&mut buffer[read..length]) => {
-                    match result {
-                        Ok(0) => {
-                            if disallow_eof || read != 0 {
-                                return Err(anyhow::anyhow!("connection closed unexpectedly"));
-                            } else {
-                                return Ok(0);  // Connection closed
-                            }
-                        }
-                        Ok(n) => n,
-                        Err(e) => {
-                            return Err(anyhow::format_err!("read error: {:?}", e));
-                        }
-                    }
-                }
-            };
-            read += n;
-        }
-        Ok(read)
     }
 }
 
@@ -269,8 +208,10 @@ where
             writer,
         } = self;
 
+        let session_manager = SessionManager::get_instance();
+
         let (stop, channels, inbound_crypt, outbound_crypt) =
-            if let Some(session) = get_session_manager().get_session(&session_id) {
+            if let Some(session) = session_manager.get_session(&session_id) {
                 let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
                 (
                     session.get_stop_trigger(),
@@ -309,7 +250,7 @@ where
 
         tokio::spawn(async move {
             // Notify starting server side
-            if let Err(e) = get_session_manager().start_server(&session_id).await {
+            if let Err(e) = session_manager.start_server(&session_id).await {
                 log::error!("Failed to start server session {:?}: {:?}", session_id, e);
                 local_stop.trigger();
                 // Note: Server side does not trigger stop of the session on failure
@@ -323,7 +264,7 @@ where
                 _ = local_stop.wait_async() => {}
             }
             // Notify stopping server side
-            if let Err(e) = get_session_manager().stop_server(&session_id).await {
+            if let Err(e) = session_manager.stop_server(&session_id).await {
                 log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
             }
 
@@ -334,7 +275,7 @@ where
                 async move {
                     tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
                         .await;
-                    if let Some(session) = get_session_manager().get_session(&session_id)
+                    if let Some(session) = session_manager.get_session(&session_id)
                         && !session.is_server_running()
                     {
                         log::info!(

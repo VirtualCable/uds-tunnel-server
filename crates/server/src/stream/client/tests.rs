@@ -31,7 +31,13 @@
 
 use super::*;
 
-use crate::{consts, crypt::types::SharedSecret, session, system::trigger::Trigger, ticket::Ticket};
+use crate::{
+    consts,
+    crypt::types::SharedSecret,
+    session::{Session, SessionManager},
+    system::trigger::Trigger,
+    ticket::Ticket,
+};
 
 async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
@@ -39,10 +45,10 @@ async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
     let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
 
     // Create the session
-    let session = session::Session::new(SharedSecret::new([3u8; 32]), ticket, Trigger::new());
+    let session = Session::new(SharedSecret::new([3u8; 32]), ticket, Trigger::new());
 
     // Add session to manager
-    let session_id = session::get_session_manager().add_session(session).unwrap();
+    let session_id = SessionManager::get_instance().add_session(session).unwrap();
 
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
@@ -59,7 +65,7 @@ async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
 async fn get_server_stream_components(
     session_id: &SessionId,
 ) -> Result<(Trigger, (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>))> {
-    let (stop, channels) = if let Some(session) = get_session_manager().get_session(session_id) {
+    let (stop, channels) = if let Some(session) = SessionManager::get_instance().get_session(session_id) {
         (
             session.get_stop_trigger(),
             session.get_server_channels().await?,
@@ -381,7 +387,7 @@ async fn test_client_stream_valid_packets() -> Result<()> {
     // Wait a bit and theres session should be closed
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if get_session_manager().get_session(&_session_id).is_none() {
+            if SessionManager::get_instance().get_session(&_session_id).is_none() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

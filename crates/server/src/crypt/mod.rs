@@ -36,6 +36,7 @@ use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 pub mod consts;
 pub mod tunnel;
 pub mod types;
+pub mod stream;
 
 pub struct Crypt {
     cipher: Aes256Gcm,
@@ -43,9 +44,9 @@ pub struct Crypt {
 }
 
 impl Crypt {
-    pub fn new(key: &types::SharedSecret) -> Self {
+    pub fn new(key: &types::SharedSecret, seq: u64) -> Self {
         let cipher = Aes256Gcm::new(key.as_ref().into());
-        Crypt { cipher, seq: 0 }
+        Crypt { cipher, seq }
     }
 
     /// Increments and returns the internal seq.
@@ -166,7 +167,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let key = SharedSecret::new([7u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf = types::PacketBuffer::new();
         let plaintext = b"16 length text!!";
@@ -197,7 +198,7 @@ mod tests {
     #[test]
     fn test_sequence_increments() {
         let key = SharedSecret::new([1u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         assert_eq!(crypt.current_seq(), 0);
         assert_eq!(crypt.next_seq(), 1);
@@ -208,7 +209,7 @@ mod tests {
     #[test]
     fn test_replay_rejected() {
         let key = SharedSecret::new([2u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf = types::PacketBuffer::new();
         buf.copy_from_slice(b"abc").unwrap();
@@ -235,7 +236,7 @@ mod tests {
     #[test]
     fn test_decrypt_fails_on_bad_tag() {
         let key = SharedSecret::new([3u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf = types::PacketBuffer::new();
         buf.copy_from_slice(b"hola").unwrap();
@@ -255,7 +256,7 @@ mod tests {
     #[test]
     fn test_decrypt_fails_on_truncated_ciphertext() {
         let key = SharedSecret::new([4u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf = types::PacketBuffer::new();
         buf.copy_from_slice(b"hola").unwrap();
@@ -299,7 +300,7 @@ mod tests {
     #[test]
     fn test_encrypt_does_not_overwrite_extra_bytes() {
         let key = SharedSecret::new([9u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf = types::PacketBuffer::new();
         buf.copy_from_slice(b"hello\xAA\xBB\xCC\xDD").unwrap();
@@ -314,7 +315,7 @@ mod tests {
     #[test]
     fn test_encrypt_produces_unique_nonces() {
         let key = SharedSecret::new([10u8; 32]);
-        let mut crypt = Crypt::new(&key);
+        let mut crypt = Crypt::new(&key, 0);
 
         let mut buf1 = types::PacketBuffer::new();
         buf1.copy_from_slice(b"a").unwrap();

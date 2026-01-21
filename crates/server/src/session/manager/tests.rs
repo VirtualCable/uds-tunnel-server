@@ -31,10 +31,14 @@
 
 use super::*;
 
-use crate::{system::trigger::Trigger, ticket, crypt::types::SharedSecret};
+use crate::{crypt::types::SharedSecret, system::trigger::Trigger, ticket};
 
 fn new_session_for_test() -> Session {
-    Session::new(SharedSecret::new([0u8; 32]), ticket::Ticket::random(), Trigger::new())
+    Session::new(
+        SharedSecret::new([0u8; 32]),
+        ticket::Ticket::random(),
+        Trigger::new(),
+    )
 }
 
 #[tokio::test]
@@ -60,16 +64,17 @@ async fn test_session_running() {
 #[tokio::test]
 async fn test_session_sequence_numbers() {
     let session = new_session_for_test();
-    let seq = session.get_seq();
+    let seq = session.get_seqs();
     assert_eq!(seq, (0, 0));
-    session.set_seq(5, 10);
-    let seq = session.get_seq();
+    session.set_inbound_seq(5);
+    session.set_outbound_seq(10);
+    let seq = session.get_seqs();
     assert_eq!(seq, (5, 10));
 }
 
 #[tokio::test]
 async fn test_get_session_manager() {
-    let manager = get_session_manager();
+    let manager = SessionManager::get_instance();
     assert!(manager.sessions.read().unwrap().is_empty());
     // Clear the session manager for testing
     manager.sessions.write().unwrap().clear();
@@ -123,75 +128,6 @@ async fn test_session_removed_exactly_once() {
     // Any aditional stops should be no-ops
     manager.stop_server(&session_id).await.unwrap();
     manager.stop_client(&session_id).await.unwrap();
-}
-
-#[tokio::test]
-async fn test_concurrent_access() {
-    use std::sync::Arc;
-
-    let manager = Arc::new(SessionManager::new());
-    let session = new_session_for_test();
-
-    let session_id = manager.add_session(session).unwrap();
-
-    let mut handles = vec![];
-
-    for _ in 0..20 {
-        let manager = manager.clone();
-        handles.push(tokio::task::spawn(async move {
-            for _ in 0..1000 {
-                manager.start_server(&session_id).await.unwrap();
-                manager.start_client(&session_id).await.unwrap();
-                manager.store_sequence_numbers(&session_id, 10, 20);
-                let _ = manager.get_sequence_numbers(&session_id);
-            }
-        }));
-    }
-
-    for h in handles {
-        h.await.unwrap();
-    }
-
-    let seq = manager.get_sequence_numbers(&session_id);
-    assert_eq!(seq, (10, 20));
-}
-
-#[tokio::test]
-async fn test_sequence_consistency_under_concurrency() {
-    use std::sync::Arc;
-    use std::thread;
-
-    let session = Arc::new(new_session_for_test());
-
-    let mut handles = vec![];
-
-    // Set initial sequence numbers to zero, 1
-    session.set_seq(0, 1);
-
-    // Writer
-    {
-        let session = session.clone();
-        handles.push(thread::spawn(move || {
-            for i in 0..1000 {
-                session.set_seq(i, i + 1);
-            }
-        }));
-    }
-
-    // Readers
-    for _ in 0..10 {
-        let session = session.clone();
-        handles.push(thread::spawn(move || {
-            for _ in 0..1000 {
-                let (tx, rx) = session.get_seq();
-                assert_eq!(rx, tx + 1);
-            }
-        }));
-    }
-
-    for h in handles {
-        h.join().unwrap();
-    }
 }
 
 #[tokio::test]

@@ -36,7 +36,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::{
     crypt::consts::CRYPT_PACKET_SIZE,
     log,
-    session::{SessionId, get_session_manager},
+    session::{SessionId, SessionManager},
     system::trigger::Trigger,
 };
 
@@ -170,7 +170,9 @@ where
             writer,
         } = self;
 
-        let (stop, channels) = if let Some(session) = get_session_manager().get_session(&session_id)
+        let session_manager = SessionManager::get_instance();
+
+        let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id)
         {
             (
                 session.get_stop_trigger(),
@@ -198,7 +200,7 @@ where
         });
         tokio::spawn(async move {
             // Notify starting client side
-            if let Err(e) = get_session_manager().start_client(&session_id).await {
+            if let Err(e) = session_manager.start_client(&session_id).await {
                 log::error!("Failed to start client session {:?}: {:?}", session_id, e);
                 local_stop.trigger();
                 stop.trigger();
@@ -213,7 +215,7 @@ where
                 }
             }
             // Notify stopping client side
-            if let Err(e) = get_session_manager().stop_client(&session_id).await {
+            if let Err(e) = session_manager.stop_client(&session_id).await {
                 log::error!("Failed to stop client session {:?}: {:?}", session_id, e);
             }
         });

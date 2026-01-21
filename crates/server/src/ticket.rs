@@ -92,3 +92,16 @@ impl From<&[u8; TICKET_LENGTH]> for Ticket {
         Ticket::new(*id)
     }
 }
+
+impl TryFrom<&[u8]> for Ticket {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[u8]) -> Result<Ticket> {
+        if value.len() != TICKET_LENGTH {
+            return Err(anyhow::anyhow!("Invalid ticket length"));
+        }
+        let mut id = [0u8; TICKET_LENGTH];
+        id.copy_from_slice(value);
+        Ok(Ticket::new(id))
+    }
+}

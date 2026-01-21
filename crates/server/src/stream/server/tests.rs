@@ -32,7 +32,11 @@
 use super::*;
 
 use crate::{
-    consts, crypt::types::SharedSecret, session, system::trigger::Trigger, ticket::Ticket,
+    consts,
+    crypt::{types::SharedSecret, parse_header},
+    session::{Session, SessionId, SessionManager},
+    system::trigger::Trigger,
+    ticket::Ticket,
 };
 
 fn make_test_crypts() -> (Crypt, Crypt) {
@@ -41,8 +45,8 @@ fn make_test_crypts() -> (Crypt, Crypt) {
     let key1 = SharedSecret::new([7; 32]);
     let key2 = SharedSecret::new([8; 32]);
 
-    let inbound = Crypt::new(&key1);
-    let outbound = Crypt::new(&key2);
+    let inbound = Crypt::new(&key1, 0);
+    let outbound = Crypt::new(&key2, 0);
 
     (inbound, outbound)
 }
@@ -54,10 +58,10 @@ async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
     let shared_secret = SharedSecret::new([3u8; 32]);
 
     // Create the session
-    let session = session::Session::new(shared_secret, ticket, Trigger::new());
+    let session = Session::new(shared_secret, ticket, Trigger::new());
 
     // Add session to manager
-    let session_id = session::get_session_manager().add_session(session).unwrap();
+    let session_id = SessionManager::get_instance().add_session(session).unwrap();
 
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
@@ -80,7 +84,7 @@ async fn get_server_stream_components(
     Crypt,
 )> {
     let (stop, channels, inbound_crypt, outbound_crypt) =
-        if let Some(session) = get_session_manager().get_session(session_id) {
+        if let Some(session) = SessionManager::get_instance().get_session(session_id) {
             let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
             (
                 session.get_stop_trigger(),
@@ -301,7 +305,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     // Wait a bit and theres session should be closed
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if get_session_manager().get_session(&_session_id).is_none() {
+            if SessionManager::get_instance().get_session(&_session_id).is_none() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

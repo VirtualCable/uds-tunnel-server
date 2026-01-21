@@ -123,20 +123,6 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn store_sequence_numbers(&self, id: &SessionId, seq_tx: u64, seq_rx: u64) {
-        if let Some(session) = self.get_session(id) {
-            session.set_seq(seq_tx, seq_rx);
-        }
-    }
-
-    pub fn get_sequence_numbers(&self, id: &SessionId) -> (u64, u64) {
-        if let Some(session) = self.get_session(id) {
-            session.get_seq()
-        } else {
-            (0, 0)
-        }
-    }
-
     /// Note: equivs will fail if the target session is removed or the equiv entry does not exist
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
         // If equivalent session exists, get it. If don't, try to use id as is.
@@ -185,19 +171,19 @@ impl SessionManager {
             *last = now;
         }
     }
+
+    // Get the global session manager instance
+    pub fn get_instance() -> &'static SessionManager {
+        let manager = SESSION_MANAGER.get_or_init(SessionManager::new);
+        manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
+        manager
+    }
 }
 
 impl Default for SessionManager {
     fn default() -> Self {
         Self::new()
     }
-}
-
-// Get the global session manager instance
-pub fn get_session_manager() -> &'static SessionManager {
-    let manager = SESSION_MANAGER.get_or_init(SessionManager::new);
-    manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
-    manager
 }
 
 #[cfg(test)]

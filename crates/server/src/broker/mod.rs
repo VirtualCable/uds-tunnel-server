@@ -33,7 +33,7 @@ use std::{sync::OnceLock, net::SocketAddr};
 use anyhow::Result;
 use reqwest::Client;
 
-use crate::{log, ticket::Ticket};
+use crate::{crypt::types::SharedSecret, log, ticket::Ticket};
 
 mod utils;
 
@@ -48,13 +48,13 @@ pub struct TicketResponse {
 }
 
 impl TicketResponse {
-    pub fn get_shared_secret_bytes(&self) -> Option<[u8; 32]> {
+    pub fn get_shared_secret(&self) -> Result<SharedSecret> {
         if let Some(ref secret_str) = self.shared_secret
             && let Ok(secret_bytes) = utils::hex_to_bytes(secret_str)
         {
-            Some(secret_bytes)
+            Ok(SharedSecret::new(secret_bytes))
         } else {
-            None
+            Err(anyhow::anyhow!("Missing or invalid shared secret"))
         }
     }
 
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(response.port, 12345);
         assert_eq!(response.notify, "notify_ticket");
         assert_eq!(
-            response.get_shared_secret_bytes().unwrap(),
+            *response.get_shared_secret().unwrap().as_ref(),
             [
                 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab,
                 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67,

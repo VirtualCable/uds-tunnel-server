@@ -29,14 +29,13 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
+use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use anyhow::Result;
 
 use crate::ticket;
 
 use super::{Crypt, types::SharedSecret};
-
 
 struct Material {
     pub _not_used: [u8; 32],
@@ -44,8 +43,10 @@ struct Material {
     pub key_send: SharedSecret,
 }
 
-
-fn derive_tunnel_material(shared_secret: &SharedSecret, ticket: &ticket::Ticket) -> Result<Material> {
+fn derive_tunnel_material(
+    shared_secret: &SharedSecret,
+    ticket: &ticket::Ticket,
+) -> Result<Material> {
     // Ticket id is correct LENGTH always, as we use Ticket hard type
 
     // HKDF-Extract + Expand with SHA-256
@@ -70,11 +71,22 @@ fn derive_tunnel_material(shared_secret: &SharedSecret, ticket: &ticket::Ticket)
     })
 }
 
-pub fn get_tunnel_crypts(shared_secret: &SharedSecret, ticket: &ticket::Ticket) -> Result<(Crypt, Crypt)> {
+/// Returns (inbound, outbound) crypts
+/// inbound: for reading from the tunnel (decrypting)
+/// outbound: for writing to the tunnel (encrypting)
+/// # Arguments
+/// * `shared_secret` - Shared secret used for deriving the keys
+/// * `ticket` - Ticket used for deriving the keys
+/// * `seqs` - Initial sequence numbers for (inbound, outbound) crypts
+pub fn get_tunnel_crypts(
+    shared_secret: &SharedSecret,
+    ticket: &ticket::Ticket,
+    seqs: (u64, u64),
+) -> Result<(Crypt, Crypt)> {
     let material = derive_tunnel_material(shared_secret, ticket)?;
 
-    let inbound = Crypt::new(&material.key_send);
-    let outbound = Crypt::new(&material.key_receive);
+    let inbound = Crypt::new(&material.key_send, seqs.0);
+    let outbound = Crypt::new(&material.key_receive, seqs.1);
 
     Ok((inbound, outbound))
 }
@@ -112,7 +124,7 @@ mod tests {
         let shared_secret = SharedSecret::new([1u8; 32]);
         let ticket: ticket::Ticket = [2u8; 48].into();
 
-        let (inbound, outbound) = get_tunnel_crypts(&shared_secret, &ticket).unwrap();
+        let (inbound, outbound) = get_tunnel_crypts(&shared_secret, &ticket, (0, 0)).unwrap();
 
         assert_eq!(inbound.current_seq(), 0);
         assert_eq!(outbound.current_seq(), 0);

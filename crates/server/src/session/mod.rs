@@ -29,7 +29,10 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
-use std::sync::{Arc, RwLock, atomic::AtomicBool};
+use std::{
+    net::SocketAddr,
+    sync::{RwLock, atomic::AtomicBool},
+};
 
 use anyhow::Result;
 use flume::{Receiver, Sender};
@@ -39,7 +42,7 @@ use crate::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ti
 mod manager;
 mod proxy;
 
-pub use manager::{SessionManager, get_session_manager};
+pub use manager::SessionManager;
 
 // Alias, internal SessionId is a Ticket
 pub type SessionId = ticket::Ticket;
@@ -55,9 +58,13 @@ pub struct Session {
     is_server_running: AtomicBool,
     // Client is the side that initiated the connection to the remote server
     is_client_running: AtomicBool,
+
     // seq numbers for crypto part
-    // only updated on server side killed.
-    seq: Arc<RwLock<(u64, u64)>>,
+    // only updated on server side killed. (the one receives/sends data from client)
+    seq: RwLock<(u64, u64)>,
+
+    // Ip of the client connected
+    ip: RwLock<SocketAddr>,
 }
 
 impl Session {
@@ -72,7 +79,14 @@ impl Session {
             stop,
             is_server_running: AtomicBool::new(false),
             is_client_running: AtomicBool::new(false),
-            seq: Arc::new(RwLock::new((0, 0))),
+            seq: RwLock::new((0, 0)),
+            ip: RwLock::new("0.0.0.0:0".parse().unwrap()), // Default IP
+        }
+    }
+
+    pub fn set_ip(&self, ip: SocketAddr) {
+        if let Ok(mut ip_lock) = self.ip.write() {
+            *ip_lock = ip;
         }
     }
 
@@ -121,13 +135,20 @@ impl Session {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    pub fn set_seq(&self, seq_tx: u64, seq_rx: u64) {
+    pub fn set_inbound_seq(&self, seq_rx: u64) {
         if let Ok(mut seq_lock) = self.seq.write() {
-            *seq_lock = (seq_tx, seq_rx);
+            seq_lock.0 = seq_rx;
         }
     }
 
-    pub fn get_seq(&self) -> (u64, u64) {
+    pub fn set_outbound_seq(&self, seq_tx: u64) {
+        if let Ok(mut seq_lock) = self.seq.write() {
+            seq_lock.1 = seq_tx;
+        }
+    }
+
+    // Returns the (inbound, outbound) seq numbers
+    pub fn get_seqs(&self) -> (u64, u64) {
         if let Ok(seq_lock) = self.seq.read() {
             *seq_lock
         } else {
@@ -148,7 +169,7 @@ impl Session {
     }
 
     pub fn get_server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
-        crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.get_ticket())
+        crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.get_ticket(), self.get_seqs())
     }
 }
 
