@@ -40,6 +40,7 @@ use crate::{
     consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
     errors::ErrorWithAddres,
     ticket::Ticket,
+    log,
 };
 
 // Handshake commands, starting from 0
@@ -86,6 +87,7 @@ impl Handshake {
                     format!("failed to read PROXY protocol v2 header: {}", e).as_str(),
                 )
             })?;
+            log::debug!("Received PROXY v2 info: {:?}", proxy_info);
             Some(proxy_info.source_addr)
         } else {
             None
