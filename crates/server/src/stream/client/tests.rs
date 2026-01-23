@@ -31,18 +31,16 @@
 
 use super::*;
 
-use crate::{
-    consts,
-    crypt::types::SharedSecret,
-    session::{Session, SessionManager},
-    system::trigger::Trigger,
-    ticket::Ticket,
+use shared::{
+    consts::TICKET_LENGTH, crypt::types::SharedSecret, system::trigger::Trigger, ticket::Ticket,
 };
+
+use crate::session::{Session, SessionManager};
 
 async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
-    let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
+    let ticket = Ticket::new([0x40u8; TICKET_LENGTH]);
 
     // Create the session
     let session = Session::new(SharedSecret::new([3u8; 32]), ticket, Trigger::new());

@@ -31,13 +31,14 @@
 
 use super::*;
 
-use crate::{
+use shared::{
     consts,
     crypt::{parse_header, types::SharedSecret},
-    session::{Session, SessionId, SessionManager},
     system::trigger::Trigger,
     ticket::Ticket,
 };
+
+use crate::session::{Session, SessionId, SessionManager};
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing

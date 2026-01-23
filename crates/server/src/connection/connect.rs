@@ -6,14 +6,15 @@ use tokio::{
     net::TcpStream,
 };
 
+use shared::{
+    crypt::types::PacketBuffer, errors::ErrorWithAddres, log, system::trigger::Trigger,
+    ticket::Ticket,
+};
+
 use crate::{
-    crypt::types::PacketBuffer,
-    errors::ErrorWithAddres,
-    log,
+    broker::{self, BrokerApi},
     session::{Session, SessionManager},
     stream::{client::TunnelClientStream, server::TunnelServerStream},
-    system::trigger::Trigger,
-    ticket::Ticket,
 };
 
 pub(super) async fn connect<R, W>(
@@ -27,7 +28,8 @@ where
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
     let session_manager = SessionManager::get_instance();
-    match ticket.retrieve_from_broker(ip).await {
+    let broker = broker::get();
+    match broker.start_connection(ticket, ip).await {
         Ok(ticket_info) => {
             let stop = Trigger::new();
             let session_id = session_manager.add_session(Session::new(

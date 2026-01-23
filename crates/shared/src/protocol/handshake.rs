@@ -35,13 +35,11 @@ use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use tokio::io::AsyncReadExt;
 
+use crate::{consts::TICKET_LENGTH, errors::ErrorWithAddres, log, ticket::Ticket};
+
 use super::proxy_v2::ProxyInfo;
-use crate::{
-    consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
-    errors::ErrorWithAddres,
-    log,
-    ticket::Ticket,
-};
+
+use super::consts::HANDSHAKE_V2_SIGNATURE;
 
 // Handshake commands, starting from 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]

@@ -37,10 +37,9 @@ use tokio::{
     time::timeout,
 };
 
-use crate::{consts::HANDSHAKE_TIMEOUT_MS, errors::ErrorWithAddres, log};
-
-mod handshake;
-mod proxy_v2;
+use shared::{
+    errors::ErrorWithAddres, log, protocol::consts::HANDSHAKE_TIMEOUT_MS, protocol::handshake,
+};
 
 mod connect;
 mod recover;

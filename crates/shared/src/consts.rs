@@ -29,17 +29,13 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
-
-// HTTP related constants
-pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
-
-// Channel related constants
-pub const CHANNEL_SIZE: usize = 2048; // 2k messages as much on a channel buffer
-
-// Timeout constants
-pub const SERVER_RECOVERY_GRACE_SECS: u64 = 2; // Time given to recover server connection
+pub const VERSION: &str = "v5.0.0";
 
 #[cfg(debug_assertions)]
-pub const CONFIGFILE_PATH: &str = "udstunnel.conf";
+pub const DEFAULT_LOG_LEVEL: &str = "debug";
+
 #[cfg(not(debug_assertions))]
-pub const CONFIGFILE_PATH: &str = "/etc/udstunnel.conf";
+pub const DEFAULT_LOG_LEVEL: &str = "info";
+
+// Ticket related constants
+pub const TICKET_LENGTH: usize = 48;

@@ -37,20 +37,20 @@ use anyhow::Ok;
 use mockito::{Matcher, Server};
 use tokio::io::{AsyncWriteExt, DuplexStream};
 
-use crate::{
-    config,
-    connection::handshake::HandshakeCommand,
-    consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
+use shared::{
+    consts::TICKET_LENGTH,
     crypt::{
         Crypt,
         tunnel::derive_tunnel_material,
         types::{PacketBuffer, SharedSecret},
     },
     log,
-    session::SessionManager,
+    protocol::{consts::HANDSHAKE_V2_SIGNATURE, handshake::HandshakeCommand},
     system::trigger::Trigger,
     ticket::Ticket,
 };
+
+use crate::{config, session::SessionManager};
 
 // Any accesible server for testing would do the job
 // as long as it has a known response
@@ -68,6 +68,8 @@ async fn setup_testing_connection(
     Ticket,
 ) {
     log::setup_logging("debug", log::LogType::Test);
+    log::debug!("Setting up testing connection (proxy_v2={})", proxy_v2);
+
     let auth_token = "test_token";
     let ticket = Ticket::new_random();
     let fake_src_ip: SocketAddr = "127.0.0.1:0".parse().unwrap();

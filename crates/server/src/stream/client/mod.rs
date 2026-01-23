@@ -33,12 +33,9 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{
-    crypt::consts::CRYPT_PACKET_SIZE,
-    log,
-    session::{SessionId, SessionManager},
-    system::trigger::Trigger,
-};
+use crate::session::{SessionId, SessionManager};
+
+use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, system::trigger::Trigger};
 
 struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,

@@ -33,16 +33,19 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{
-    consts::SERVER_RECOVERY_GRACE_SECS, // global crate consts
+use shared::{
     crypt::{
         Crypt, build_header,
         consts::{CRYPT_PACKET_SIZE, HEADER_LENGTH},
         types::PacketBuffer,
     },
     log,
-    session::{SessionId, SessionManager},
     system::trigger::Trigger,
+};
+
+use crate::{
+    consts::SERVER_RECOVERY_GRACE_SECS, // global crate consts
+    session::{SessionId, SessionManager},
 };
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {

@@ -37,7 +37,7 @@ use std::{
 use anyhow::Result;
 use flume::{Receiver, Sender};
 
-use crate::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
+use shared::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
 
 mod manager;
 mod proxy;

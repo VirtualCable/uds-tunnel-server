@@ -36,14 +36,10 @@ pub mod broker;
 pub mod config;
 pub mod connection;
 pub mod consts;
-pub mod crypt;
-pub mod errors;
-pub mod log;
 pub mod session;
 pub mod stream;
-pub mod system;
-pub mod ticket;
-pub mod utils;
+
+use shared::{log, system::trigger::Trigger};
 
 // Catch SIGTERM and SIGINT to perform a graceful shutdown
 #[tokio::main(flavor = "multi_thread")]
@@ -61,7 +57,7 @@ async fn main() {
     let listener = TcpListener::bind(listen_sock_addr).await.unwrap();
     log::info!("Listening on {}", listen_sock_addr);
 
-    let stop = system::trigger::Trigger::new();
+    let stop = Trigger::new();
 
     // Spawn the signal handler
     {

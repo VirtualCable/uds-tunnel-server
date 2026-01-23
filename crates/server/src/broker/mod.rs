@@ -34,7 +34,8 @@ use anyhow::Result;
 use hickory_resolver::{Resolver, config::*, name_server::TokioConnectionProvider};
 use reqwest::Client;
 
-use crate::{config, crypt::types::SharedSecret, log, ticket::Ticket};
+use crate::config;
+use shared::{crypt::types::SharedSecret, log, ticket::Ticket};
 
 #[derive(serde::Deserialize, Debug)]
 pub struct TicketResponse {
@@ -185,7 +186,7 @@ pub fn get() -> impl BrokerApi {
 mod tests {
     use super::*;
 
-    use crate::consts::TICKET_LENGTH;
+    use shared::consts::TICKET_LENGTH;
     use mockito::Server;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 

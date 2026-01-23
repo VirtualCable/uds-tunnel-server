@@ -180,7 +180,7 @@ mod tests {
             0x00, 0x50, // dst port 80
         ];
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let info = ProxyInfo::read_from_stream(&mut stream).await.unwrap();
 
@@ -207,7 +207,7 @@ mod tests {
             0x00, 0x50,
         ]);
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let info = ProxyInfo::read_from_stream(&mut stream).await.unwrap();
 
@@ -225,7 +225,7 @@ mod tests {
             0x01, 0x02, 0x03,
         ];
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let info = ProxyInfo::read_from_stream(&mut stream).await.unwrap();
 
@@ -236,7 +236,7 @@ mod tests {
     async fn test_invalid_signature() {
         let buf = vec![0x00; 16]; // firma incorrecta
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
         assert!(err.to_string().contains("invalid PROXY v2 signature"));
@@ -250,7 +250,7 @@ mod tests {
             0x11, 0x00, 0x0C,
         ];
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
         assert!(err.to_string().contains("not PROXY protocol v2"));
@@ -264,7 +264,7 @@ mod tests {
             0x11, 0x00, 0x0C,
         ];
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
         assert!(err.to_string().contains("unsupported PROXY command"));
@@ -278,7 +278,7 @@ mod tests {
                   // but no address data provided
         ];
 
-        let mut stream = tokio_test::io::Builder::new().read(&buf).build();
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
 
         let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
         println!("Error: {}", err);

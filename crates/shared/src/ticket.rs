@@ -29,15 +29,10 @@
 //
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
-use std::net::SocketAddr;
-
 use anyhow::Result;
 use rand::{Rng, distr::Alphanumeric};
 
-use crate::{
-    broker::{self, BrokerApi},
-    consts::TICKET_LENGTH,
-};
+use crate::consts::TICKET_LENGTH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket([u8; TICKET_LENGTH]);
@@ -67,11 +62,6 @@ impl Ticket {
 
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).expect("Ticket is not valid UTF-8")
-    }
-
-    pub async fn retrieve_from_broker(&self, ip: SocketAddr) -> Result<broker::TicketResponse> {
-        let broker_api = broker::get();
-        broker_api.start_connection(self, ip).await
     }
 }
 

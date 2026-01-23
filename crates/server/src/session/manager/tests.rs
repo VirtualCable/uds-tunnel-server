@@ -31,7 +31,7 @@
 
 use super::*;
 
-use crate::{crypt::types::SharedSecret, system::trigger::Trigger, ticket};
+use shared::{crypt::types::SharedSecret, system::trigger::Trigger, ticket};
 
 fn new_session_for_test() -> Session {
     Session::new(

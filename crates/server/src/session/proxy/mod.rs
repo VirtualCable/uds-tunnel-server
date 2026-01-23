@@ -33,7 +33,8 @@ use anyhow::Result;
 use flume::{Receiver, Sender, bounded};
 use futures::future::{Either, pending};
 
-use crate::{consts::CHANNEL_SIZE, log, system::trigger::Trigger};
+use crate::consts::CHANNEL_SIZE;
+use shared::{log, system::trigger::Trigger};
 
 pub(super) struct SessionProxyHandle {
     ctrl_tx: Sender<ProxyCommand>,
