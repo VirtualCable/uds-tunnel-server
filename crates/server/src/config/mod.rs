@@ -1,5 +1,6 @@
 use std::{
     fs::read_to_string,
+    net::SocketAddr,
     sync::{Arc, OnceLock, RwLock},
 };
 
@@ -18,6 +19,18 @@ pub struct ServerConfig {
 impl ServerConfig {
     pub fn from_toml_str(toml_str: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(toml_str)
+    }
+
+    pub fn listen_sockaddr(&self) -> SocketAddr {
+        let addr_str = self
+            .listen_addr
+            .as_deref()
+            .unwrap_or("*")
+            .replace("*", "0.0.0.0")
+            .to_string();
+
+        let port = self.listen_port.unwrap_or(443);
+        SocketAddr::new(addr_str.parse().unwrap(), port)
     }
 }
 

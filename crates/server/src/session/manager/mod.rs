@@ -84,6 +84,12 @@ impl SessionManager {
         let mut sessions = self.sessions.write().unwrap();
         sessions.remove(id);
     }
+    
+    pub async fn finish_all_sessions(&self) {
+        // Just drop session, will set the stop trigger
+        let mut sessions = self.sessions.write().unwrap();
+        sessions.clear();
+    }
 
     pub fn count(&self) -> usize {
         let sessions = self.sessions.read().unwrap();
