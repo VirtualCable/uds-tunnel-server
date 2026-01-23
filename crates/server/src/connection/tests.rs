@@ -47,6 +47,7 @@ use crate::{
         types::{PacketBuffer, SharedSecret},
     },
     log,
+    session::SessionManager,
     system::trigger::Trigger,
     ticket::Ticket,
 };
@@ -117,6 +118,9 @@ async fn setup_testing_connection(
             log::error!("Server connection handling failed: {:?}", e);
         }
     });
+
+    SessionManager::get_instance().finish_all_sessions().await;
+
     // Pass the base url (without /ui) to the API
     (server, mock, client_stream, stop, ticket)
 }
@@ -140,7 +144,7 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
     Ok((out_crypt, in_crypt))
 }
 
-#[serial_test::serial(config)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
@@ -181,7 +185,7 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[serial_test::serial(config)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;
@@ -202,7 +206,7 @@ async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[serial_test::serial(config)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
     for len in (0..(HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH)).step_by(10) {
@@ -231,7 +235,7 @@ async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[serial_test::serial(config)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
@@ -266,7 +270,7 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[serial_test::serial(config)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;

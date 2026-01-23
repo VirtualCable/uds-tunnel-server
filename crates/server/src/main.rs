@@ -28,8 +28,6 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
-use std::net::SocketAddr;
-
 #[cfg(unix)]
 use tokio::signal::unix::{SignalKind, signal as unix_signal};
 use tokio::{net::TcpListener, signal};

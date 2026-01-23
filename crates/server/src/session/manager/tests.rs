@@ -72,6 +72,7 @@ async fn test_session_sequence_numbers() {
     assert_eq!(seq, (5, 10));
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_get_session_manager() {
     let manager = SessionManager::get_instance();
@@ -82,6 +83,7 @@ async fn test_get_session_manager() {
     let session_id = manager.add_session(session).unwrap();
     let retrieved_session = manager.get_session(&session_id).unwrap();
     assert_eq!(*retrieved_session.get_shared_secret().as_ref(), [0u8; 32]);
+    // Clean up after test for other tests
 }
 
 #[tokio::test]
