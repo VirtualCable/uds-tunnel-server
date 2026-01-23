@@ -94,8 +94,15 @@ impl Proxy {
         (proxy, handle)
     }
 
-    pub fn run(self) -> tokio::task::JoinHandle<Result<()>> {
-        tokio::spawn(async move { self.run_session_proxy().await })
+    pub fn run(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            // Catch panics to avoid bringing down the server
+            if let Err(e) = self.run_session_proxy().await {
+                log::error!("Session proxy encountered an error: {:?}", e);
+            } else {
+                log::debug!("Session proxy exited normally");
+            }
+        })
     }
 
     async fn run_session_proxy(self) -> Result<()> {

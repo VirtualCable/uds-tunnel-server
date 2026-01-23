@@ -111,7 +111,7 @@ impl HttpBrokerApi {
                 })
                 .danger_accept_invalid_certs(!verify_ssl)
                 .build()
-                .unwrap(),
+                .unwrap(),  // If not built, panic intentionally
             auth_token: auth_token.to_string(),
             ticket_rest_url: ticket_rest_url.to_string(),
         }

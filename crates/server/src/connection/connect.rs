@@ -49,12 +49,22 @@ where
             let mut crypt = session.get_server_tunnel_crypts()?.0;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
-            let data: Ticket = tokio::time::timeout(
+            let ticket_data = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 crypt.read(&stop, &mut reader, &mut buffer),
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))??
+            .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
+
+            // If reading ticket data failed, ensure session is removed and return error
+            let data: Ticket = if let Ok(data) = ticket_data {
+                data
+            } else {
+                log::error!("Failed to read ticket data from client");
+                // Remove the session, that has not been used properly
+                session_manager.remove_session(&session_id);
+                return Err(anyhow::anyhow!("Failed to read ticket data from client"));
+            }
             .as_slice()
             .try_into()?;
 

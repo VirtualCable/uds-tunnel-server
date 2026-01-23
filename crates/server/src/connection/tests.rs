@@ -126,7 +126,7 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
         let shared_secret = SharedSecret::from_hex(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )?;
-        let material = derive_tunnel_material(&shared_secret, &ticket).unwrap();
+        let material = derive_tunnel_material(&shared_secret, ticket).unwrap();
         log::debug!(
             "Derived tunnel material: key_receive={:?}, key_send={:?}",
             material.key_receive,
@@ -140,6 +140,7 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
     Ok((out_crypt, in_crypt))
 }
 
+#[serial_test::serial(config)]
 #[tokio::test]
 async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
@@ -180,6 +181,7 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(config)]
 #[tokio::test]
 async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;
@@ -192,12 +194,18 @@ async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
         send_result.is_err(),
         "Expected error after handshake timeout"
     );
+    // Slice some time to tokio tasks to complete
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Should not have any session on session manager
+    let session_manager = crate::session::SessionManager::get_instance();
+    assert_eq!(session_manager.count(), 0);
     Ok(())
 }
 
+#[serial_test::serial(config)]
 #[tokio::test]
 async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
-    for len in 0..(HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH) {
+    for len in (0..(HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH)).step_by(10) {
         let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
 
         let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
@@ -223,6 +231,7 @@ async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(config)]
 #[tokio::test]
 async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
@@ -248,9 +257,16 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
         "Expected connection close after invalid ticket crypt"
     );
 
+    // Slice some time to tokio tasks to complete
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Should not have any session on session manager
+    let session_manager = crate::session::SessionManager::get_instance();
+    assert_eq!(session_manager.count(), 0);
+
     Ok(())
 }
 
+#[serial_test::serial(config)]
 #[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;

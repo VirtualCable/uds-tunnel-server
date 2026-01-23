@@ -71,7 +71,6 @@ where
         Err(e) => {
             let ip = e.src_ip.unwrap_or(connection_ip);
             // Handshake failed
-            // TODO: Process failure (e.g., logging, blocking IP, etc.)
             return Err(ErrorWithAddres::new(
                 Some(ip),
                 format!("Handshake failed: {}", e).as_str(),
