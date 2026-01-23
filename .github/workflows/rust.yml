@@ -31,6 +31,9 @@ jobs:
 
     - name: Run tests
       run: cargo test --all-features --all-targets --verbose
+      # Tests are very fast (2-3 seconds maybe), but we add a small timeout to avoid
+      # hanging jobs. If a test takes more than 2 minutes, something is very wrong.
+      timeout-minutes: 2
 
     - name: Lint (clippy)
       run: cargo clippy --all-targets --all-features -- -D warnings
