@@ -76,16 +76,12 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         }
                         Err(e) => {
                             log::error!("Client inbound read error: {:?}", e);
-                            // Set stop and return error
-                            self.stop.trigger();
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
                         }
                     }
                 }
             }
         }
-        // Ensure stop is set
-        self.stop.trigger();
         Ok(())
     }
 }
@@ -124,15 +120,12 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                                 break;
                             }
                             log::error!("Client outbound receiver channel closed");
-                            self.stop.trigger();
                             return Err(anyhow::anyhow!("Receiver channel closed"));
                         }
                     }
                 }
             }
         }
-        // Ensure local stop is set
-        self.stop.trigger();
         Ok(())
     }
 }
@@ -188,11 +181,13 @@ where
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);
             }
+            inbound.stop.trigger();
         });
         tokio::spawn(async move {
             if let Err(e) = outbound.run().await {
                 log::error!("Client outbound stream error: {:?}", e);
             }
+            outbound.stop.trigger();
         });
         tokio::spawn(async move {
             // Notify starting client side

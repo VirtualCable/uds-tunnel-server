@@ -116,8 +116,13 @@ impl Proxy {
         log::debug!("Session proxy started");
 
         loop {
+            // We can have already the channels, but they can be disconnected
+            // Any disconnected channel is considered as non-existing
+            // else, this loop will busy-wait, and hold tokio
             let (server_recv, client_recv) = if let Some(chs) = &our_server_channels
-                && let Some(chc) = &our_client_channels
+                && let Some(chc) = &our_client_channels &&
+                !chs.rx.is_disconnected() && !chs.tx.is_disconnected() &&
+                !chc.rx.is_disconnected() && !chc.tx.is_disconnected()
             {
                 (
                     Either::Left(chs.rx.recv_async()),
