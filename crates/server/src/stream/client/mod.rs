@@ -172,8 +172,7 @@ where
 
         let session_manager = SessionManager::get_instance();
 
-        let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id)
-        {
+        let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id) {
             (
                 session.get_stop_trigger(),
                 session.get_client_channels().await?,

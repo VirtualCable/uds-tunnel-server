@@ -39,8 +39,8 @@ use super::proxy_v2::ProxyInfo;
 use crate::{
     consts::{HANDSHAKE_V2_SIGNATURE, TICKET_LENGTH},
     errors::ErrorWithAddres,
-    ticket::Ticket,
     log,
+    ticket::Ticket,
 };
 
 // Handshake commands, starting from 0

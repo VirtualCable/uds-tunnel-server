@@ -50,7 +50,6 @@ impl SharedSecret {
     }
 }
 
-
 impl AsRef<[u8; 32]> for SharedSecret {
     fn as_ref(&self) -> &[u8; 32] {
         &self.0

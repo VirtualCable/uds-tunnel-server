@@ -84,12 +84,11 @@ where
             Ok(())
         }
         handshake::HandshakeAction::Open { ticket } => {
-            connect::connect(reader, writer, &ticket, ip).await.map_err(|e| {
-                ErrorWithAddres::new(
-                    Some(ip),
-                    format!("Connection failed: {:?}", e).as_str(),
-                )
-            })
+            connect::connect(reader, writer, &ticket, ip)
+                .await
+                .map_err(|e| {
+                    ErrorWithAddres::new(Some(ip), format!("Connection failed: {:?}", e).as_str())
+                })
         }
         handshake::HandshakeAction::Recover { ticket } => {
             // TODO: implement

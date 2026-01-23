@@ -30,7 +30,6 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 use anyhow::Result;
 
-
 pub fn hex_to_bytes<const N: usize>(input: &str) -> Result<[u8; N]> {
     if input.len() != N * 2 {
         anyhow::bail!("Invalid hex string length");

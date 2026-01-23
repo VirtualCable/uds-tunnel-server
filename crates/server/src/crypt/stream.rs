@@ -115,7 +115,11 @@ impl Crypt {
             length,
             &encrypted_packet
         );
-        build_header(self.current_seq(), length as u16 + TAG_LENGTH as u16, &mut header_buffer)?;
+        build_header(
+            self.current_seq(),
+            length as u16 + TAG_LENGTH as u16,
+            &mut header_buffer,
+        )?;
         writer.write_all(&header_buffer).await?;
         writer.write_all(encrypted_packet).await?;
         Ok(())

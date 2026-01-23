@@ -65,15 +65,16 @@ async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
 async fn get_server_stream_components(
     session_id: &SessionId,
 ) -> Result<(Trigger, (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>))> {
-    let (stop, channels) = if let Some(session) = SessionManager::get_instance().get_session(session_id) {
-        (
-            session.get_stop_trigger(),
-            session.get_server_channels().await?,
-        )
-    } else {
-        log::warn!("Session {:?} not found, aborting stream", session_id);
-        anyhow::bail!("Session not found");
-    };
+    let (stop, channels) =
+        if let Some(session) = SessionManager::get_instance().get_session(session_id) {
+            (
+                session.get_stop_trigger(),
+                session.get_server_channels().await?,
+            )
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            anyhow::bail!("Session not found");
+        };
     Ok((stop, channels))
 }
 
@@ -387,7 +388,10 @@ async fn test_client_stream_valid_packets() -> Result<()> {
     // Wait a bit and theres session should be closed
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if SessionManager::get_instance().get_session(&_session_id).is_none() {
+            if SessionManager::get_instance()
+                .get_session(&_session_id)
+                .is_none()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;

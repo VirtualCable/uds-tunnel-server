@@ -33,7 +33,7 @@ use super::*;
 
 use crate::{
     consts,
-    crypt::{types::SharedSecret, parse_header},
+    crypt::{parse_header, types::SharedSecret},
     session::{Session, SessionId, SessionManager},
     system::trigger::Trigger,
     ticket::Ticket,
@@ -305,7 +305,10 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     // Wait a bit and theres session should be closed
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
-            if SessionManager::get_instance().get_session(&_session_id).is_none() {
+            if SessionManager::get_instance()
+                .get_session(&_session_id)
+                .is_none()
+            {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
