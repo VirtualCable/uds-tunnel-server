@@ -35,9 +35,7 @@ use tokio::io::AsyncReadExt;
 
 // https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt
 
-const PROXY_V2_SIGNATURE: [u8; 12] = [
-    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
-];
+use super::consts::PROXY_V2_SIGNATURE;
 
 #[derive(Debug)]
 pub struct ProxyInfo {
@@ -85,7 +83,9 @@ impl ProxyInfo {
         ProxyInfo::parse(&full_buf)
     }
 
-    // Expect a full pre-checked PROXY v2 buffer
+    /// Expect a full pre-checked PROXY v2 buffer
+    /// As it only used on inner functions and tests
+    /// we skip some checks already done on read_from_stream
     fn parse(buf: &[u8]) -> Result<ProxyInfo> {
         let ver_cmd = buf[12];
         let fam_proto = buf[13];
