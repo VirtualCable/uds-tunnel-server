@@ -134,22 +134,20 @@ impl HttpBrokerApi {
 impl BrokerApi for HttpBrokerApi {
     async fn start_connection(&self, ticket: &Ticket, ip: SocketAddr) -> Result<TicketResponse> {
         let url = self.get_url(ticket, &ip.ip().to_string());
-        let resp: TicketResponse = self
-            .client
+        self.client
             .get(&url)
             .send()
             .await?
             .error_for_status()?
-            .json()
+            .json::<TicketResponse>()
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to parse TicketResponse from broker for ticket {}: {}",
+                    "Failed to parse ticket response for ticket {}: {}",
                     ticket.as_str(),
                     e
                 )
-            })?;
-        Ok(resp)
+            })
     }
 
     async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
@@ -186,8 +184,8 @@ pub fn get() -> impl BrokerApi {
 mod tests {
     use super::*;
 
-    use shared::consts::TICKET_LENGTH;
     use mockito::Server;
+    use shared::consts::TICKET_LENGTH;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     async fn setup_server_and_api(auth_token: &str) -> (mockito::ServerGuard, HttpBrokerApi) {

@@ -161,6 +161,22 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
 
     out_crypt.write(&mut client_stream, ticket.as_ref()).await?;
+    // Must respond with the session id now
+    let mut buffer: PacketBuffer = PacketBuffer::new();
+    log::debug!("Waiting for session id response from server");
+    let session_id_data = in_crypt
+        .read(&stop, &mut client_stream, &mut buffer)
+        .await?;
+    let session_id_str = String::from_utf8_lossy(&session_id_data)
+        .to_string()
+        .as_bytes()
+        .try_into()?;
+    // Ensure its on session manager
+    let session_manager = crate::session::SessionManager::get_instance();
+    assert!(
+        session_manager.get_session(&session_id_str).is_some(),
+        "Session ID from server not found in session manager"
+    );
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(
@@ -318,6 +334,22 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         )
     };
     out_crypt.write(&mut client_stream, ticket.as_ref()).await?;
+    // Must respond with the session id now
+    let mut buffer: PacketBuffer = PacketBuffer::new();
+    log::debug!("Waiting for session id response from server");
+    let session_id_data = in_crypt
+        .read(&stop, &mut client_stream, &mut buffer)
+        .await?;
+    let session_id_str = String::from_utf8_lossy(&session_id_data)
+        .to_string()
+        .as_bytes()
+        .try_into()?;
+    // Ensure its on session manager
+    let session_manager = crate::session::SessionManager::get_instance();
+    assert!(
+        session_manager.get_session(&session_id_str).is_some(),
+        "Session ID from server not found in session manager"
+    );
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(
@@ -327,7 +359,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let get_request = get_request.as_bytes();
     out_crypt.write(&mut client_stream, get_request).await?;
     // Read response (also encrypted)
-    let mut buffer = PacketBuffer::new();
+    log::debug!("Waiting for GET response from server");
     let data = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
@@ -339,7 +371,71 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     // Slice some time to tokio tasks to complete
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     // Should not have any session on session manager
-    let session_manager = crate::session::SessionManager::get_instance();
     assert_eq!(session_manager.count(), 0);
+    Ok(())
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn test_connection_invalid_remote() -> anyhow::Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let auth_token = "test_token";
+    let ticket = Ticket::new_random();
+    let fake_src_ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let stop = Trigger::new();
+    let proxy_v2 = false;
+
+    let mut server = Server::new_async().await;
+    let url = server.url() + "/"; // For testing, our base URL will be the mockito server
+
+    // Setup global config for tests
+    {
+        let config = config::get();
+        let mut config = config.write().unwrap();
+        config.use_proxy_protocol = Some(proxy_v2);
+        config.broker_auth_token = auth_token.to_string();
+        config.verify_ssl = Some(false);
+        config.ticket_api_url = url.clone();
+    }
+
+    let ticket_response_json = format!(
+        r#"
+        {{
+            "host": "{}",
+            "port": {},
+            "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }}
+        "#,
+        TEST_REMOTE_SERVER, TEST_REMOTE_PORT
+    );
+    let mock = server
+        .mock(
+            "GET",
+            Matcher::Regex(format!("/{}/{}/{}", ticket.as_str(), r".+", auth_token)),
+        )
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(ticket_response_json)
+        .create();
+
+    // Create a pair of connected TCP streams
+    let (client_stream, server_stream) = tokio::io::duplex(1024);
+
+    // Invoking handle_connection directly with invalid remote address
+    // will fail. Ensure not hanged test with a timeout
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let (server_reader, server_writer) = tokio::io::split(server_stream);
+        // Simulate server-side handling
+        handle_connection(server_reader, server_writer, fake_src_ip, false).await
+    })
+    .await?;
+
+    assert!(
+        result.is_err(),
+        "Expected connection failure due to invalid remote"
+    );
+
     Ok(())
 }

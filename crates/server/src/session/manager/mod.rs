@@ -61,18 +61,20 @@ impl SessionManager {
     // A new session is created with a new session id
     // Also add an idempotent entry in equivs, so wen recovering from this session id works
     // Without no more checks
-    pub fn add_session(&self, session: Session) -> Result<SessionId> {
+    pub fn add_session(&self, session: Session) -> Result<(SessionId, Arc<Session>)> {
         let session_id = SessionId::new_random();
-        {
+        let session = {
             let mut sessions = self.sessions.write().unwrap();
-            sessions.insert(session_id, Arc::new(session));
-        }
+            let session = Arc::new(session);
+            sessions.insert(session_id,    session.clone());
+            session
+        };
         // Also, insert an idempotent entry in equivs
         {
             let mut equivs = self.equivs.write().unwrap();
             equivs.insert(session_id, (session_id, Instant::now()));
         }
-        Ok(session_id)
+        Ok((session_id, session))
     }
 
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {

@@ -120,9 +120,11 @@ impl Proxy {
             // Any disconnected channel is considered as non-existing
             // else, this loop will busy-wait, and hold tokio
             let (server_recv, client_recv) = if let Some(chs) = &our_server_channels
-                && let Some(chc) = &our_client_channels &&
-                !chs.rx.is_disconnected() && !chs.tx.is_disconnected() &&
-                !chc.rx.is_disconnected() && !chc.tx.is_disconnected()
+                && let Some(chc) = &our_client_channels
+                && !chs.rx.is_disconnected()
+                && !chs.tx.is_disconnected()
+                && !chc.rx.is_disconnected()
+                && !chc.tx.is_disconnected()
             {
                 (
                     Either::Left(chs.rx.recv_async()),
@@ -167,13 +169,31 @@ impl Proxy {
                     }
                 }
                 msg = server_recv => {
-                    if let Ok(msg) = msg && let Some(client) = &our_client_channels {
-                        let _ = client.tx.send_async(msg).await;
+                    match msg {
+                        Ok(msg) => {
+                            if let Some(client) = &our_client_channels && let Err(e) = client.tx.send_async(msg).await {
+                                log::warn!("Failed to forward message to client: {:?}", e);
+                                break;  // exit loop on error
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to receive message from server: {:?}", e);
+                            break;  // exit loop on error
+                        }
                     }
                 }
                 msg = client_recv => {
-                    if let Ok(msg) = msg && let Some(server) = &our_server_channels {
-                        let _ = server.tx.send_async(msg).await;
+                    match msg {
+                        Ok(msg) => {
+                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async(msg).await {
+                                log::warn!("Failed to forward message to server: {:?}", e);
+                                break;  // exit loop on error
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to receive message from client: {:?}", e);
+                            break;  // exit loop on error
+                        }
                     }
                 }
             }

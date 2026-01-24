@@ -28,6 +28,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+use std::sync::Arc;
 
 use super::*;
 
@@ -52,17 +53,17 @@ fn make_test_crypts() -> (Crypt, Crypt) {
     (inbound, outbound)
 }
 
-async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
+async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
     let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
     let shared_secret = SharedSecret::new([3u8; 32]);
 
     // Create the session
-    let session = Session::new(shared_secret, ticket, Trigger::new());
+    let session = Session::new(shared_secret, ticket, Trigger::new(), "127.0.0.1:0".parse().unwrap());
 
     // Add session to manager
-    let session_id = SessionManager::get_instance().add_session(session).unwrap();
+    let (session_id, session) = SessionManager::get_instance().add_session(session).unwrap();
 
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
@@ -73,7 +74,7 @@ async fn create_test_server_stream() -> (SessionId, tokio::io::DuplexStream) {
         tss.run().await.unwrap();
     });
 
-    (session_id, client_side)
+    (session_id, session, client_side)
 }
 
 async fn get_server_stream_components(
@@ -111,7 +112,7 @@ async fn init_server_test() -> (
 ) {
     log::setup_logging("debug", log::LogType::Test);
 
-    let (session_id, client) = create_test_server_stream().await;
+    let (session_id, _session, client) = create_test_server_stream().await;
 
     let (stop, (tx, rx), inbound_crypt, outbound_crypt) =
         get_server_stream_components(&session_id).await.unwrap();

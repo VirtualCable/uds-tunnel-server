@@ -38,19 +38,18 @@ fn new_session_for_test() -> Session {
         SharedSecret::new([0u8; 32]),
         ticket::Ticket::new_random(),
         Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
     )
 }
 
 #[tokio::test]
 async fn test_session_manager_add_and_get() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (_session_id, session) = manager.add_session(new_session_for_test()).unwrap();
     // Fail if session is not found
-    let retrieved_session = manager.get_session(&session_id).unwrap();
-    assert_eq!(*retrieved_session.get_shared_secret().as_ref(), [0u8; 32]);
-    assert!(!retrieved_session.is_server_running());
-    assert!(!retrieved_session.is_client_running());
+    assert_eq!(*session.get_shared_secret().as_ref(), [0u8; 32]);
+    assert!(!session.is_server_running());
+    assert!(!session.is_client_running());
 }
 
 #[tokio::test]
@@ -79,17 +78,14 @@ async fn test_get_session_manager() {
     assert!(manager.sessions.read().unwrap().is_empty());
     // Clear the session manager for testing
     manager.sessions.write().unwrap().clear();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
-    let retrieved_session = manager.get_session(&session_id).unwrap();
-    assert_eq!(*retrieved_session.get_shared_secret().as_ref(), [0u8; 32]);
+    let (_session_id, session) = manager.add_session(new_session_for_test()).unwrap();
+    assert_eq!(*session.get_shared_secret().as_ref(), [0u8; 32]);
     // Clean up after test for other tests
 }
 
 #[tokio::test]
 async fn test_session_lifecycle() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
     fn test_state(
         manager: &SessionManager,
         session_id: &SessionId,
@@ -100,7 +96,7 @@ async fn test_session_lifecycle() {
         assert_eq!(sess.is_server_running(), expected_server_is_running);
         assert_eq!(sess.is_client_running(), expected_client_is_running);
     }
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
     manager.start_server(&session_id).await.unwrap();
     test_state(&manager, &session_id, true, false);
     manager.start_client(&session_id).await.unwrap();
@@ -114,9 +110,8 @@ async fn test_session_lifecycle() {
 #[tokio::test]
 async fn test_session_removed_exactly_once() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
 
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
     // Start servers first
     manager.start_server(&session_id).await.unwrap();
     manager.start_client(&session_id).await.unwrap();
@@ -135,8 +130,7 @@ async fn test_session_removed_exactly_once() {
 #[tokio::test]
 async fn test_get_session_returns_arc_clone() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
     let s1 = manager.get_session(&session_id).unwrap();
     let s2 = manager.get_session(&session_id).unwrap();
@@ -147,8 +141,7 @@ async fn test_get_session_returns_arc_clone() {
 #[tokio::test]
 async fn test_get_equiv_session_default() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
     let equiv_session = manager.get_equiv_session(&session_id).unwrap();
     let direct_session = manager.get_session(&session_id).unwrap();
@@ -159,8 +152,7 @@ async fn test_get_equiv_session_default() {
 #[tokio::test]
 async fn test_add_equiv_session() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
     let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
     let equiv_session = manager.get_equiv_session(&equiv_session_id).unwrap();
@@ -172,8 +164,7 @@ async fn test_add_equiv_session() {
 #[tokio::test]
 async fn test_remove_session_removes_equiv_session() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
     let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
 
@@ -186,8 +177,7 @@ async fn test_remove_session_removes_equiv_session() {
 #[tokio::test]
 async fn test_remove_equiv_session() {
     let manager = SessionManager::new();
-    let session = new_session_for_test();
-    let session_id = manager.add_session(session).unwrap();
+    let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
     let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
 

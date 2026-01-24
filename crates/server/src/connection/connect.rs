@@ -7,7 +7,7 @@ use tokio::{
 };
 
 use shared::{
-    crypt::types::PacketBuffer, errors::ErrorWithAddres, log, system::trigger::Trigger,
+    crypt::types::PacketBuffer, log, system::trigger::Trigger,
     ticket::Ticket,
 };
 
@@ -19,7 +19,7 @@ use crate::{
 
 pub(super) async fn connect<R, W>(
     mut reader: R,
-    writer: W,
+    mut writer: W,
     ticket: &Ticket,
     ip: SocketAddr,
 ) -> Result<()>
@@ -32,28 +32,20 @@ where
     match broker.start_connection(ticket, ip).await {
         Ok(ticket_info) => {
             let stop = Trigger::new();
-            let session_id = session_manager.add_session(Session::new(
+            let (session_id, session) = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
                 *ticket,
                 stop.clone(),
+                ip,
             ))?;
-            let session = session_manager
-                .get_session(&session_id)
-                .ok_or(ErrorWithAddres::new(
-                    Some(ip),
-                    format!("Session {:?} not found", session_id).as_str(),
-                ))?;
-
-            // Store ip within session
-            session.set_ip(ip);
 
             // Check that the first crypted packet is the ticket again
-            let mut crypt = session.get_server_tunnel_crypts()?.0;
+            let (mut read_crypt, mut write_crypt) = session.get_server_tunnel_crypts()?;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let ticket_data = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                crypt.read(&stop, &mut reader, &mut buffer),
+                read_crypt.read(&stop, &mut reader, &mut buffer),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
@@ -74,8 +66,14 @@ where
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
-            // Now the recv seq should be incremented by 1 for next crypt generated
+            // Sent the sessionId as response, so the client can verify
+            let sess_id = session_id.as_str().as_bytes();
+            write_crypt.write(&mut writer, sess_id).await?;
+
+            // Now the recv/send seq should be set to 1 for next crypt managers
+            // (we already spent seq 0 for ticket exchange)
             session.set_inbound_seq(1);
+            session.set_outbound_seq(1);
 
             // Open a connection to the target server using the ticket info
             let target_stream = TcpStream::connect(ticket_info.target_addr().await?).await?;

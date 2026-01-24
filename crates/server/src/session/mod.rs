@@ -68,7 +68,7 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(shared_secret: SharedSecret, ticket: ticket::Ticket, stop: Trigger) -> Self {
+    pub fn new(shared_secret: SharedSecret, ticket: ticket::Ticket, stop: Trigger, ip: SocketAddr) -> Self {
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         proxy.run(); // Start proxy task
 
@@ -80,7 +80,7 @@ impl Session {
             is_server_running: AtomicBool::new(false),
             is_client_running: AtomicBool::new(false),
             seq: RwLock::new((0, 0)),
-            ip: RwLock::new("0.0.0.0:0".parse().unwrap()), // Default IP
+            ip: RwLock::new(ip),
         }
     }
 
