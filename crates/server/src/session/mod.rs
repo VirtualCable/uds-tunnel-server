@@ -49,6 +49,7 @@ pub type SessionId = ticket::Ticket;
 
 pub struct Session {
     ticket: ticket::Ticket,
+    stream_channel_id: u16,
     shared_secret: SharedSecret,
     stop: Trigger,
     // Channels for server <-> client communication
@@ -68,15 +69,22 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(shared_secret: SharedSecret, ticket: ticket::Ticket, stop: Trigger, ip: SocketAddr) -> Self {
+    pub fn new(
+        shared_secret: SharedSecret,
+        ticket: ticket::Ticket,
+        stream_channel_id: u16,
+        stop: Trigger,
+        ip: SocketAddr,
+    ) -> Self {
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         proxy.run(); // Start proxy task
 
         Session {
-            shared_secret,
             ticket,
-            session_proxy,
+            stream_channel_id,
+            shared_secret,
             stop,
+            session_proxy,
             is_server_running: AtomicBool::new(false),
             is_client_running: AtomicBool::new(false),
             seq: RwLock::new((0, 0)),
@@ -90,12 +98,12 @@ impl Session {
         }
     }
 
-    pub async fn get_server_channels(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
+    pub async fn server_sender_receiver(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
         let endpoints = self.session_proxy.attach_server().await?;
         Ok((endpoints.tx, endpoints.rx))
     }
 
-    pub async fn get_client_channels(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
+    pub async fn client_sender_receiver(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
         let endpoints = self.session_proxy.attach_client().await?;
         Ok((endpoints.tx, endpoints.rx))
     }
@@ -153,7 +161,7 @@ impl Session {
     }
 
     // Returns the (inbound, outbound) seq numbers
-    pub fn get_seqs(&self) -> (u64, u64) {
+    pub fn seqs(&self) -> (u64, u64) {
         if let Ok(seq_lock) = self.seq.read() {
             *seq_lock
         } else {
@@ -161,20 +169,24 @@ impl Session {
         }
     }
 
-    pub fn get_ticket(&self) -> &ticket::Ticket {
+    pub fn ticket(&self) -> &ticket::Ticket {
         &self.ticket
     }
 
-    pub fn get_shared_secret(&self) -> &SharedSecret {
+    pub fn shared_secret(&self) -> &SharedSecret {
         &self.shared_secret
     }
 
-    pub fn get_stop_trigger(&self) -> Trigger {
+    pub fn stop_trigger(&self) -> Trigger {
         self.stop.clone()
     }
 
-    pub fn get_server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
-        crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.get_ticket(), self.get_seqs())
+    pub fn server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
+        crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
+    }
+
+    pub fn stream_channel_id(&self) -> u16 {
+        self.stream_channel_id
     }
 }
 

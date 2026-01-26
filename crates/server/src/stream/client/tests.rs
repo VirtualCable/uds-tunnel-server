@@ -38,6 +38,8 @@ use shared::{
 
 use crate::session::{Session, SessionId, SessionManager};
 
+const TEST_STREAM_CHANNEL_ID: u16 = 42;
+
 async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
@@ -47,6 +49,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let session = Session::new(
         SharedSecret::new([3u8; 32]),
         ticket,
+        TEST_STREAM_CHANNEL_ID,
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     );
@@ -72,8 +75,8 @@ async fn get_server_stream_components(
     let (stop, channels) =
         if let Some(session) = SessionManager::get_instance().get_session(session_id) {
             (
-                session.get_stop_trigger(),
-                session.get_server_channels().await?,
+                session.stop_trigger(),
+                session.server_sender_receiver().await?,
             )
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
@@ -104,7 +107,8 @@ async fn test_read_and_send() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound =
+        TunnelClientInboundStream::new(server, tx, stop.clone());
 
     tokio::spawn(async move {
         client.write_all(b"hello").await.unwrap();
@@ -156,7 +160,8 @@ async fn test_inbound_remote_close() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound =
+        TunnelClientInboundStream::new(server, tx, stop.clone());
 
     // Cerrar el lado remoto inmediatamente
     drop(client);
@@ -185,7 +190,8 @@ async fn test_inbound_read_error() {
     let (tx, _rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(FailingReader, tx, stop.clone());
+    let mut inbound =
+        TunnelClientInboundStream::new(FailingReader, tx, stop.clone());
 
     let res = inbound.run().await;
     assert!(res.is_err());
@@ -264,7 +270,8 @@ async fn test_full_tunnel_echo() {
 
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server_side, tx_in, stop.clone());
+    let mut inbound =
+        TunnelClientInboundStream::new(server_side, tx_in, stop.clone());
     let mut outbound = TunnelClientOutboundStream::new(client_side, rx_out, stop.clone());
 
     // Task inbound
@@ -306,7 +313,8 @@ async fn test_inbound_multiple_packets() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound =
+        TunnelClientInboundStream::new(server, tx, stop.clone());
 
     tokio::spawn(async move {
         inbound.run().await.unwrap();

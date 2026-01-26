@@ -57,6 +57,10 @@ use crate::{config, session::SessionManager};
 const TEST_REMOTE_SERVER: &str = "echo.free.beeceptor.com";
 const TEST_REMOTE_PORT: u16 = 80;
 
+// Note: Currently broker only supports one channel, so we use channel 1 that is the one used
+// Channel 0 is reserved for control messages
+const TEST_STREAM_CHANNEL_ID: u16 = 1;
+
 // Creates a fake mocked broker API for testing
 async fn setup_testing_connection(
     proxy_v2: bool,
@@ -160,14 +164,16 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     // Now send the crypted ticket
     let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
 
-    out_crypt.write(&mut client_stream, ticket.as_ref()).await?;
+    out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .await?;
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let session_id_data = in_crypt
+    let (session_id_data, stream_channel_id) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    let session_id_str = String::from_utf8_lossy(&session_id_data)
+    let session_id_str = String::from_utf8_lossy(session_id_data)
         .to_string()
         .as_bytes()
         .try_into()?;
@@ -184,16 +190,19 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt.write(&mut client_stream, get_request).await?;
+    out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
+        .await?;
     // Read response (also encrypted)
     let mut buffer = PacketBuffer::new();
-    let data = in_crypt
+    let (data, stream_channel_id) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
 
-    let response_str = String::from_utf8_lossy(&data);
+    let response_str = String::from_utf8_lossy(data);
     log::info!("Received response: {}", response_str);
     assert!(response_str.contains("HTTP/1.1 200 OK"));
+    assert!(stream_channel_id == TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
 
     // Slice some time to tokio tasks to complete
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -268,7 +277,9 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     assert!(send_result.is_ok(), "Expected no error on write");
     let ticket = Ticket::new_random();
     let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
-    let send_result = out_crypt.write(&mut client_stream, ticket.as_ref()).await;
+    let send_result = out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .await;
 
     // Expect close on response
     let mut buf = [0u8; 1024];
@@ -292,6 +303,7 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;
+    const TEST_STREAM_CHANNEL_ID: u16 = 1;
 
     // PROXY v2 header:
     // signature (12 bytes)
@@ -333,14 +345,17 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
             Crypt::new(&material.key_send, 0),
         )
     };
-    out_crypt.write(&mut client_stream, ticket.as_ref()).await?;
+    out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .await?;
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let session_id_data = in_crypt
+    let (session_id_data, channel) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    let session_id_str = String::from_utf8_lossy(&session_id_data)
+    assert_eq!(channel, TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
+    let session_id_str = String::from_utf8_lossy(session_id_data)
         .to_string()
         .as_bytes()
         .try_into()?;
@@ -357,14 +372,16 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt.write(&mut client_stream, get_request).await?;
+    out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
+        .await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server");
-    let data = in_crypt
+    let (data, channel) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-
-    let response_str = String::from_utf8_lossy(&data);
+    assert_eq!(channel, TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
+    let response_str = String::from_utf8_lossy(data);
     log::info!("Received response: {}", response_str);
     assert!(response_str.contains("HTTP/1.1 200 OK"));
 

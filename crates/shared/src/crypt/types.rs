@@ -63,6 +63,7 @@ impl From<[u8; 32]> for SharedSecret {
 }
 
 // hard limited size buffer for packets
+#[derive(Debug)]
 pub struct PacketBuffer {
     buffer: [u8; consts::MAX_PACKET_SIZE],
 }
@@ -74,19 +75,25 @@ impl PacketBuffer {
         }
     }
 
+    // Copies data into buffer, reserving first 2 bytes for channel
     pub fn from_slice(data: &[u8]) -> Self {
+        let mut packet_buffer = PacketBuffer::new();
+        let len = (data.len()+2).min(consts::MAX_PACKET_SIZE);
+        packet_buffer.buffer[2..len].copy_from_slice(&data[..len-2]);
+        packet_buffer
+    }
+
+    // Copies data into buffer, full buffer use (for stream use)
+    pub fn from_stream_slice(data: &[u8]) -> Self {
         let mut packet_buffer = PacketBuffer::new();
         let len = data.len().min(consts::MAX_PACKET_SIZE);
         packet_buffer.buffer[..len].copy_from_slice(&data[..len]);
         packet_buffer
     }
 
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    // Returns a mutable slice of the buffer of given length
+    pub fn stream_slice(&mut self) -> &mut [u8; consts::MAX_PACKET_SIZE] {
         &mut self.buffer
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
-        &self.buffer
     }
 
     pub fn ensure_capacity(&mut self, size: usize) -> Result<()> {
@@ -101,10 +108,24 @@ impl PacketBuffer {
         }
     }
 
-    pub fn copy_from_slice(&mut self, data: &[u8]) -> Result<()> {
+    // Note: This metod is intended to get the encrypted data from buffer
+    //       First two bytes are reserved for channel id
+    //       So always use this to get data from buffer (it already skips first 2 bytes)
+    pub fn as_slice(&self, length: usize) -> &[u8] {
+        &self.buffer[2..length + 2]
+    }
+
+    pub fn as_slice_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[2..]
+    }
+
+    // Note: This metod is intended to fill the buffer
+    //       First two bytes are reserved for channel id
+    //       So always use this to copy data into buffer (it already skips first 2 bytes)
+    pub fn store(&mut self, data: &[u8]) -> Result<()> {
         let len = data.len();
-        self.ensure_capacity(len)?;
-        self.buffer[..len].copy_from_slice(data);
+        self.ensure_capacity(len + 2)?;
+        self.buffer[2..len + 2].copy_from_slice(data);
         Ok(())
     }
 }

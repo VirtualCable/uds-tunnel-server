@@ -30,16 +30,18 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 use std::sync::Arc;
 
-use super::*;
-
 use shared::{
     consts,
-    crypt::{parse_header, types::SharedSecret},
+    crypt::{build_header, consts::HEADER_LENGTH, parse_header, types::SharedSecret},
     system::trigger::Trigger,
     ticket::Ticket,
 };
 
 use crate::session::{Session, SessionId, SessionManager};
+
+use super::*;
+
+const TEST_CHANNEL: u16 = 5;
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
@@ -60,7 +62,13 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let shared_secret = SharedSecret::new([3u8; 32]);
 
     // Create the session
-    let session = Session::new(shared_secret, ticket, Trigger::new(), "127.0.0.1:0".parse().unwrap());
+    let session = Session::new(
+        shared_secret,
+        ticket,
+        TEST_CHANNEL,
+        Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
+    );
 
     // Add session to manager
     let (session_id, session) = SessionManager::get_instance().add_session(session).unwrap();
@@ -87,10 +95,10 @@ async fn get_server_stream_components(
 )> {
     let (stop, channels, inbound_crypt, outbound_crypt) =
         if let Some(session) = SessionManager::get_instance().get_session(session_id) {
-            let (inbound_crypt, outbound_crypt) = session.get_server_tunnel_crypts()?;
+            let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
             (
-                session.get_stop_trigger(),
-                session.get_client_channels().await?,
+                session.stop_trigger(),
+                session.client_sender_receiver().await?,
                 inbound_crypt,
                 outbound_crypt,
             )
@@ -139,7 +147,7 @@ async fn test_server_inbound_basic() {
     let msg = b"16 length text!!";
     let encrypted = {
         let mut msg_packet = PacketBuffer::from_slice(msg);
-        let encrypted = crypt_in.encrypt(msg.len(), &mut msg_packet).unwrap();
+        let encrypted = crypt_in.encrypt(1, msg.len(), &mut msg_packet).unwrap();
         encrypted.to_vec()
     };
     let counter = crypt_in.current_seq();
@@ -160,8 +168,10 @@ async fn test_server_inbound_basic() {
     });
 
     inbound.run().await.unwrap();
+    let data = rx.recv().unwrap();
+    log::debug!("Received data: {:?}, msg: {:?}", data, msg);
 
-    assert_eq!(rx.recv().unwrap(), msg);
+    assert_eq!(data, msg);
     // Stop is set on TunnelServerStream, so here must be unset
     assert!(!stop.is_triggered());
 }
@@ -258,12 +268,12 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     // So client will encrypt with our inbound (their outbound) crypt, and eill decrypt with our outbound (their inbound) crypt
 
     // Prepare and send a valid packet to server inbound
-    let sent_msg = b"Hello, server!";
+    let sent_msg = b"Hello, server!16";
     let encrypted1 = {
         let mut msg_packet = PacketBuffer::from_slice(sent_msg);
         let encrypted = inbound_crypt
-            .encrypt(sent_msg.len(), &mut msg_packet)
-            .unwrap();
+            .encrypt(2, sent_msg.len(), &mut msg_packet)
+            .expect("Failed to encrypt first message packet");
         encrypted.to_vec()
     };
     let counter1 = inbound_crypt.current_seq();
@@ -284,7 +294,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     assert!(!stop.is_triggered());
 
     // Now, send something that we will receibe crypted in client
-    let sent_msg2 = b"Another message!";
+    let sent_msg2 = b"Another messa!16";
     tx.send_async(sent_msg2.into()).await?;
 
     // Read from client the encrypted message
@@ -294,13 +304,16 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     let mut encrypted2 = vec![0u8; length2 as usize];
     client.read_exact(&mut encrypted2).await?;
 
-    // Decrypt the message
-    let mut packet_buffer2 = PacketBuffer::from_slice(&encrypted2);
-    let decrypted2 = outbound_crypt
+    // Decrypt the message, contains the length
+    let mut packet_buffer2 = PacketBuffer::from_stream_slice(&encrypted2);
+    let (decrypted2, channel) = outbound_crypt
         .decrypt(counter2, length2, &mut packet_buffer2)
         .unwrap();
 
+    log::debug!("Decrypted message from server: decrypted: {:?} sent_msg2: {:?}", decrypted2, sent_msg2);
+
     assert_eq!(decrypted2, sent_msg2);
+    assert_eq!(channel, TEST_CHANNEL); // Channel used in outbound stream
 
     // Trigger stop to end the test
     stop.trigger();

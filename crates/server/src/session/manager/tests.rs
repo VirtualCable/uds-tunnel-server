@@ -37,6 +37,7 @@ fn new_session_for_test() -> Session {
     Session::new(
         SharedSecret::new([0u8; 32]),
         ticket::Ticket::new_random(),
+        1,
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     )
@@ -47,7 +48,7 @@ async fn test_session_manager_add_and_get() {
     let manager = SessionManager::new();
     let (_session_id, session) = manager.add_session(new_session_for_test()).unwrap();
     // Fail if session is not found
-    assert_eq!(*session.get_shared_secret().as_ref(), [0u8; 32]);
+    assert_eq!(*session.shared_secret().as_ref(), [0u8; 32]);
     assert!(!session.is_server_running());
     assert!(!session.is_client_running());
 }
@@ -63,11 +64,11 @@ async fn test_session_running() {
 #[tokio::test]
 async fn test_session_sequence_numbers() {
     let session = new_session_for_test();
-    let seq = session.get_seqs();
+    let seq = session.seqs();
     assert_eq!(seq, (0, 0));
     session.set_inbound_seq(5);
     session.set_outbound_seq(10);
-    let seq = session.get_seqs();
+    let seq = session.seqs();
     assert_eq!(seq, (5, 10));
 }
 
@@ -79,7 +80,7 @@ async fn test_get_session_manager() {
     // Clear the session manager for testing
     manager.sessions.write().unwrap().clear();
     let (_session_id, session) = manager.add_session(new_session_for_test()).unwrap();
-    assert_eq!(*session.get_shared_secret().as_ref(), [0u8; 32]);
+    assert_eq!(*session.shared_secret().as_ref(), [0u8; 32]);
     // Clean up after test for other tests
 }
 

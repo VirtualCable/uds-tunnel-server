@@ -6,10 +6,7 @@ use tokio::{
     net::TcpStream,
 };
 
-use shared::{
-    crypt::types::PacketBuffer, log, system::trigger::Trigger,
-    ticket::Ticket,
-};
+use shared::{crypt::types::PacketBuffer, log, system::trigger::Trigger, ticket::Ticket};
 
 use crate::{
     broker::{self, BrokerApi},
@@ -30,17 +27,20 @@ where
     let session_manager = SessionManager::get_instance();
     let broker = broker::get();
     match broker.start_connection(ticket, ip).await {
+        // Note: On a future, the broker could return more than a single channel stream id
+        // But currently, only one is supported (1)
         Ok(ticket_info) => {
             let stop = Trigger::new();
             let (session_id, session) = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
                 *ticket,
+                1,  // only channel 1 is supported for now (0 is for commands)
                 stop.clone(),
                 ip,
             ))?;
 
             // Check that the first crypted packet is the ticket again
-            let (mut read_crypt, mut write_crypt) = session.get_server_tunnel_crypts()?;
+            let (mut read_crypt, mut write_crypt) = session.server_tunnel_crypts()?;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let ticket_data = tokio::time::timeout(
@@ -51,24 +51,23 @@ where
             .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
 
             // If reading ticket data failed, ensure session is removed and return error
-            let data: Ticket = if let Ok(data) = ticket_data {
-                data
+            let (data, channel) : (Ticket, u16)  = if let Ok((bytes, channel)) = ticket_data {
+                (bytes.try_into()?, channel)
             } else {
                 log::error!("Failed to read ticket data from client");
                 // Remove the session, that has not been used properly
                 session_manager.remove_session(&session_id);
                 return Err(anyhow::anyhow!("Failed to read ticket data from client"));
-            }
-            .as_slice()
-            .try_into()?;
-
+            };
+            
+            // TODO: Check channel?
             if data != *ticket {
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
             // Sent the sessionId as response, so the client can verify
             let sess_id = session_id.as_str().as_bytes();
-            write_crypt.write(&mut writer, sess_id).await?;
+            write_crypt.write(&mut writer, channel,  sess_id).await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers
             // (we already spent seq 0 for ticket exchange)

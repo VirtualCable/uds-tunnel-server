@@ -32,7 +32,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{crypt::consts::TAG_LENGTH, log, system::trigger::Trigger};
+use crate::{log, system::trigger::Trigger};
 
 use super::{Crypt, build_header, consts::HEADER_LENGTH, parse_header, types::PacketBuffer};
 
@@ -73,22 +73,31 @@ impl Crypt {
         Ok(read)
     }
 
-    pub async fn read<R: AsyncReadExt + Unpin>(
+    // Reads data into buffer, decrypting it inplace
+    // First 2 bytes are channel, rest is encrypted data + tag
+    pub async fn read<'a, R: AsyncReadExt + Unpin>(
         &mut self,
         stop: &Trigger,
         reader: &mut R,
-        buffer: &mut PacketBuffer,
-    ) -> Result<Vec<u8>> {
+        buffer: &'a mut PacketBuffer,
+    ) -> Result<(&'a [u8], u16)> {
         let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
-        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0
-        {
+        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0 {
             // Connection closed
-            return Ok(Vec::new()); // Empty vector indicates closed connection
+            return Ok((&buffer.as_slice_mut()[..0], 0)); // Empty vector indicates closed connection, ensures has 'a lifetime
         }
         // Check valid header and get payload length
         let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
         // Read the encrypted payload + tag
-        if Self::read_stream(stop, reader, buffer.as_mut_slice(), length as usize, true).await? == 0
+        if Self::read_stream(
+            stop,
+            reader,
+            buffer.stream_slice(),
+            length as usize,
+            true,
+        )
+        .await?
+            == 0
         {
             // Connection closed
             log::error!("Inbound stream closed while reading payload");
@@ -96,32 +105,71 @@ impl Crypt {
                 "connection closed unexpectedly while reading payload"
             ));
         }
-        Ok(self.decrypt(seq, length, buffer)?.to_vec())
+        log::debug!("Read packet: seq={}, length={}", seq, length);
+        self.decrypt(seq, length, buffer)
     }
 
     // Writes data from buffer, encrypting it inplace
     pub async fn write<W: AsyncWriteExt + Unpin>(
         &mut self,
         writer: &mut W,
+        channel: u16,
         data: &[u8],
     ) -> Result<()> {
         let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
         let length = data.len();
-        let mut data = PacketBuffer::from_slice(data);
-        let encrypted_packet = self.encrypt(length, &mut data)?;
+        let mut buff = PacketBuffer::new();
+        buff.store(data)?;
+        let encrypted_packet = self.encrypt(channel, length, &mut buff)?;
         log::debug!(
-            "Writing packet: seq={}, length={}, encrypted={:?}",
+            "Writing packet: seq={}, in_len={}, outlength={}",
             self.current_seq(),
             length,
-            &encrypted_packet
+            encrypted_packet.len(),
         );
         build_header(
             self.current_seq(),
-            length as u16 + TAG_LENGTH as u16,
+            encrypted_packet.len() as u16,
             &mut header_buffer,
         )?;
         writer.write_all(&header_buffer).await?;
         writer.write_all(encrypted_packet).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypt::types::SharedSecret;
+    use crate::log;
+
+    #[tokio::test]
+    async fn test_read_write_roundtrip() {
+        log::setup_logging("debug", log::LogType::Test);
+
+        let key = SharedSecret::new([7u8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+        // Create a pair of in-memory streams
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let plaintext = b"Hello, this is a test message!32";
+        let mut buffer = PacketBuffer::new();
+
+        // Write data from client to server
+        crypt
+            .write(&mut client, 1, plaintext)
+            .await
+            .expect("Failed to write data");
+
+        // Read data from server to client
+        let (decrypted_data, channel) = crypt
+            .read(&Trigger::new(), &mut server, &mut buffer)
+            .await
+            .expect("Failed to read data");
+
+        log::debug!("Decrypted data: {:?}", decrypted_data);
+
+        assert_eq!(channel, 1);
+        assert_eq!(decrypted_data, plaintext);
     }
 }
