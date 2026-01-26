@@ -43,6 +43,7 @@ use shared::{
 
 mod connect;
 mod recover;
+mod types;
 
 pub async fn handle_connection<R, W>(
     mut reader: R,

@@ -84,12 +84,12 @@ impl Crypt {
 
         // Get the slice to encrypt
         let buffer = buffer.stream_slice();
-        buffer[0..2].copy_from_slice(&channel.to_le_bytes());
+        buffer[0..2].copy_from_slice(&channel.to_be_bytes());
 
         let seq = self.next_seq();
         let mut nonce = [0; 12];
-        nonce[..8].copy_from_slice(&seq.to_le_bytes());
-        let aad = &seq.to_le_bytes();
+        nonce[..8].copy_from_slice(&seq.to_be_bytes());
+        let aad = &seq.to_be_bytes();
 
         let tag = self
             .cipher
@@ -126,8 +126,8 @@ impl Crypt {
         let buffer = buffer.stream_slice();
 
         let mut nonce = [0; 12];
-        nonce[..8].copy_from_slice(&seq.to_le_bytes());
-        let aad = &seq.to_le_bytes();
+        nonce[..8].copy_from_slice(&seq.to_be_bytes());
+        let aad = &seq.to_be_bytes();
 
         // Split ciphertext and tag
         let (ciphertext, rest) = buffer.split_at_mut(len);
@@ -137,7 +137,7 @@ impl Crypt {
             .decrypt_in_place_detached(Nonce::from_slice(&nonce), aad, ciphertext, tag.into())
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
         // First two bytes are channel
-        let channel = u16::from_le_bytes(ciphertext[..2].try_into().map_err(|e| {
+        let channel = u16::from_be_bytes(ciphertext[..2].try_into().map_err(|e| {
             anyhow::anyhow!("decryption failure: failed to extract channel from decrypted data: {:?}", e)
         })?);
         Ok((&buffer[2..len], channel))
@@ -148,8 +148,8 @@ pub fn parse_header(buffer: &[u8]) -> Result<(u64, u16)> {
     if buffer.len() < 10 {
         return Err(anyhow::anyhow!("buffer too small for header"));
     }
-    let seq = u64::from_le_bytes(buffer[0..8].try_into().unwrap());
-    let length = u16::from_le_bytes(buffer[8..10].try_into().unwrap());
+    let seq = u64::from_be_bytes(buffer[0..8].try_into().unwrap());
+    let length = u16::from_be_bytes(buffer[8..10].try_into().unwrap());
     if length as usize > consts::MAX_PACKET_SIZE {
         return Err(anyhow::anyhow!("invalid packet length: {}", length));
     }
@@ -160,8 +160,8 @@ pub fn build_header(seq: u64, length: u16, buffer: &mut [u8]) -> Result<()> {
     if buffer.len() < 10 {
         return Err(anyhow::anyhow!("buffer too small for header"));
     }
-    buffer[0..8].copy_from_slice(&seq.to_le_bytes());
-    buffer[8..10].copy_from_slice(&length.to_le_bytes());
+    buffer[0..8].copy_from_slice(&seq.to_be_bytes());
+    buffer[8..10].copy_from_slice(&length.to_be_bytes());
     Ok(())
 }
 
@@ -321,8 +321,8 @@ mod tests {
         let mut buf = [0u8; 10];
         build_header(0x1122334455667788, 0x99AA, &mut buf).unwrap();
 
-        assert_eq!(&buf[0..8], &0x1122334455667788u64.to_le_bytes());
-        assert_eq!(&buf[8..10], &0x99AAu16.to_le_bytes());
+        assert_eq!(&buf[0..8], &0x1122334455667788u64.to_be_bytes());
+        assert_eq!(&buf[8..10], &0x99AAu16.to_be_bytes());
     }
 
     #[test]

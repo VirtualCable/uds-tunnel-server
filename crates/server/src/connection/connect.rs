@@ -14,6 +14,8 @@ use crate::{
     stream::{client::TunnelClientStream, server::TunnelServerStream},
 };
 
+use super::types::OpenResponse;
+
 pub(super) async fn connect<R, W>(
     mut reader: R,
     mut writer: W,
@@ -65,9 +67,12 @@ where
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
-            // Sent the sessionId as response, so the client can verify
-            let sess_id = session_id.as_str().as_bytes();
-            write_crypt.write(&mut writer, channel,  sess_id).await?;
+            let response = OpenResponse::new(session_id, 1);
+            let response_data = response.as_vec();
+            // Send the OpenResponse
+            write_crypt
+                .write(&mut writer, channel, &response_data)
+                .await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers
             // (we already spent seq 0 for ticket exchange)
