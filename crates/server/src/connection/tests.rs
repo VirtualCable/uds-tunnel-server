@@ -50,7 +50,7 @@ use shared::{
     ticket::Ticket,
 };
 
-use crate::{config, session::SessionManager};
+use crate::{config, connection::types::OpenResponse, session::SessionManager};
 
 // Any accesible server for testing would do the job
 // as long as it has a known response
@@ -170,17 +170,22 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let (session_id_data, stream_channel_id) = in_crypt
+    let (session_response_data, stream_channel_id) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    let session_id_str = String::from_utf8_lossy(session_id_data)
-        .to_string()
-        .as_bytes()
-        .try_into()?;
+
+    let session_response = OpenResponse::from_slice(session_response_data)?;
+    assert_eq!(
+        session_response.channel_count, 1,
+        "Channel mismatch in response"
+    );
+
     // Ensure its on session manager
     let session_manager = crate::session::SessionManager::get_instance();
     assert!(
-        session_manager.get_session(&session_id_str).is_some(),
+        session_manager
+            .get_session(&session_response.session_id)
+            .is_some(),
         "Session ID from server not found in session manager"
     );
 
@@ -202,7 +207,10 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let response_str = String::from_utf8_lossy(data);
     log::info!("Received response: {}", response_str);
     assert!(response_str.contains("HTTP/1.1 200 OK"));
-    assert!(stream_channel_id == TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
+    assert!(
+        stream_channel_id == TEST_STREAM_CHANNEL_ID,
+        "Channel mismatch in response"
+    );
 
     // Slice some time to tokio tasks to complete
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -351,18 +359,22 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let (session_id_data, channel) = in_crypt
+    let (session_response_data, channel) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    assert_eq!(channel, TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
-    let session_id_str = String::from_utf8_lossy(session_id_data)
-        .to_string()
-        .as_bytes()
-        .try_into()?;
+    assert_eq!(
+        channel, TEST_STREAM_CHANNEL_ID,
+        "Channel mismatch in response"
+    );
+    let session_response = OpenResponse::from_slice(session_response_data)?;
+    assert_eq!(
+        session_response.channel_count, 1,
+        "Channel mismatch in response"
+    );
     // Ensure its on session manager
     let session_manager = crate::session::SessionManager::get_instance();
     assert!(
-        session_manager.get_session(&session_id_str).is_some(),
+        session_manager.get_session(&session_response.session_id).is_some(),
         "Session ID from server not found in session manager"
     );
 
@@ -380,7 +392,10 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (data, channel) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    assert_eq!(channel, TEST_STREAM_CHANNEL_ID, "Channel mismatch in response");
+    assert_eq!(
+        channel, TEST_STREAM_CHANNEL_ID,
+        "Channel mismatch in response"
+    );
     let response_str = String::from_utf8_lossy(data);
     log::info!("Received response: {}", response_str);
     assert!(response_str.contains("HTTP/1.1 200 OK"));
