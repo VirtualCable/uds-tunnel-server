@@ -38,9 +38,15 @@ use crate::config;
 use shared::{crypt::types::SharedSecret, log, ticket::Ticket};
 
 #[derive(serde::Deserialize, Debug)]
-pub struct TicketResponse {
+pub struct TicketRemote {
     pub host: String,
     pub port: u16,
+    pub stream_channel_id: u16,
+}
+
+#[derive(serde::Deserialize, Debug)]
+pub struct TicketResponse {
+    pub remotes: Vec<TicketRemote>,
     pub notify: String, // Stop notification ticket
     pub shared_secret: Option<String>,
 }
@@ -54,25 +60,70 @@ impl TicketResponse {
         }
     }
 
-    pub async fn target_addr(&self) -> Result<SocketAddr> {
+    pub async fn target_addr(&self, stream_channel_id: u16) -> Result<SocketAddr> {
+        let remote = self
+            .remotes
+            .iter()
+            .find(|r| r.stream_channel_id == stream_channel_id)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No remote found for stream channel id: {}",
+                    stream_channel_id
+                )
+            })?;
+
         let resolver = Resolver::builder_with_config(
             ResolverConfig::default(),
             TokioConnectionProvider::default(),
         )
         .build();
 
-        match resolver.lookup_ip(&self.host).await {
+        match resolver.lookup_ip(&remote.host).await {
             Ok(lookup) => {
                 let ip = lookup.iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("No IP addresses found for host: {}", self.host)
+                    anyhow::anyhow!("No IP addresses found for host: {}", remote.host)
                 })?;
-                Ok(SocketAddr::new(ip, self.port))
+                Ok(SocketAddr::new(ip, remote.port))
             }
             Err(e) => Err(anyhow::anyhow!(
                 "DNS resolution failed for {}: {}",
-                self.host,
+                remote.host,
                 e
             )),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct TicketRequest {
+    token: String,
+    ticket: String,
+    command: String,
+    ip: String,
+    sent: Option<u64>,
+    recv: Option<u64>,
+}
+
+impl TicketRequest {
+    pub fn new_start(ticket: &Ticket, ip: &SocketAddr, auth_token: &str) -> Self {
+        TicketRequest {
+            token: auth_token.to_string(),
+            ticket: ticket.as_str().to_string(),
+            command: "start".to_string(),
+            ip: ip.ip().to_string(),
+            sent: None,
+            recv: None,
+        }
+    }
+
+    pub fn new_stop(ticket: &Ticket, auth_token: &str, sent: u64, recv: u64) -> Self {
+        TicketRequest {
+            token: auth_token.to_string(),
+            ticket: ticket.as_str().to_string(),
+            command: "stop".to_string(),
+            ip: "".to_string(),
+            sent: Some(sent),
+            recv: Some(recv),
         }
     }
 }
@@ -117,25 +168,15 @@ impl HttpBrokerApi {
             ticket_rest_url: ticket_rest_url.to_string(),
         }
     }
-
-    /// Note: All parameters should be already validated/encoded as needed
-    pub fn get_url(&self, ticket: &Ticket, msg: &str) -> String {
-        format!(
-            "{}/{}/{}/{}",
-            self.ticket_rest_url,
-            ticket.as_str(),
-            msg,
-            self.auth_token
-        )
-    }
 }
 
 #[async_trait::async_trait]
 impl BrokerApi for HttpBrokerApi {
     async fn start_connection(&self, ticket: &Ticket, ip: SocketAddr) -> Result<TicketResponse> {
-        let url = self.get_url(ticket, &ip.ip().to_string());
+        let ticket_request = TicketRequest::new_start(ticket, &ip, &self.auth_token);
         self.client
-            .get(&url)
+            .post(&self.ticket_rest_url)
+            .json(&ticket_request)
             .send()
             .await?
             .error_for_status()?
@@ -151,10 +192,11 @@ impl BrokerApi for HttpBrokerApi {
     }
 
     async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
-        let url = self.get_url(ticket, "stop");
         // No response body expected
+        let ticket_request = TicketRequest::new_stop(ticket, &self.auth_token, 0, 0);
         self.client
-            .delete(&url)
+            .post(&self.ticket_rest_url)
+            .json(&ticket_request)
             .send()
             .await?
             .error_for_status()
@@ -208,30 +250,27 @@ mod tests {
         let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)), 0);
         let ticket_response_json = r#"
         {
-            "host": "example.com",
-            "port": 12345,
+            "remotes": [
+                {
+                    "host": "example.com",
+                    "port": 12345,
+                    "stream_channel_id": 1
+                }
+            ],
             "notify": "notify_ticket",
             "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }
         "#;
         let _m = server
-            .mock(
-                "GET",
-                format!(
-                    "/{}/{}/{}",
-                    ticket.as_str(),
-                    ip.ip().to_string().as_str(),
-                    auth_token
-                )
-                .as_str(),
-            )
+            .mock("POST", "/")
             .with_status(200)
             .with_header("content-type", "application/json")
             .with_body(ticket_response_json)
             .create();
         let response = api.start_connection(&ticket, ip).await.unwrap();
-        assert_eq!(response.host, "example.com");
-        assert_eq!(response.port, 12345);
+        assert_eq!(response.remotes[0].stream_channel_id, 1);
+        assert_eq!(response.remotes[0].host, "example.com");
+        assert_eq!(response.remotes[0].port, 12345);
         assert_eq!(response.notify, "notify_ticket");
         assert_eq!(
             *response.get_shared_secret().unwrap().as_ref(),
@@ -250,8 +289,8 @@ mod tests {
         let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
         let _m = server
             .mock(
-                "DELETE",
-                format!("/{}/stop/{}", ticket.as_str(), auth_token).as_str(),
+                "POST",
+                "/",
             )
             .with_status(200)
             .create();

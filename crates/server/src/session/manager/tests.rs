@@ -37,7 +37,7 @@ fn new_session_for_test() -> Session {
     Session::new(
         SharedSecret::new([0u8; 32]),
         ticket::Ticket::new_random(),
-        1,
+        &[1u16; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     )

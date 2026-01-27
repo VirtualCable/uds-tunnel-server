@@ -46,7 +46,7 @@ use crate::{
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
-    sender: Sender<Vec<u8>>,
+    sender: Sender<(u16, Vec<u8>)>,
     buffer: PacketBuffer,
     crypt: Crypt,
 
@@ -54,7 +54,7 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
-    pub fn new(reader: R, crypt: Crypt, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(reader: R, crypt: Crypt, sender: Sender<(u16, Vec<u8>)>, stop: Trigger) -> Self {
         TunnelServerInboundStream {
             stop,
             sender,
@@ -67,7 +67,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
         log::debug!("Starting server inbound stream");
 
         loop {
-            let (decrypted_data, _channel) = self
+            let (decrypted_data, stream_channel_id) = self
                 .crypt
                 .read(&self.stop, &mut self.reader, &mut self.buffer)
                 .await?;
@@ -76,16 +76,15 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 // Connection closed
                 break;
             }
-            self.sender.try_send(decrypted_data.to_vec())?;
+            self.sender.try_send((stream_channel_id, decrypted_data.to_vec()))?;
         }
         Ok(())
     }
 }
 
 struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
-    stream_channel_id: u16,
     stop: Trigger,
-    receiver: Receiver<Vec<u8>>,
+    receiver: Receiver<(u16, Vec<u8>)>,  // Channel id + data
     crypt: Crypt,
 
     writer: W,
@@ -95,12 +94,10 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
     pub fn new(
         writer: W,
         crypt: Crypt,
-        receiver: Receiver<Vec<u8>>,
+        receiver: Receiver<(u16, Vec<u8>)>,
         stop: Trigger,
-        stream_channel_id: u16,
     ) -> Self {
         TunnelServerOutboundStream {
-            stream_channel_id,
             stop,
             receiver,
             crypt,
@@ -116,8 +113,8 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 }
                 result = self.receiver.recv_async() => {
                     match result {
-                        Ok(data) => {
-                            self.send_data(self.stream_channel_id, &data).await?
+                        Ok((channel_id, data)) => {
+                            self.send_data(channel_id, &data).await?
                         }
                         Err(_) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
@@ -192,7 +189,7 @@ where
 
         let session_manager = SessionManager::get_instance();
 
-        let (stop, channels, inbound_crypt, outbound_crypt, stream_channel_id) =
+        let (stop, channels, inbound_crypt, outbound_crypt) =
             if let Some(session) = session_manager.get_session(&session_id) {
                 let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
                 (
@@ -200,7 +197,6 @@ where
                     session.server_sender_receiver().await?,
                     inbound_crypt,
                     outbound_crypt,
-                    session.stream_channel_id(),
                 )
             } else {
                 log::warn!("Session {:?} not found, aborting stream", session_id);
@@ -210,14 +206,13 @@ where
         let local_stop = Trigger::new();
 
         let mut inbound =
-            TunnelServerInboundStream::new(reader, inbound_crypt, channels.0, local_stop.clone());
+            TunnelServerInboundStream::new(reader, inbound_crypt, channels.tx, local_stop.clone());
 
         let mut outbound = TunnelServerOutboundStream::new(
             writer,
             outbound_crypt,
-            channels.1,
+            channels.rx,
             local_stop.clone(),
-            stream_channel_id,
         );
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {

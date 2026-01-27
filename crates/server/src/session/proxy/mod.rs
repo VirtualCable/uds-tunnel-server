@@ -36,6 +36,24 @@ use futures::future::{Either, pending};
 use crate::consts::CHANNEL_SIZE;
 use shared::{log, system::trigger::Trigger};
 
+enum ProxyCommand {
+    AttachServer { reply: Sender<ServerEndpoints> },
+    AttachClient { reply: Sender<ClientEndpoints> },
+    DetachServer,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServerEndpoints {
+    pub tx: Sender<(u16, Vec<u8>)>,
+    pub rx: Receiver<(u16, Vec<u8>)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClientEndpoints {
+    pub tx: Sender<Vec<u8>>,
+    pub rx: Receiver<Vec<u8>>,
+}
+
 pub(super) struct SessionProxyHandle {
     ctrl_tx: Sender<ProxyCommand>,
 }
@@ -64,33 +82,20 @@ impl SessionProxyHandle {
     }
 }
 
-enum ProxyCommand {
-    AttachServer { reply: Sender<ServerEndpoints> },
-    AttachClient { reply: Sender<ClientEndpoints> },
-    DetachServer,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ServerEndpoints {
-    pub tx: Sender<Vec<u8>>,
-    pub rx: Receiver<Vec<u8>>,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct ClientEndpoints {
-    pub tx: Sender<Vec<u8>>,
-    pub rx: Receiver<Vec<u8>>,
-}
-
 pub(super) struct Proxy {
     ctrl_rx: Receiver<ProxyCommand>,
+    channel_ids: Vec<u16>,
     stop: Trigger,
 }
 
 impl Proxy {
-    pub fn new(stop: Trigger) -> (Self, SessionProxyHandle) {
+    pub fn new(channel_ids: &[u16], stop: Trigger) -> (Self, SessionProxyHandle) {
         let (ctrl_tx, ctrl_rx) = bounded(4); // Control channel, small buffer
-        let proxy = Proxy { ctrl_rx, stop };
+        let proxy = Proxy {
+            ctrl_rx,
+            channel_ids: channel_ids.to_vec(),
+            stop,
+        };
         let handle = SessionProxyHandle { ctrl_tx };
         (proxy, handle)
     }
@@ -107,7 +112,21 @@ impl Proxy {
     }
 
     async fn run_session_proxy(self) -> Result<()> {
-        let Self { ctrl_rx, stop } = self;
+        let Self {
+            ctrl_rx,
+            stop,
+            channel_ids: channels_ids,
+        } = self;
+
+        if channels_ids.len() != 1 {
+            log::warn!(
+                "Session proxy started with invalid channel IDs length: {}, expected 1",
+                channels_ids.len()
+            );
+            return Ok(());
+        }
+
+        let channel_id = channels_ids[0];
 
         // Now we need the other sides for both sides (our sides)
         let mut our_server_channels: Option<ServerEndpoints> = None;
@@ -170,7 +189,12 @@ impl Proxy {
                 }
                 msg = server_recv => {
                     match msg {
-                        Ok(msg) => {
+                        Ok((stream_channel_id, msg)) => {
+                            // TODO:  Future Stream channel id will made to send to different client channels
+                            if stream_channel_id != channel_id {
+                                log::warn!("Received message for unknown stream channel id: {}, expected: {}", stream_channel_id, channel_id);
+                                break;  // exit loop on error
+                            }
                             if let Some(client) = &our_client_channels && let Err(e) = client.tx.send_async(msg).await {
                                 log::warn!("Failed to forward message to client: {:?}", e);
                                 break;  // exit loop on error
@@ -185,7 +209,7 @@ impl Proxy {
                 msg = client_recv => {
                     match msg {
                         Ok(msg) => {
-                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async(msg).await {
+                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async((channel_id, msg)).await {
                                 log::warn!("Failed to forward message to server: {:?}", e);
                                 break;  // exit loop on error
                             }

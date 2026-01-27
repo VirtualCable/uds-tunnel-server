@@ -105,7 +105,6 @@ impl Crypt {
                 "connection closed unexpectedly while reading payload"
             ));
         }
-        log::debug!("Read packet: seq={}, length={}", seq, length);
         self.decrypt(seq, length, buffer)
     }
 
@@ -121,12 +120,6 @@ impl Crypt {
         let mut buff = PacketBuffer::new();
         buff.store(data)?;
         let encrypted_packet = self.encrypt(channel, length, &mut buff)?;
-        log::debug!(
-            "Writing packet: seq={}, in_len={}, outlength={}",
-            self.current_seq(),
-            length,
-            encrypted_packet.len(),
-        );
         build_header(
             self.current_seq(),
             encrypted_packet.len() as u16,

@@ -162,26 +162,21 @@ where
 
         let session_manager = SessionManager::get_instance();
 
-        let (stop, channels) =
-            if let Some(session) = session_manager.get_session(&session_id) {
-                (
-                    session.stop_trigger(),
-                    session.client_sender_receiver().await?,
-                )
-            } else {
-                log::warn!("Session {:?} not found, aborting stream", session_id);
-                return Ok(());
-            };
+        let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id) {
+            (
+                session.stop_trigger(),
+                session.client_sender_receiver().await?,
+            )
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            return Ok(());
+        };
 
         let local_stop = Trigger::new();
 
-        let mut inbound = TunnelClientInboundStream::new(
-            reader,
-            channels.0,
-            local_stop.clone(),
-        );
+        let mut inbound = TunnelClientInboundStream::new(reader, channels.tx, local_stop.clone());
 
-        let mut outbound = TunnelClientOutboundStream::new(writer, channels.1, local_stop.clone());
+        let mut outbound = TunnelClientOutboundStream::new(writer, channels.rx, local_stop.clone());
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);

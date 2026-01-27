@@ -37,11 +37,11 @@ use shared::{
     ticket::Ticket,
 };
 
-use crate::session::{Session, SessionId, SessionManager};
+use crate::session::{ClientEndpoints, Session, SessionId, SessionManager};
 
 use super::*;
 
-const TEST_CHANNEL: u16 = 5;
+const TEST_CHANNEL: u16 = 1;  // Currently only supports channel 1
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
@@ -65,7 +65,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let session = Session::new(
         shared_secret,
         ticket,
-        TEST_CHANNEL,
+        &[TEST_CHANNEL; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     );
@@ -87,12 +87,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
 
 async fn get_server_stream_components(
     session_id: &SessionId,
-) -> Result<(
-    Trigger,
-    (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>),
-    Crypt,
-    Crypt,
-)> {
+) -> Result<(Trigger, ClientEndpoints, Crypt, Crypt)> {
     let (stop, channels, inbound_crypt, outbound_crypt) =
         if let Some(session) = SessionManager::get_instance().get_session(session_id) {
             let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
@@ -113,8 +108,7 @@ async fn init_server_test() -> (
     SessionId,
     tokio::io::DuplexStream,
     Trigger,
-    flume::Sender<Vec<u8>>,
-    flume::Receiver<Vec<u8>>,
+    ClientEndpoints,
     Crypt,
     Crypt,
 ) {
@@ -122,20 +116,20 @@ async fn init_server_test() -> (
 
     let (session_id, _session, client) = create_test_server_stream().await;
 
-    let (stop, (tx, rx), inbound_crypt, outbound_crypt) =
+    let (stop, endpoints, inbound_crypt, outbound_crypt) =
         get_server_stream_components(&session_id).await.unwrap();
 
     (
         session_id,
         client,
         stop,
-        tx,
-        rx,
+        endpoints,
         inbound_crypt,
         outbound_crypt,
     )
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_inbound_basic() {
     log::setup_logging("debug", log::LogType::Test);
@@ -168,14 +162,16 @@ async fn test_server_inbound_basic() {
     });
 
     inbound.run().await.unwrap();
-    let data = rx.recv().unwrap();
-    log::debug!("Received data: {:?}, msg: {:?}", data, msg);
+    let (channel_id, data) = rx.recv().unwrap();
+    log::debug!("Received data: {:?}:{:?}", channel_id, data);
 
+    assert_eq!(channel_id, TEST_CHANNEL);
     assert_eq!(data, msg);
     // Stop is set on TunnelServerStream, so here must be unset
     assert!(!stop.is_triggered());
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_inbound_remote_close_before_header() {
     log::setup_logging("debug", log::LogType::Test);
@@ -196,6 +192,7 @@ async fn test_server_inbound_remote_close_before_header() {
     assert!(!stop.is_triggered());
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_inbound_read_error() {
     struct FailingReader;
@@ -223,6 +220,7 @@ async fn test_server_inbound_read_error() {
     assert!(!stop.is_triggered());
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_inbound_stop_before_read() {
     log::setup_logging("debug", log::LogType::Test);
@@ -242,9 +240,10 @@ async fn test_server_inbound_stop_before_read() {
     assert!(rx.try_recv().is_err());
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_stream_with_invalid_packet() {
-    let (_session_id, mut client, stop, _tx, _rx, _inbound_crypt, _outbound_crypt) =
+    let (_session_id, mut client, stop, _endpoints, _inbound_crypt, _outbound_crypt) =
         init_server_test().await;
     // Send some data to tunnel, invalid data
     let msg = b"Hello, client!";
@@ -259,9 +258,10 @@ async fn test_server_stream_with_invalid_packet() {
     }
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_stream_valid_packets() -> Result<()> {
-    let (_session_id, mut client, stop, tx, rx, mut inbound_crypt, mut outbound_crypt) =
+    let (_session_id, mut client, stop, endpoints, mut inbound_crypt, mut outbound_crypt) =
         init_server_test().await;
 
     // Note: This is a test, inbound is the crypt used to decrypt data coming FROM client
@@ -272,7 +272,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     let encrypted1 = {
         let mut msg_packet = PacketBuffer::from_slice(sent_msg);
         let encrypted = inbound_crypt
-            .encrypt(2, sent_msg.len(), &mut msg_packet)
+            .encrypt(TEST_CHANNEL, sent_msg.len(), &mut msg_packet)
             .expect("Failed to encrypt first message packet");
         encrypted.to_vec()
     };
@@ -287,7 +287,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
 
     // Should receive on tx on time
     let recv_msg =
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv_async()).await??;
+        tokio::time::timeout(std::time::Duration::from_secs(2), endpoints.rx.recv_async()).await??;
     assert_eq!(recv_msg, sent_msg);
 
     // Stop should not be triggered
@@ -295,7 +295,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
 
     // Now, send something that we will receibe crypted in client
     let sent_msg2 = b"Another messa!16";
-    tx.send_async(sent_msg2.into()).await?;
+    endpoints.tx.send_async(sent_msg2.into()).await?;
 
     // Read from client the encrypted message
     let mut header2 = [0u8; HEADER_LENGTH];
@@ -310,7 +310,11 @@ async fn test_server_stream_valid_packets() -> Result<()> {
         .decrypt(counter2, length2, &mut packet_buffer2)
         .unwrap();
 
-    log::debug!("Decrypted message from server: decrypted: {:?} sent_msg2: {:?}", decrypted2, sent_msg2);
+    log::debug!(
+        "Decrypted message from server: decrypted: {:?} sent_msg2: {:?}",
+        decrypted2,
+        sent_msg2
+    );
 
     assert_eq!(decrypted2, sent_msg2);
     assert_eq!(channel, TEST_CHANNEL); // Channel used in outbound stream

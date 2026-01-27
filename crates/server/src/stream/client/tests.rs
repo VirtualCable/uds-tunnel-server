@@ -36,7 +36,7 @@ use shared::{
     consts::TICKET_LENGTH, crypt::types::SharedSecret, system::trigger::Trigger, ticket::Ticket,
 };
 
-use crate::session::{Session, SessionId, SessionManager};
+use crate::session::{ServerEndpoints, Session, SessionId, SessionManager};
 
 const TEST_STREAM_CHANNEL_ID: u16 = 42;
 
@@ -49,7 +49,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let session = Session::new(
         SharedSecret::new([3u8; 32]),
         ticket,
-        TEST_STREAM_CHANNEL_ID,
+        &[TEST_STREAM_CHANNEL_ID; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     );
@@ -71,7 +71,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
 
 async fn get_server_stream_components(
     session_id: &SessionId,
-) -> Result<(Trigger, (flume::Sender<Vec<u8>>, flume::Receiver<Vec<u8>>))> {
+) -> Result<(Trigger, ServerEndpoints)> {
     let (stop, channels) =
         if let Some(session) = SessionManager::get_instance().get_session(session_id) {
             (
@@ -85,30 +85,24 @@ async fn get_server_stream_components(
     Ok((stop, channels))
 }
 
-async fn init_server_test() -> (
-    SessionId,
-    tokio::io::DuplexStream,
-    Trigger,
-    flume::Sender<Vec<u8>>,
-    flume::Receiver<Vec<u8>>,
-) {
+async fn init_server_test() -> (SessionId, tokio::io::DuplexStream, Trigger, ServerEndpoints) {
     log::setup_logging("debug", log::LogType::Test);
 
     let (session_id, _session, client) = create_test_server_stream().await;
 
-    let (stop, (tx, rx)) = get_server_stream_components(&session_id).await.unwrap();
+    let (stop, endpoints) = get_server_stream_components(&session_id).await.unwrap();
 
-    (session_id, client, stop, tx, rx)
+    (session_id, client, stop, endpoints)
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_read_and_send() {
     let (mut client, server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
 
     tokio::spawn(async move {
         client.write_all(b"hello").await.unwrap();
@@ -119,6 +113,7 @@ async fn test_read_and_send() {
     assert_eq!(rx.recv().unwrap(), b"hello");
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_receive_and_write() {
     log::setup_logging("debug", log::LogType::Test);
@@ -154,25 +149,27 @@ async fn test_receive_and_write() {
     assert_eq!(&buf, b"hello");
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_inbound_remote_close() {
     let (client, server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
 
-    // Cerrar el lado remoto inmediatamente
+    // Close the client side to simulate remote close
     drop(client);
 
     inbound.run().await.unwrap();
 
-    // No debe enviar nada
-    assert!(rx.try_recv().is_err());
+    // Should not receive any data
+    let result = rx.try_recv();
+    assert!(result.is_err(), "Expected no data, but received some: {:?}", result);
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_inbound_read_error() {
     struct FailingReader;
@@ -190,14 +187,14 @@ async fn test_inbound_read_error() {
     let (tx, _rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelClientInboundStream::new(FailingReader, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(FailingReader, tx, stop.clone());
 
     let res = inbound.run().await;
     assert!(res.is_err());
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_outbound_channel_closed() {
     let (client, _server) = tokio::io::duplex(1024);
@@ -213,6 +210,7 @@ async fn test_outbound_channel_closed() {
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_outbound_stop_before_data() {
     let (client, _server) = tokio::io::duplex(1024);
@@ -227,6 +225,7 @@ async fn test_outbound_stop_before_data() {
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_outbound_backpressure() {
     let (client, mut server) = tokio::io::duplex(1024);
@@ -260,6 +259,7 @@ async fn test_outbound_backpressure() {
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_full_tunnel_echo() {
     let (client_side, mut server) = tokio::io::duplex(1024);
@@ -270,8 +270,7 @@ async fn test_full_tunnel_echo() {
 
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelClientInboundStream::new(server_side, tx_in, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(server_side, tx_in, stop.clone());
     let mut outbound = TunnelClientOutboundStream::new(client_side, rx_out, stop.clone());
 
     // Task inbound
@@ -305,6 +304,7 @@ async fn test_full_tunnel_echo() {
     assert_eq!(&buf, b"ping");
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_inbound_multiple_packets() {
     log::setup_logging("debug", log::LogType::Test);
@@ -313,8 +313,7 @@ async fn test_inbound_multiple_packets() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
 
     tokio::spawn(async move {
         inbound.run().await.unwrap();
@@ -336,6 +335,7 @@ async fn test_inbound_multiple_packets() {
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_outbound_multiple_packets() {
     let (client, mut server) = tokio::io::duplex(1024);
@@ -371,16 +371,18 @@ async fn test_outbound_multiple_packets() {
     stop.trigger();
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_client_stream_valid_packets() -> Result<()> {
-    let (_session_id, mut client, stop, tx, rx) = init_server_test().await;
+    let (_session_id, mut client, stop, endpoints) = init_server_test().await;
 
     let sent_msg = b"Hello, server!";
     client.write_all(sent_msg).await.unwrap();
 
     // Should receive on tx on time
-    let recv_msg =
-        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv_async()).await??;
+    let (channel_id, recv_msg) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), endpoints.rx.recv_async())
+            .await??;
     assert_eq!(recv_msg, sent_msg);
 
     // Stop should not be triggered
@@ -388,7 +390,11 @@ async fn test_client_stream_valid_packets() -> Result<()> {
 
     // Send response back to client
     let response_msg = b"Hello, client!";
-    tx.send_async(response_msg.to_vec()).await.unwrap();
+    endpoints
+        .tx
+        .send_async((channel_id, response_msg.to_vec()))
+        .await
+        .unwrap();
 
     // Read from client the forwarded mesage
     let mut buf = vec![0u8; response_msg.len()];

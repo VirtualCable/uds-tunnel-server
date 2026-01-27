@@ -35,8 +35,9 @@ use super::*;
 async fn attach_detach_basic() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
@@ -55,8 +56,9 @@ async fn attach_detach_basic() -> Result<()> {
 async fn messages_preserve_order() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
@@ -65,7 +67,10 @@ async fn messages_preserve_order() -> Result<()> {
     let count = 1000;
 
     for i in 0u32..count {
-        server.tx.send_async(i.to_be_bytes().to_vec()).await?;
+        server
+            .tx
+            .send_async((channel_ids[0], i.to_be_bytes().to_vec()))
+            .await?;
     }
 
     for i in 0..count {
@@ -82,8 +87,9 @@ async fn messages_preserve_order() -> Result<()> {
 async fn backpressure_does_not_panic() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
@@ -91,7 +97,7 @@ async fn backpressure_does_not_panic() -> Result<()> {
 
     // CHANNEL_SIZE = 1 → backpressure real
     for _ in 0..10 {
-        let _ = server.tx.send_async(vec![1, 2, 3]).await;
+        let _ = server.tx.send_async((channel_ids[0], vec![1, 2, 3])).await;
     }
 
     // No panic, no deadlock
@@ -105,18 +111,19 @@ async fn closes_on_full_buffer() -> Result<()> {
 
     log::setup_logging("debug", log::LogType::Test);
 
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
     // No client, will cause buffer to fill up
 
     for _ in 0..(CHANNEL_SIZE) {
-        server.tx.try_send(vec![1, 2, 3])?;
+        server.tx.try_send((channel_ids[0], vec![1, 2, 3]))?;
     }
     // Next send should fail
-    if let Err(e) = server.tx.try_send(vec![1, 2, 3]) {
+    if let Err(e) = server.tx.try_send((channel_ids[0], vec![1, 2, 3])) {
         log::info!("Expected error on full buffer: {}", e);
     } else {
         panic!("Expected error on full buffer");
@@ -129,21 +136,30 @@ async fn closes_on_full_buffer() -> Result<()> {
 
 #[tokio::test]
 async fn reattach_server_works() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server1 = handle.attach_server().await?;
     let client = handle.attach_client().await?;
 
-    server1.tx.send_async(b"first".to_vec()).await?;
+    server1
+        .tx
+        .send_async((channel_ids[0], b"first".to_vec()))
+        .await?;
     let msg = client.rx.recv_async().await?;
     assert_eq!(msg, b"first");
 
     handle.detach_server().await?;
 
     let server2 = handle.attach_server().await?;
-    server2.tx.send_async(b"second".to_vec()).await?;
+    server2
+        .tx
+        .send_async((channel_ids[0], b"second".to_vec()))
+        .await?;
     let msg = client.rx.recv_async().await?;
     assert_eq!(msg, b"second");
 
@@ -153,15 +169,18 @@ async fn reattach_server_works() -> Result<()> {
 
 #[tokio::test]
 async fn fairness_between_sides() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
     let client = handle.attach_client().await?;
 
     for i in 0..100 {
-        server.tx.send_async(vec![i]).await?;
+        server.tx.send_async((channel_ids[0], vec![i])).await?;
         client.tx.send_async(vec![i]).await?;
     }
 
@@ -180,8 +199,9 @@ async fn test_proxy_communication() -> Result<()> {
 
     log::info!("Starting test_proxy_communication");
 
+    let channel_ids = vec![1u16];
     let stop = Trigger::new();
-    let (proxy, handle) = Proxy::new(stop.clone());
+    let (proxy, handle) = Proxy::new(&channel_ids, stop.clone());
     let _proxy_task = proxy.run();
 
     let server_endpoints = handle.attach_server().await?;
@@ -199,7 +219,10 @@ async fn test_proxy_communication() -> Result<()> {
 
     // Send message from server to client, with a timeout to avoid hanging test
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        server_endpoints.tx.send_async(test_message.clone()).await
+        server_endpoints
+            .tx
+            .send_async((channel_ids[0], test_message.clone()))
+            .await
     })
     .await??;
     // Receive message from client, with a timeout to avoid hanging test
@@ -226,7 +249,9 @@ async fn test_proxy_communication() -> Result<()> {
         server_endpoints.rx.recv_async().await
     })
     .await??;
-    assert_eq!(received_by_server, response_message);
+
+    assert_eq!(received_by_server.0, channel_ids[0]);
+    assert_eq!(received_by_server.1, response_message);
     log::debug!("Message from client to server verified");
 
     stop.trigger();

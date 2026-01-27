@@ -95,8 +95,13 @@ async fn setup_testing_connection(
     let ticket_response_json = format!(
         r#"
         {{
-            "host": "{}",
-            "port": {},
+            "remotes": [
+                {{
+                    "host": "{}",
+                    "port": {},
+                    "stream_channel_id": 1
+                }}
+            ],
             "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
             "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }}
@@ -105,8 +110,8 @@ async fn setup_testing_connection(
     );
     let mock = server
         .mock(
-            "GET",
-            Matcher::Regex(format!("/{}/{}/{}", ticket.as_str(), r".+", auth_token)),
+            "POST",
+            "/",
         )
         .with_status(200)
         .with_header("content-type", "application/json")

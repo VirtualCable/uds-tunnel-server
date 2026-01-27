@@ -30,13 +30,29 @@ where
     let broker = broker::get();
     match broker.start_connection(ticket, ip).await {
         // Note: On a future, the broker could return more than a single channel stream id
-        // But currently, only one is supported (1)
+        // But currently, only one is supported, althout it's prepared to be extended later
         Ok(ticket_info) => {
+            if ticket_info.remotes.len() != 1  || ticket_info.remotes[0].stream_channel_id != 1 {
+                log::error!(
+                    "Broker returned invalid number of remotes: {}",
+                    ticket_info.remotes.len()
+                );
+                return Err(anyhow::anyhow!(
+                    "Broker returned invalid number of remotes: {}",
+                    ticket_info.remotes.len()
+                ));
+            }
+
             let stop = Trigger::new();
+            let stream_channel_ids: Vec<u16> = ticket_info
+                .remotes
+                .iter()
+                .map(|remote| remote.stream_channel_id)
+                .collect();
             let (session_id, session) = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
                 *ticket,
-                1,  // only channel 1 is supported for now (0 is for commands)
+                &stream_channel_ids,
                 stop.clone(),
                 ip,
             ))?;
@@ -67,7 +83,7 @@ where
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
-            let response = OpenResponse::new(session_id, 1);
+            let response = OpenResponse::new(session_id, ticket_info.remotes.len() as u16);
             let response_data = response.as_vec();
             // Send the OpenResponse
             write_crypt
@@ -80,7 +96,7 @@ where
             session.set_outbound_seq(1);
 
             // Open a connection to the target server using the ticket info
-            let target_stream = TcpStream::connect(ticket_info.target_addr().await?).await?;
+            let target_stream = TcpStream::connect(ticket_info.target_addr(1).await?).await?;
 
             // Split the target stream into reader and writer
             let (target_reader, target_writer) = target_stream.into_split();

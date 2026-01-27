@@ -35,21 +35,23 @@ use std::{
 };
 
 use anyhow::Result;
-use flume::{Receiver, Sender};
 
 use shared::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
 
 mod manager;
 mod proxy;
 
-pub use manager::SessionManager;
+pub use {
+    manager::SessionManager,
+    proxy::{ClientEndpoints, ServerEndpoints},
+};
 
 // Alias, internal SessionId is a Ticket
 pub type SessionId = ticket::Ticket;
 
 pub struct Session {
     ticket: ticket::Ticket,
-    stream_channel_id: u16,
+    stream_channel_ids: Vec<u16>,
     shared_secret: SharedSecret,
     stop: Trigger,
     // Channels for server <-> client communication
@@ -72,16 +74,16 @@ impl Session {
     pub fn new(
         shared_secret: SharedSecret,
         ticket: ticket::Ticket,
-        stream_channel_id: u16,
+        stream_channel_ids: &[u16],
         stop: Trigger,
         ip: SocketAddr,
     ) -> Self {
-        let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
+        let (proxy, session_proxy) = proxy::Proxy::new(stream_channel_ids, stop.clone());
         proxy.run(); // Start proxy task
 
         Session {
             ticket,
-            stream_channel_id,
+            stream_channel_ids: stream_channel_ids.to_vec(),
             shared_secret,
             stop,
             session_proxy,
@@ -98,14 +100,12 @@ impl Session {
         }
     }
 
-    pub async fn server_sender_receiver(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
-        let endpoints = self.session_proxy.attach_server().await?;
-        Ok((endpoints.tx, endpoints.rx))
+    pub async fn server_sender_receiver(&self) -> Result<ServerEndpoints> {
+        self.session_proxy.attach_server().await
     }
 
-    pub async fn client_sender_receiver(&self) -> Result<(Sender<Vec<u8>>, Receiver<Vec<u8>>)> {
-        let endpoints = self.session_proxy.attach_client().await?;
-        Ok((endpoints.tx, endpoints.rx))
+    pub async fn client_sender_receiver(&self) -> Result<ClientEndpoints> {
+        self.session_proxy.attach_client().await
     }
 
     pub async fn stop(&self) {
@@ -185,8 +185,8 @@ impl Session {
         crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
     }
 
-    pub fn stream_channel_id(&self) -> u16 {
-        self.stream_channel_id
+    pub fn stream_channel_ids(&self) -> &[u16] {
+        &self.stream_channel_ids
     }
 }
 
