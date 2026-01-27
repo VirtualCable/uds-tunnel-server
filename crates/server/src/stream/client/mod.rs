@@ -165,7 +165,7 @@ where
         let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id) {
             (
                 session.stop_trigger(),
-                session.client_sender_receiver().await?,
+                session.client_sender_receiver(1).await?,  // TODO: stream_channel_id, currently only 1 is supported
             )
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
@@ -206,7 +206,7 @@ where
                 }
             }
             // Notify stopping client side
-            if let Err(e) = session_manager.stop_client(&session_id).await {
+            if let Err(e) = session_manager.stop_client(&session_id, 1).await {
                 log::error!("Failed to stop client session {:?}: {:?}", session_id, e);
             }
         });

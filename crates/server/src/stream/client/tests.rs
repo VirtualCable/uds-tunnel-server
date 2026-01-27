@@ -38,8 +38,6 @@ use shared::{
 
 use crate::session::{ServerEndpoints, Session, SessionId, SessionManager};
 
-const TEST_STREAM_CHANNEL_ID: u16 = 42;
-
 async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
@@ -49,7 +47,6 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let session = Session::new(
         SharedSecret::new([3u8; 32]),
         ticket,
-        &[TEST_STREAM_CHANNEL_ID; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     );

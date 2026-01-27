@@ -41,7 +41,7 @@ use crate::session::{ClientEndpoints, Session, SessionId, SessionManager};
 
 use super::*;
 
-const TEST_CHANNEL: u16 = 1;  // Currently only supports channel 1
+const TEST_CHANNEL_ID: u16 = 1;  // Currently only supports channel 1
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
@@ -65,7 +65,6 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let session = Session::new(
         shared_secret,
         ticket,
-        &[TEST_CHANNEL; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     );
@@ -93,7 +92,7 @@ async fn get_server_stream_components(
             let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
             (
                 session.stop_trigger(),
-                session.client_sender_receiver().await?,
+                session.client_sender_receiver(TEST_CHANNEL_ID).await?,
                 inbound_crypt,
                 outbound_crypt,
             )
@@ -165,7 +164,7 @@ async fn test_server_inbound_basic() {
     let (channel_id, data) = rx.recv().unwrap();
     log::debug!("Received data: {:?}:{:?}", channel_id, data);
 
-    assert_eq!(channel_id, TEST_CHANNEL);
+    assert_eq!(channel_id, TEST_CHANNEL_ID);
     assert_eq!(data, msg);
     // Stop is set on TunnelServerStream, so here must be unset
     assert!(!stop.is_triggered());
@@ -272,7 +271,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     let encrypted1 = {
         let mut msg_packet = PacketBuffer::from_slice(sent_msg);
         let encrypted = inbound_crypt
-            .encrypt(TEST_CHANNEL, sent_msg.len(), &mut msg_packet)
+            .encrypt(TEST_CHANNEL_ID, sent_msg.len(), &mut msg_packet)
             .expect("Failed to encrypt first message packet");
         encrypted.to_vec()
     };
@@ -317,7 +316,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
     );
 
     assert_eq!(decrypted2, sent_msg2);
-    assert_eq!(channel, TEST_CHANNEL); // Channel used in outbound stream
+    assert_eq!(channel, TEST_CHANNEL_ID); // Channel used in outbound stream
 
     // Trigger stop to end the test
     stop.trigger();

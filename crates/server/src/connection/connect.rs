@@ -44,15 +44,9 @@ where
             }
 
             let stop = Trigger::new();
-            let stream_channel_ids: Vec<u16> = ticket_info
-                .remotes
-                .iter()
-                .map(|remote| remote.stream_channel_id)
-                .collect();
             let (session_id, session) = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
                 *ticket,
-                &stream_channel_ids,
                 stop.clone(),
                 ip,
             ))?;

@@ -37,7 +37,6 @@ fn new_session_for_test() -> Session {
     Session::new(
         SharedSecret::new([0u8; 32]),
         ticket::Ticket::new_random(),
-        &[1u16; 1],
         Trigger::new(),
         "127.0.0.1:0".parse().unwrap(),
     )
@@ -104,7 +103,7 @@ async fn test_session_lifecycle() {
     test_state(&manager, &session_id, true, true);
     manager.stop_server(&session_id).await.unwrap();
     test_state(&manager, &session_id, false, true);
-    manager.stop_client(&session_id).await.unwrap();
+    manager.stop_client(&session_id, 1).await.unwrap();
     assert!(manager.get_session(&session_id).is_none());
 }
 
@@ -120,12 +119,12 @@ async fn test_session_removed_exactly_once() {
     manager.stop_server(&session_id).await.unwrap();
     assert!(manager.get_session(&session_id).is_some());
 
-    manager.stop_client(&session_id).await.unwrap();
+    manager.stop_client(&session_id, 1).await.unwrap();
     assert!(manager.get_session(&session_id).is_none());
 
     // Any aditional stops should be no-ops
     manager.stop_server(&session_id).await.unwrap();
-    manager.stop_client(&session_id).await.unwrap();
+    manager.stop_client(&session_id, 1).await.unwrap();
 }
 
 #[tokio::test]

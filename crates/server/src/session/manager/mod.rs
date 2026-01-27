@@ -125,9 +125,9 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn stop_client(&self, id: &SessionId) -> Result<()> {
+    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.stop_client().await?;
+            session.stop_client(stream_channel_id).await?;
             // Remove the session. It's fine even if any check against
             // this session is done after this point.
             // Note: drop of session will invoke trigger stop

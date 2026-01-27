@@ -51,7 +51,6 @@ pub type SessionId = ticket::Ticket;
 
 pub struct Session {
     ticket: ticket::Ticket,
-    stream_channel_ids: Vec<u16>,
     shared_secret: SharedSecret,
     stop: Trigger,
     // Channels for server <-> client communication
@@ -74,23 +73,14 @@ impl Session {
     pub fn new(
         shared_secret: SharedSecret,
         ticket: ticket::Ticket,
-        stream_channel_ids: &[u16],
         stop: Trigger,
         ip: SocketAddr,
     ) -> Self {
-        let (proxy, session_proxy) = proxy::Proxy::new(stream_channel_ids, stop.clone());
+        let (proxy, session_proxy) = proxy::Proxy::new(&[1], stop.clone());
         proxy.run(); // Start proxy task
-
-        if stream_channel_ids.len() != 1 || stream_channel_ids[0] != 1 {
-            log::error!(
-                "Session created with invalid stream channel IDs: {:?}",
-                stream_channel_ids
-            );
-        }
 
         Session {
             ticket,
-            stream_channel_ids: stream_channel_ids.to_vec(),
             shared_secret,
             stop,
             session_proxy,
@@ -111,10 +101,8 @@ impl Session {
         self.session_proxy.attach_server().await
     }
 
-    pub async fn client_sender_receiver(&self) -> Result<ClientEndpoints> {
-        self.session_proxy
-            .attach_client(self.stream_channel_ids.first().cloned().unwrap_or(1))
-            .await
+    pub async fn client_sender_receiver(&self, stream_channel_id: u16) -> Result<ClientEndpoints> {
+        self.session_proxy.attach_client(stream_channel_id).await
     }
 
     pub async fn stop(&self) {
@@ -146,13 +134,11 @@ impl Session {
         Ok(())
     }
 
-    pub async fn stop_client(&self) -> Result<()> {
+    pub async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
         self.is_client_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
         // Ensure proxy detaches client channels
-        self.session_proxy
-            .detach_client(self.stream_channel_ids.first().cloned().unwrap_or(1))
-            .await
+        self.session_proxy.detach_client(stream_channel_id).await
     }
 
     pub fn is_client_running(&self) -> bool {
@@ -195,10 +181,6 @@ impl Session {
 
     pub fn server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
         crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
-    }
-
-    pub fn stream_channel_ids(&self) -> &[u16] {
-        &self.stream_channel_ids
     }
 }
 

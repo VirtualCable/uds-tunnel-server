@@ -92,6 +92,25 @@ impl TicketResponse {
             )),
         }
     }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.remotes.is_empty() {
+            return Err(anyhow::anyhow!("No remotes in ticket response"));
+        }
+        for remote in &self.remotes {
+            if remote.host.is_empty() || remote.port == 0 {
+                return Err(anyhow::anyhow!(
+                    "Invalid remote in ticket response: {:?}",
+                    remote
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn stream_channel_ids(&self) -> Vec<u16> {
+        self.remotes.iter().map(|r| r.stream_channel_id).collect()
+    }
 }
 
 #[derive(serde::Serialize)]
