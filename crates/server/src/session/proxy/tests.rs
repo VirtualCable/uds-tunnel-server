@@ -31,6 +31,8 @@
 
 use super::*;
 
+const TEST_CHANNEL_ID: u16 = 1;
+
 #[tokio::test]
 async fn attach_detach_basic() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
@@ -41,7 +43,7 @@ async fn attach_detach_basic() -> Result<()> {
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
-    let client = handle.attach_client().await?;
+    let client = handle.attach_client(TEST_CHANNEL_ID).await?;
 
     assert!(!server.tx.is_disconnected());
     assert!(!client.tx.is_disconnected());
@@ -62,7 +64,7 @@ async fn messages_preserve_order() -> Result<()> {
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
-    let client = handle.attach_client().await?;
+    let client = handle.attach_client(TEST_CHANNEL_ID).await?;
 
     let count = 1000;
 
@@ -93,7 +95,7 @@ async fn backpressure_does_not_panic() -> Result<()> {
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
-    let _client = handle.attach_client().await?;
+    let _client = handle.attach_client(TEST_CHANNEL_ID).await?;
 
     // CHANNEL_SIZE = 1 → backpressure real
     for _ in 0..10 {
@@ -144,8 +146,7 @@ async fn reattach_server_works() -> Result<()> {
     let _task = proxy.run();
 
     let server1 = handle.attach_server().await?;
-    let client = handle.attach_client().await?;
-
+    let client = handle.attach_client(TEST_CHANNEL_ID).await?;
     server1
         .tx
         .send_async((channel_ids[0], b"first".to_vec()))
@@ -177,7 +178,7 @@ async fn fairness_between_sides() -> Result<()> {
     let _task = proxy.run();
 
     let server = handle.attach_server().await?;
-    let client = handle.attach_client().await?;
+    let client = handle.attach_client(TEST_CHANNEL_ID).await?;
 
     for i in 0..100 {
         server.tx.send_async((channel_ids[0], vec![i])).await?;
@@ -205,7 +206,7 @@ async fn test_proxy_communication() -> Result<()> {
     let _proxy_task = proxy.run();
 
     let server_endpoints = handle.attach_server().await?;
-    let client_endpoints = handle.attach_client().await?;
+    let client_endpoints = handle.attach_client(TEST_CHANNEL_ID).await?;
 
     let test_message = b"Hello, Proxy!".to_vec();
 

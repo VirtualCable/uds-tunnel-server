@@ -81,6 +81,13 @@ impl Session {
         let (proxy, session_proxy) = proxy::Proxy::new(stream_channel_ids, stop.clone());
         proxy.run(); // Start proxy task
 
+        if stream_channel_ids.len() != 1 || stream_channel_ids[0] != 1 {
+            log::error!(
+                "Session created with invalid stream channel IDs: {:?}",
+                stream_channel_ids
+            );
+        }
+
         Session {
             ticket,
             stream_channel_ids: stream_channel_ids.to_vec(),
@@ -105,7 +112,9 @@ impl Session {
     }
 
     pub async fn client_sender_receiver(&self) -> Result<ClientEndpoints> {
-        self.session_proxy.attach_client().await
+        self.session_proxy
+            .attach_client(self.stream_channel_ids.first().cloned().unwrap_or(1))
+            .await
     }
 
     pub async fn stop(&self) {
@@ -140,7 +149,10 @@ impl Session {
     pub async fn stop_client(&self) -> Result<()> {
         self.is_client_running
             .store(false, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
+        // Ensure proxy detaches client channels
+        self.session_proxy
+            .detach_client(self.stream_channel_ids.first().cloned().unwrap_or(1))
+            .await
     }
 
     pub fn is_client_running(&self) -> bool {
