@@ -41,7 +41,6 @@ use shared::{crypt::types::SharedSecret, log, ticket::Ticket};
 pub struct TicketRemote {
     pub host: String,
     pub port: u16,
-    pub stream_channel_id: u16,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -61,16 +60,14 @@ impl TicketResponse {
     }
 
     pub async fn target_addr(&self, stream_channel_id: u16) -> Result<SocketAddr> {
-        let remote = self
-            .remotes
-            .iter()
-            .find(|r| r.stream_channel_id == stream_channel_id)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "No remote found for stream channel id: {}",
-                    stream_channel_id
-                )
-            })?;
+        // Stream channel id is the index+1 of the remotes array
+        if stream_channel_id == 0 || stream_channel_id as usize > self.remotes.len() {
+            return Err(anyhow::anyhow!(
+                "Invalid stream_channel_id: {}",
+                stream_channel_id
+            ));
+        }
+        let remote = &self.remotes[(stream_channel_id - 1) as usize];
 
         let resolver = Resolver::builder_with_config(
             ResolverConfig::default(),
@@ -104,19 +101,8 @@ impl TicketResponse {
                     remote
                 ));
             }
-            // TODO: Currently only stream_channel_id 1 is supported
-            if remote.stream_channel_id != 1 {
-                return Err(anyhow::anyhow!(
-                    "Invalid stream_channel_id in ticket response: {:?}",
-                    remote
-                ));
-            }
         }
         Ok(())
-    }
-
-    pub async fn stream_channel_ids(&self) -> Vec<u16> {
-        self.remotes.iter().map(|r| r.stream_channel_id).collect()
     }
 }
 
@@ -279,8 +265,7 @@ mod tests {
             "remotes": [
                 {
                     "host": "example.com",
-                    "port": 12345,
-                    "stream_channel_id": 1
+                    "port": 12345
                 }
             ],
             "notify": "notify_ticket",
@@ -294,7 +279,6 @@ mod tests {
             .with_body(ticket_response_json)
             .create();
         let response = api.start_connection(&ticket, ip).await.unwrap();
-        assert_eq!(response.remotes[0].stream_channel_id, 1);
         assert_eq!(response.remotes[0].host, "example.com");
         assert_eq!(response.remotes[0].port, 12345);
         assert_eq!(response.notify, "notify_ticket");
