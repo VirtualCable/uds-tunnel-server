@@ -50,6 +50,7 @@ pub use {
 pub type SessionId = ticket::Ticket;
 
 pub struct Session {
+    id: SessionId,
     ticket: ticket::Ticket,
     shared_secret: SharedSecret,
     stop: Trigger,
@@ -80,6 +81,7 @@ impl Session {
         proxy.run(); // Start proxy task
 
         Session {
+            id: SessionId::new_random(),
             ticket,
             shared_secret,
             stop,
@@ -89,6 +91,10 @@ impl Session {
             seq: RwLock::new((0, 0)),
             ip: RwLock::new(ip),
         }
+    }
+
+    pub fn id(&self) -> &SessionId {
+        &self.id
     }
 
     pub fn set_ip(&self, ip: SocketAddr) {

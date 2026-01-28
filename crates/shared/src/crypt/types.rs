@@ -78,8 +78,8 @@ impl PacketBuffer {
     // Copies data into buffer, reserving first 2 bytes for channel
     pub fn from_slice(data: &[u8]) -> Self {
         let mut packet_buffer = PacketBuffer::new();
-        let len = (data.len()+2).min(consts::MAX_PACKET_SIZE);
-        packet_buffer.buffer[2..len].copy_from_slice(&data[..len-2]);
+        let len = (data.len() + 2).min(consts::MAX_PACKET_SIZE);
+        packet_buffer.buffer[2..len].copy_from_slice(&data[..len - 2]);
         packet_buffer
     }
 

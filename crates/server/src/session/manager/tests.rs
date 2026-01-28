@@ -154,7 +154,7 @@ async fn test_add_equiv_session() {
     let manager = SessionManager::new();
     let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
-    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+    let equiv_session_id = manager.create_equiv_session(&session_id).unwrap();
     let equiv_session = manager.get_equiv_session(&equiv_session_id).unwrap();
     let direct_session = manager.get_session(&session_id).unwrap();
 
@@ -166,7 +166,7 @@ async fn test_remove_session_removes_equiv_session() {
     let manager = SessionManager::new();
     let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
-    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+    let equiv_session_id = manager.create_equiv_session(&session_id).unwrap();
 
     manager.remove_session(&session_id);
 
@@ -179,7 +179,7 @@ async fn test_remove_equiv_session() {
     let manager = SessionManager::new();
     let (session_id, _) = manager.add_session(new_session_for_test()).unwrap();
 
-    let equiv_session_id = manager.create_equiv_session(session_id).unwrap();
+    let equiv_session_id = manager.create_equiv_session(&session_id).unwrap();
 
     manager.remove_equiv_session(&equiv_session_id);
 

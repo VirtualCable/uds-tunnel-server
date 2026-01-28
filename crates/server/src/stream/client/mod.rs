@@ -136,6 +136,7 @@ where
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
     session_id: SessionId,
+    stream_channel_id: u16,
     reader: R,
     writer: W,
 }
@@ -145,9 +146,10 @@ where
     R: AsyncReadExt + Send + Unpin + 'static,
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
-    pub fn new(id: SessionId, reader: R, writer: W) -> Self {
+    pub fn new(id: SessionId, stream_channel_id: u16, reader: R, writer: W) -> Self {
         TunnelClientStream {
             session_id: id,
+            stream_channel_id,
             reader,
             writer,
         }
@@ -156,6 +158,7 @@ where
     pub async fn run(self) -> Result<()> {
         let Self {
             session_id,
+            stream_channel_id,
             reader,
             writer,
         } = self;
@@ -165,7 +168,7 @@ where
         let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id) {
             (
                 session.stop_trigger(),
-                session.client_sender_receiver(1).await?,  // TODO: stream_channel_id, currently only 1 is supported
+                session.client_sender_receiver(stream_channel_id).await?,
             )
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
@@ -206,7 +209,10 @@ where
                 }
             }
             // Notify stopping client side
-            if let Err(e) = session_manager.stop_client(&session_id, 1).await {
+            if let Err(e) = session_manager
+                .stop_client(&session_id, stream_channel_id)
+                .await
+            {
                 log::error!("Failed to stop client session {:?}: {:?}", session_id, e);
             }
         });

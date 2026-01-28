@@ -76,7 +76,13 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 // Connection closed
                 break;
             }
-            self.sender.try_send((stream_channel_id, decrypted_data.to_vec()))?;
+            // TODO: Ignoring channel 0 streams for now
+            if stream_channel_id == 0 {
+                log::debug!("Ignoring data on channel 0 (control channel)");
+                continue;
+            }
+            self.sender
+                .try_send((stream_channel_id, decrypted_data.to_vec()))?;
         }
         Ok(())
     }
@@ -84,19 +90,14 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
 
 struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
-    receiver: Receiver<(u16, Vec<u8>)>,  // Channel id + data
+    receiver: Receiver<(u16, Vec<u8>)>, // Channel id + data
     crypt: Crypt,
 
     writer: W,
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
-    pub fn new(
-        writer: W,
-        crypt: Crypt,
-        receiver: Receiver<(u16, Vec<u8>)>,
-        stop: Trigger,
-    ) -> Self {
+    pub fn new(writer: W, crypt: Crypt, receiver: Receiver<(u16, Vec<u8>)>, stop: Trigger) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,

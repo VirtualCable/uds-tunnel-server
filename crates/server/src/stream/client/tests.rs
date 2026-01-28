@@ -57,7 +57,7 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
 
-    let tss = TunnelClientStream::new(session_id, tunnel_reader, tunnel_writer);
+    let tss = TunnelClientStream::new(session_id, 1, tunnel_reader, tunnel_writer);
 
     tokio::spawn(async move {
         tss.run().await.unwrap();
@@ -162,7 +162,11 @@ async fn test_inbound_remote_close() {
 
     // Should not receive any data
     let result = rx.try_recv();
-    assert!(result.is_err(), "Expected no data, but received some: {:?}", result);
+    assert!(
+        result.is_err(),
+        "Expected no data, but received some: {:?}",
+        result
+    );
     stop.trigger();
 }
 

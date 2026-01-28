@@ -32,16 +32,7 @@ where
         // Note: On a future, the broker could return more than a single channel stream id
         // But currently, only one is supported, althout it's prepared to be extended later
         Ok(ticket_info) => {
-            if ticket_info.remotes.len() != 1  || ticket_info.remotes[0].stream_channel_id != 1 {
-                log::error!(
-                    "Broker returned invalid number of remotes: {}",
-                    ticket_info.remotes.len()
-                );
-                return Err(anyhow::anyhow!(
-                    "Broker returned invalid number of remotes: {}",
-                    ticket_info.remotes.len()
-                ));
-            }
+            ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             let stop = Trigger::new();
             let (session_id, session) = session_manager.add_session(Session::new(
@@ -52,36 +43,39 @@ where
             ))?;
 
             // Check that the first crypted packet is the ticket again
-            let (mut read_crypt, mut write_crypt) = session.server_tunnel_crypts()?;
+            let (mut crypt_reader, mut crypt_writer) = session.server_tunnel_crypts()?;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
-            let ticket_data = tokio::time::timeout(
+            let ticket_confirm = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                read_crypt.read(&stop, &mut reader, &mut buffer),
+                crypt_reader.read(&stop, &mut reader, &mut buffer),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
 
             // If reading ticket data failed, ensure session is removed and return error
-            let (data, channel) : (Ticket, u16)  = if let Ok((bytes, channel)) = ticket_data {
-                (bytes.try_into()?, channel)
-            } else {
-                log::error!("Failed to read ticket data from client");
-                // Remove the session, that has not been used properly
-                session_manager.remove_session(&session_id);
-                return Err(anyhow::anyhow!("Failed to read ticket data from client"));
-            };
-            
-            // TODO: Check channel?
+            let (data, stream_channel_id): (Ticket, u16) =
+                if let Ok((bytes, channel_id)) = ticket_confirm {
+                    (bytes.try_into()?, channel_id)
+                } else {
+                    log::error!("Failed to read ticket data from client");
+                    // Remove the session, that has not been used properly
+                    session_manager.remove_session(&session_id);
+                    return Err(anyhow::anyhow!("Failed to read ticket data from client"));
+                };
+
+            // Channel does not matter here in fact, just extract the data. This is a MUST match
             if data != *ticket {
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
-            let response = OpenResponse::new(session_id, ticket_info.remotes.len() as u16);
+            // Use an equivalent session id for future recovery, do not shows the internal session id
+            let equiv_id = session_manager.create_equiv_session(&session_id)?;
+            let response = OpenResponse::new(equiv_id, ticket_info.remotes.len() as u16);
             let response_data = response.as_vec();
             // Send the OpenResponse
-            write_crypt
-                .write(&mut writer, channel, &response_data)
+            crypt_writer
+                .write(&mut writer, stream_channel_id, &response_data)
                 .await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers
@@ -90,12 +84,22 @@ where
             session.set_outbound_seq(1);
 
             // Open a connection to the target server using the ticket info
-            let target_stream = TcpStream::connect(ticket_info.target_addr(1).await?).await?;
+            // TODO: This currently only supports single remote target, extend later for multiple remotes
+            // Tunnel serverstreams are created here. This perfectly be a loop with all the remotes
+            let target_stream =
+                TcpStream::connect(ticket_info.target_addr(stream_channel_id).await?).await?;
 
             // Split the target stream into reader and writer
             let (target_reader, target_writer) = target_stream.into_split();
-            // Create the tunnel streams
-            let client_stream = TunnelClientStream::new(session_id, target_reader, target_writer);
+
+            let client_stream = TunnelClientStream::new(
+                session_id,
+                stream_channel_id,
+                target_reader,
+                target_writer,
+            );
+
+            // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(session_id, reader, writer);
 
             // Run the streams concurrently

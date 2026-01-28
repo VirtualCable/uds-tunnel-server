@@ -119,7 +119,10 @@ impl Crypt {
         }
         self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
         if length < (consts::TAG_LENGTH + 2) as u16 {
-            return Err(anyhow::anyhow!("decryption failure: ciphertext too short: {} bytes", length));
+            return Err(anyhow::anyhow!(
+                "decryption failure: ciphertext too short: {} bytes",
+                length
+            ));
         }
 
         let len = (length as usize) - consts::TAG_LENGTH;
@@ -138,7 +141,10 @@ impl Crypt {
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
         // First two bytes are channel
         let channel = u16::from_be_bytes(ciphertext[..2].try_into().map_err(|e| {
-            anyhow::anyhow!("decryption failure: failed to extract channel from decrypted data: {:?}", e)
+            anyhow::anyhow!(
+                "decryption failure: failed to extract channel from decrypted data: {:?}",
+                e
+            )
         })?);
         Ok((&buffer[2..len], channel))
     }

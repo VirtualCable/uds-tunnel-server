@@ -29,7 +29,6 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
-
 // HTTP related constants
 pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
 

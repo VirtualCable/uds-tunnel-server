@@ -66,7 +66,7 @@ impl SessionManager {
         let session = {
             let mut sessions = self.sessions.write().unwrap();
             let session = Arc::new(session);
-            sessions.insert(session_id,    session.clone());
+            sessions.insert(session_id, session.clone());
             session
         };
         // Also, insert an idempotent entry in equivs
@@ -149,7 +149,7 @@ impl SessionManager {
         }
     }
 
-    pub fn create_equiv_session(&self, to: SessionId) -> Result<SessionId> {
+    pub fn create_equiv_session(&self, to: &SessionId) -> Result<SessionId> {
         // If too many entries, return err
         {
             let equivs = self.equivs.read().unwrap();
@@ -159,7 +159,7 @@ impl SessionManager {
         }
         let from = SessionId::new_random();
         let mut equivs = self.equivs.write().unwrap();
-        equivs.insert(from, (to, Instant::now()));
+        equivs.insert(from, (*to, Instant::now()));
         Ok(from)
     }
 

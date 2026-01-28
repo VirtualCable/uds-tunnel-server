@@ -41,7 +41,7 @@ use crate::session::{ClientEndpoints, Session, SessionId, SessionManager};
 
 use super::*;
 
-const TEST_CHANNEL_ID: u16 = 1;  // Currently only supports channel 1
+const TEST_CHANNEL_ID: u16 = 1; // Currently only supports channel 1
 
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
@@ -286,7 +286,8 @@ async fn test_server_stream_valid_packets() -> Result<()> {
 
     // Should receive on tx on time
     let recv_msg =
-        tokio::time::timeout(std::time::Duration::from_secs(2), endpoints.rx.recv_async()).await??;
+        tokio::time::timeout(std::time::Duration::from_secs(2), endpoints.rx.recv_async())
+            .await??;
     assert_eq!(recv_msg, sent_msg);
 
     // Stop should not be triggered

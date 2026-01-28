@@ -104,6 +104,13 @@ impl TicketResponse {
                     remote
                 ));
             }
+            // TODO: Currently only stream_channel_id 1 is supported
+            if remote.stream_channel_id != 1 {
+                return Err(anyhow::anyhow!(
+                    "Invalid stream_channel_id in ticket response: {:?}",
+                    remote
+                ));
+            }
         }
         Ok(())
     }
@@ -306,13 +313,7 @@ mod tests {
         let auth_token = "test_token";
         let (mut server, api) = setup_server_and_api(auth_token).await;
         let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
-        let _m = server
-            .mock(
-                "POST",
-                "/",
-            )
-            .with_status(200)
-            .create();
+        let _m = server.mock("POST", "/").with_status(200).create();
         let result = api.stop_connection(&ticket).await;
         assert!(result.is_ok());
     }

@@ -109,10 +109,7 @@ async fn setup_testing_connection(
         TEST_REMOTE_SERVER, TEST_REMOTE_PORT
     );
     let mock = server
-        .mock(
-            "POST",
-            "/",
-        )
+        .mock("POST", "/")
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(ticket_response_json)
@@ -187,12 +184,9 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
 
     // Ensure its on session manager
     let session_manager = crate::session::SessionManager::get_instance();
-    assert!(
-        session_manager
-            .get_session(&session_response.session_id)
-            .is_some(),
-        "Session ID from server not found in session manager"
-    );
+    let _equiv_session = session_manager
+        .get_equiv_session(&session_response.session_id)
+        .expect("Session not found");
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(
@@ -378,10 +372,9 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     );
     // Ensure its on session manager
     let session_manager = crate::session::SessionManager::get_instance();
-    assert!(
-        session_manager.get_session(&session_response.session_id).is_some(),
-        "Session ID from server not found in session manager"
-    );
+    let _equiv_session = session_manager
+        .get_equiv_session(&session_response.session_id)
+        .expect("Session not found");
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(

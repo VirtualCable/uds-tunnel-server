@@ -82,22 +82,15 @@ impl Crypt {
         buffer: &'a mut PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
         let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
-        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0 {
+        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0
+        {
             // Connection closed
             return Ok((&buffer.as_slice_mut()[..0], 0)); // Empty vector indicates closed connection, ensures has 'a lifetime
         }
         // Check valid header and get payload length
         let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
         // Read the encrypted payload + tag
-        if Self::read_stream(
-            stop,
-            reader,
-            buffer.stream_slice(),
-            length as usize,
-            true,
-        )
-        .await?
-            == 0
+        if Self::read_stream(stop, reader, buffer.stream_slice(), length as usize, true).await? == 0
         {
             // Connection closed
             log::error!("Inbound stream closed while reading payload");
