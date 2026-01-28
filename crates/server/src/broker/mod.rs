@@ -59,15 +59,16 @@ impl TicketResponse {
         }
     }
 
-    pub async fn target_addr(&self, stream_channel_id: u16) -> Result<SocketAddr> {
+    pub fn get_remotes_count(&self) -> usize {
+        self.remotes.len()
+    }
+
+    pub async fn target_addr(&self, remote_id: u16) -> Result<SocketAddr> {
         // Stream channel id is the index+1 of the remotes array
-        if stream_channel_id == 0 || stream_channel_id as usize > self.remotes.len() {
-            return Err(anyhow::anyhow!(
-                "Invalid stream_channel_id: {}",
-                stream_channel_id
-            ));
+        if remote_id as usize >= self.remotes.len() {
+            return Err(anyhow::anyhow!("Invalid stream_channel_id: {}", remote_id));
         }
-        let remote = &self.remotes[(stream_channel_id - 1) as usize];
+        let remote = &self.remotes[remote_id as usize];
 
         let resolver = Resolver::builder_with_config(
             ResolverConfig::default(),

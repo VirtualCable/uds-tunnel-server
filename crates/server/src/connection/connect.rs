@@ -54,7 +54,7 @@ where
             .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
 
             // If reading ticket data failed, ensure session is removed and return error
-            let (data, stream_channel_id): (Ticket, u16) =
+            let (data, ticket_channel_id): (Ticket, u16) =
                 if let Ok((bytes, channel_id)) = ticket_confirm {
                     (bytes.try_into()?, channel_id)
                 } else {
@@ -71,11 +71,11 @@ where
             }
             // Use an equivalent session id for future recovery, do not shows the internal session id
             let equiv_id = session_manager.create_equiv_session(&session_id)?;
-            let response = OpenResponse::new(equiv_id, ticket_info.remotes.len() as u16);
+            let response = OpenResponse::new(equiv_id, ticket_info.get_remotes_count() as u16);
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer
-                .write(&mut writer, stream_channel_id, &response_data)
+                .write(&mut writer, ticket_channel_id, &response_data)
                 .await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers
@@ -83,31 +83,39 @@ where
             session.set_inbound_seq(1);
             session.set_outbound_seq(1);
 
-            // Open a connection to the target server using the ticket info
-            // TODO: This currently only supports single remote target, extend later for multiple remotes
-            // Tunnel serverstreams are created here. This perfectly be a loop with all the remotes
-            let target_stream =
-                TcpStream::connect(ticket_info.target_addr(stream_channel_id).await?).await?;
+            for remote_index in 0..ticket_info.get_remotes_count() {
+                let target_addr = ticket_info.target_addr(remote_index as u16).await?;
+                log::info!(
+                    "Established connection to remote target {} for session {:?}",
+                    target_addr,
+                    session_id
+                );
+                // Open a connection to the target server using the ticket info
+                // TODO: This currently only supports single remote target, extend later for multiple remotes
+                // Tunnel serverstreams are created here. This perfectly be a loop with all the remotes
+                let target_stream =
+                    TcpStream::connect(ticket_info.target_addr(remote_index as u16).await?).await?;
 
-            // Split the target stream into reader and writer
-            let (target_reader, target_writer) = target_stream.into_split();
+                // Split the target stream into reader and writer
+                let (target_reader, target_writer) = target_stream.into_split();
 
-            let client_stream = TunnelClientStream::new(
-                session_id,
-                stream_channel_id,
-                target_reader,
-                target_writer,
-            );
+                let client_stream = TunnelClientStream::new(
+                    session_id,
+                    (remote_index + 1) as u16,
+                    target_reader,
+                    target_writer,
+                );
+                // Run the streams concurrently
+                tokio::spawn(async move {
+                    if let Err(e) = client_stream.run().await {
+                        log::error!("Client stream error: {:?}", e);
+                    }
+                });
+            }
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(session_id, reader, writer);
 
-            // Run the streams concurrently
-            tokio::spawn(async move {
-                if let Err(e) = client_stream.run().await {
-                    log::error!("Client stream error: {:?}", e);
-                }
-            });
             tokio::spawn(async move {
                 if let Err(e) = server_stream.run().await {
                     log::error!("Server stream error: {:?}", e);
