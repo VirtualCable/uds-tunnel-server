@@ -58,7 +58,7 @@ pub struct ServerEndpoints {
 
 #[derive(Debug, Clone)]
 pub struct ClientEndpoints {
-    pub tx: Sender<Vec<u8>>,
+    pub tx: Sender<(u16, Vec<u8>)>,
     pub rx: Receiver<Vec<u8>>,
 }
 
@@ -99,20 +99,90 @@ impl SessionProxyHandle {
     }
 }
 
+struct ClientFanIn {
+    clients_senders: Vec<Option<Sender<Vec<u8>>>>,
+    sender: Sender<(u16, Vec<u8>)>,
+    receiver: Receiver<(u16, Vec<u8>)>,
+}
+
+impl ClientFanIn {
+    pub fn new() -> Self {
+        let (sender, receiver) = flume::bounded(CHANNEL_SIZE);
+        Self {
+            clients_senders: Vec::new(),
+            sender,
+            receiver,
+        }
+    }
+
+    pub fn add_client(&mut self, stream_channel_id: u16, client: Sender<Vec<u8>>) {
+        if self.clients_senders.len() < stream_channel_id as usize {
+            self.clients_senders.resize(stream_channel_id as usize, None);
+        }
+        self.clients_senders[(stream_channel_id - 1) as usize] = Some(client);
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn create_client(
+        &mut self,
+        stream_channel_id: u16,
+    ) -> (Sender<(u16, Vec<u8>)>, Receiver<Vec<u8>>) {
+        let (sender, receiver) = flume::bounded(CHANNEL_SIZE);
+        self.add_client(stream_channel_id, sender);
+        (self.sender.clone(), receiver)
+    }
+
+    pub async fn send_to_channel(&self, stream_channel_id: u16, msg: Vec<u8>) -> Result<()> {
+        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+            return Err(anyhow::anyhow!(
+                "Invalid stream_channel_id: {}",
+                stream_channel_id
+            ));
+        }
+        if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
+            client.send_async(msg).await?;
+        } else {
+            return Err(anyhow::anyhow!(
+                "No client found for stream_channel_id: {}",
+                stream_channel_id
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn recv(&self) -> Result<(u16, Vec<u8>)> {
+        let msg = self.receiver.recv_async().await?;
+        Ok(msg)
+    }
+
+    pub fn close_client(&mut self, stream_channel_id: u16) {
+        if self.clients_senders.len() >= stream_channel_id as usize {
+            self.clients_senders[(stream_channel_id - 1) as usize] = None;
+        }
+    }
+
+    pub fn receiver(&self) -> &Receiver<(u16, Vec<u8>)> {
+        &self.receiver
+    }
+
+    pub fn sender(&self) -> &Sender<(u16, Vec<u8>)> {
+        &self.sender
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.clients_senders.iter().all(|c| c.is_none())
+    }
+}
+
 pub(super) struct Proxy {
     ctrl_rx: Receiver<ProxyCommand>,
-    channel_ids: Vec<u16>,
     stop: Trigger,
 }
 
 impl Proxy {
-    pub fn new(channel_ids: &[u16], stop: Trigger) -> (Self, SessionProxyHandle) {
+    pub fn new(stop: Trigger) -> (Self, SessionProxyHandle) {
         let (ctrl_tx, ctrl_rx) = bounded(4); // Control channel, small buffer
-        let proxy = Proxy {
-            ctrl_rx,
-            channel_ids: channel_ids.to_vec(),
-            stop,
-        };
+        let proxy = Proxy { ctrl_rx, stop };
         let handle = SessionProxyHandle { ctrl_tx };
         (proxy, handle)
     }
@@ -129,21 +199,7 @@ impl Proxy {
     }
 
     async fn run_session_proxy(self) -> Result<()> {
-        let Self {
-            ctrl_rx,
-            stop,
-            channel_ids: channels_ids,
-        } = self;
-
-        if channels_ids.len() != 1 {
-            log::warn!(
-                "Session proxy started with invalid channel IDs length: {}, expected 1",
-                channels_ids.len()
-            );
-            return Ok(());
-        }
-
-        let stream_channel_id = channels_ids[0];
+        let Self { ctrl_rx, stop } = self;
 
         // TODO:
         // We will hold an array of client channels in the future, indexed by channel id
@@ -152,30 +208,27 @@ impl Proxy {
         // And viceversa, receive from client channel, and forward to server with the correct channel
         // To allow simple multiplexing of multiple channels over a single session proxy, we will have
         // a MPSC channel (for client to proxy) for all clients, and a SPSC channel (for proxy to client) for each client
+        let mut clients: ClientFanIn = ClientFanIn::new();
 
         // Now we need the other sides for both sides (our sides)
         let mut our_server_channels: Option<ServerEndpoints> = None;
-        let mut our_client_channels: Option<ClientEndpoints> = None;
 
         log::debug!("Session proxy started");
 
         loop {
+            // No clients, so we cannot receive from client side
             // We can have already the channels, but they can be disconnected
             // Any disconnected channel is considered as non-existing
             // else, this loop will busy-wait, and hold tokio
-            let (server_recv, client_recv) = if let Some(chs) = &our_server_channels
-                && let Some(chc) = &our_client_channels
+            let server_recv = if let Some(chs) = &our_server_channels
                 && !chs.rx.is_disconnected()
                 && !chs.tx.is_disconnected()
-                && !chc.rx.is_disconnected()
-                && !chc.tx.is_disconnected()
+                && !clients.receiver().is_disconnected()
+                && !clients.sender().is_disconnected()
             {
-                (
-                    Either::Left(chs.rx.recv_async()),
-                    Either::Left(chc.rx.recv_async()),
-                )
+                Either::Left(chs.rx.recv_async())
             } else {
-                (Either::Right(pending()), Either::Right(pending()))
+                Either::Right(pending())
             };
 
             tokio::select! {
@@ -196,15 +249,9 @@ impl Proxy {
                         }
                         Ok(ProxyCommand::AttachClient { channel_id, reply }) => {
                             // Note: currently we only support one channel id per proxy
-                            if channel_id != stream_channel_id {
-                                log::error!("Attempt to attach client with invalid channel id: {}, expected: {}", channel_id, stream_channel_id);
-                                break;  // exit loop on error
-                            }
                             log::debug!("Attaching client to session proxy");
-                            let (client_tx, our_rx) = bounded(CHANNEL_SIZE);
-                            let (our_tx, client_rx) = bounded(CHANNEL_SIZE);
-                            our_client_channels = Some(ClientEndpoints { tx: our_tx, rx: our_rx });
-                            let endpoints = ClientEndpoints { tx: client_tx, rx: client_rx };
+                            let (sender, receiver) = clients.create_client(channel_id);
+                            let endpoints = ClientEndpoints { tx: sender, rx: receiver };
                             let _ = reply.send(endpoints);
                         }
                         Ok(ProxyCommand::DetachServer) => {
@@ -212,12 +259,12 @@ impl Proxy {
                             our_server_channels = None;
                         }
                         Ok(ProxyCommand::DetachClient { channel_id }) => {
-                            if channel_id != stream_channel_id {
-                                log::error!("Attempt to detach client with invalid channel id: {}, expected: {}", channel_id, stream_channel_id);
-                                break;  // exit loop on error
+                            log::debug!("Detaching client {} from session proxy", channel_id);
+                            clients.close_client(channel_id);
+                            // If no more clients, exit loop
+                            if clients.is_empty() {
+                                break;  
                             }
-                            log::debug!("Detaching client from session proxy");
-                            // Now, just exit the loop. On future, when all channels are detached, we will exit the loop
                             break;
                         }
                         Err(_) => {
@@ -228,13 +275,8 @@ impl Proxy {
                 }
                 msg = server_recv => {
                     match msg {
-                        Ok((channel_id, msg)) => {
-                            // TODO:  Future Stream channel id will made to send to different client channels
-                            if stream_channel_id != channel_id {
-                                log::warn!("Received message for unknown stream channel id: {}, expected: {}", stream_channel_id, channel_id);
-                                break;  // exit loop on error
-                            }
-                            if let Some(client) = &our_client_channels && let Err(e) = client.tx.send_async(msg).await {
+                        Ok((stream_channel_id, msg)) => {
+                            if let Err(e) = clients.send_to_channel(stream_channel_id, msg).await {
                                 log::warn!("Failed to forward message to client: {:?}", e);
                                 break;  // exit loop on error
                             }
@@ -245,9 +287,9 @@ impl Proxy {
                         }
                     }
                 }
-                msg = client_recv => {
+                msg = clients.recv() => {
                     match msg {
-                        Ok(msg) => {
+                        Ok((stream_channel_id, msg)) => {
                             if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async((stream_channel_id, msg)).await {
                                 log::warn!("Failed to forward message to server: {:?}", e);
                                 break;  // exit loop on error

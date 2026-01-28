@@ -77,7 +77,7 @@ impl Session {
         stop: Trigger,
         ip: SocketAddr,
     ) -> Self {
-        let (proxy, session_proxy) = proxy::Proxy::new(&[1], stop.clone());
+        let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         proxy.run(); // Start proxy task
 
         Session {

@@ -99,7 +99,7 @@ async fn test_read_and_send() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, server, tx, stop.clone());
 
     tokio::spawn(async move {
         client.write_all(b"hello").await.unwrap();
@@ -107,7 +107,7 @@ async fn test_read_and_send() {
 
     inbound.run().await.unwrap();
 
-    assert_eq!(rx.recv().unwrap(), b"hello");
+    assert_eq!(rx.recv().unwrap().1, b"hello");
 }
 
 #[serial_test::serial(manager)]
@@ -153,7 +153,7 @@ async fn test_inbound_remote_close() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, server, tx, stop.clone());
 
     // Close the client side to simulate remote close
     drop(client);
@@ -188,7 +188,7 @@ async fn test_inbound_read_error() {
     let (tx, _rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(FailingReader, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, FailingReader, tx, stop.clone());
 
     let res = inbound.run().await;
     assert!(res.is_err());
@@ -266,12 +266,12 @@ async fn test_full_tunnel_echo() {
     let (client_side, mut server) = tokio::io::duplex(1024);
     let (server_side, mut client) = tokio::io::duplex(1024);
 
-    let (tx_in, rx_in) = flume::bounded::<Vec<u8>>(10);
+    let (tx_in, rx_in) = flume::bounded::<(u16, Vec<u8>)>(10);
     let (tx_out, rx_out) = flume::bounded::<Vec<u8>>(10);
 
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server_side, tx_in, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, server_side, tx_in, stop.clone());
     let mut outbound = TunnelClientOutboundStream::new(client_side, rx_out, stop.clone());
 
     // Task inbound
@@ -289,7 +289,7 @@ async fn test_full_tunnel_echo() {
         let stop = stop.clone();
         async move {
             while let Ok(msg) = rx_in.recv_async().await {
-                tx_out.send_async(msg).await.unwrap();
+                tx_out.send_async(msg.1).await.unwrap();
             }
             stop.trigger();
         }
@@ -314,7 +314,7 @@ async fn test_inbound_multiple_packets() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(server, tx, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, server, tx, stop.clone());
 
     tokio::spawn(async move {
         inbound.run().await.unwrap();
@@ -329,9 +329,9 @@ async fn test_inbound_multiple_packets() {
         client.write_all(b"333").await.unwrap();
     });
 
-    assert_eq!(rx.recv_async().await.unwrap(), b"111");
-    assert_eq!(rx.recv_async().await.unwrap(), b"222");
-    assert_eq!(rx.recv_async().await.unwrap(), b"333");
+    assert_eq!(rx.recv_async().await.unwrap().1, b"111");
+    assert_eq!(rx.recv_async().await.unwrap().1, b"222");
+    assert_eq!(rx.recv_async().await.unwrap().1, b"333");
     log::debug!("All packets received");
     stop.trigger();
 }

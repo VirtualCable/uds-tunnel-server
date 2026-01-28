@@ -295,7 +295,7 @@ async fn test_server_stream_valid_packets() -> Result<()> {
 
     // Now, send something that we will receibe crypted in client
     let sent_msg2 = b"Another messa!16";
-    endpoints.tx.send_async(sent_msg2.into()).await?;
+    endpoints.tx.send_async((1, sent_msg2.into())).await?;
 
     // Read from client the encrypted message
     let mut header2 = [0u8; HEADER_LENGTH];

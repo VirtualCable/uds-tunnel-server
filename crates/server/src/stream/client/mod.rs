@@ -38,15 +38,22 @@ use crate::session::{SessionId, SessionManager};
 use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, system::trigger::Trigger};
 
 struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
+    stream_channel_id: u16,
     stop: Trigger,
-    sender: Sender<Vec<u8>>,
+    sender: Sender<(u16, Vec<u8>)>,
 
     reader: R,
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
-    pub fn new(reader: R, sender: Sender<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(
+        stream_channel_id: u16,
+        reader: R,
+        sender: Sender<(u16, Vec<u8>)>,
+        stop: Trigger,
+    ) -> Self {
         TunnelClientInboundStream {
+            stream_channel_id,
             stop,
             sender,
             reader,
@@ -72,7 +79,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         Ok(count) => {
                             // Send to channel, fail if full or disconnected
                             // Does not wait for space in channel
-                            self.sender.try_send(buffer[..count].to_vec())?;
+                            self.sender.try_send((self.stream_channel_id, buffer[..count].to_vec()))?;
                         }
                         Err(e) => {
                             log::error!("Client inbound read error: {:?}", e);
@@ -177,7 +184,12 @@ where
 
         let local_stop = Trigger::new();
 
-        let mut inbound = TunnelClientInboundStream::new(reader, channels.tx, local_stop.clone());
+        let mut inbound = TunnelClientInboundStream::new(
+            stream_channel_id,
+            reader,
+            channels.tx,
+            local_stop.clone(),
+        );
 
         let mut outbound = TunnelClientOutboundStream::new(writer, channels.rx, local_stop.clone());
         tokio::spawn(async move {
