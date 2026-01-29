@@ -64,6 +64,7 @@ const TEST_STREAM_CHANNEL_ID: u16 = 1;
 // Creates a fake mocked broker API for testing
 async fn setup_testing_connection(
     proxy_v2: bool,
+    multi_channel: bool,
 ) -> (
     mockito::ServerGuard,
     mockito::Mock,
@@ -92,8 +93,9 @@ async fn setup_testing_connection(
         config.ticket_api_url = url.clone();
     }
 
-    let ticket_response_json = format!(
-        r#"
+    let ticket_response_json = if !multi_channel {
+        format!(
+            r#"
         {{
             "remotes": [
                 {{
@@ -106,8 +108,31 @@ async fn setup_testing_connection(
             "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         }}
         "#,
-        TEST_REMOTE_SERVER, TEST_REMOTE_PORT
-    );
+            TEST_REMOTE_SERVER, TEST_REMOTE_PORT
+        )
+    } else {
+        format!(
+            r#"
+        {{
+            "remotes": [
+                {{
+                    "host": "{}",
+                    "port": {},
+                    "stream_channel_id": 1
+                }},
+                {{
+                    "host": "{}",
+                    "port": {},
+                    "stream_channel_id": 2
+                }}
+            ],
+            "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }}
+        "#,
+            TEST_REMOTE_SERVER, TEST_REMOTE_PORT, TEST_REMOTE_SERVER, TEST_REMOTE_PORT
+        )
+    };
     let mock = server
         .mock("POST", "/")
         .with_status(200)
@@ -155,7 +180,8 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
-    let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(false, false).await;
 
     // Send a handshake with Open action
     let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
@@ -222,7 +248,8 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
-    let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(true, false).await;
 
     // No data sent, will timeout
     tokio::time::sleep(std::time::Duration::from_millis(HANDSHAKE_TIMEOUT_MS + 500)).await;
@@ -244,7 +271,8 @@ async fn test_connection_no_proxy_handshake_timeout() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
     for len in (0..(HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH)).step_by(10) {
-        let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
+        let (server, mock, mut client_stream, stop, ticket) =
+            setup_testing_connection(false, false).await;
 
         let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
         signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
@@ -272,7 +300,8 @@ async fn test_connection_small_handshake_timeout() -> anyhow::Result<()> {
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
-    let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(false).await;
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(false, false).await;
 
     // Send a handshake with Open action, complete ticket but no further data
     let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
@@ -309,7 +338,8 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
-    let (server, mock, mut client_stream, stop, ticket) = setup_testing_connection(true).await;
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(true, true).await;
     const TEST_STREAM_CHANNEL_ID: u16 = 1;
 
     // PROXY v2 header:
@@ -367,7 +397,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     );
     let session_response = OpenResponse::from_slice(session_response_data)?;
     assert_eq!(
-        session_response.channel_count, 1,
+        session_response.channel_count, 2,
         "Channel mismatch in response"
     );
     // Ensure its on session manager
@@ -382,20 +412,32 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt
-        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
-        .await?;
+    out_crypt.write(&mut client_stream, 1, get_request).await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server");
     let (data, channel) = in_crypt
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
-    assert_eq!(
-        channel, TEST_STREAM_CHANNEL_ID,
-        "Channel mismatch in response"
-    );
+    assert_eq!(channel, 1, "Channel mismatch in response");
     let response_str = String::from_utf8_lossy(data);
     log::info!("Received response: {}", response_str);
+    assert!(response_str.contains("HTTP/1.1 200 OK"));
+
+    // Send and get from second channel
+    let get_request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        TEST_REMOTE_SERVER
+    );
+    let get_request = get_request.as_bytes();
+    out_crypt.write(&mut client_stream, 2, get_request).await?;
+    // Read response (also encrypted)
+    log::debug!("Waiting for GET response from server on channel 2");
+    let (data, channel) = in_crypt
+        .read(&stop, &mut client_stream, &mut buffer)
+        .await?;
+    assert_eq!(channel, 2, "Channel mismatch in response");
+    let response_str = String::from_utf8_lossy(data);
+    log::info!("Received response on channel 2: {}", response_str);
     assert!(response_str.contains("HTTP/1.1 200 OK"));
 
     // Slice some time to tokio tasks to complete
