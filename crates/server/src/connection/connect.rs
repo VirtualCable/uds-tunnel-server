@@ -35,7 +35,7 @@ where
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             let stop = Trigger::new();
-            let (session_id, session) = session_manager.add_session(Session::new(
+            let session = session_manager.add_session(Session::new(
                 ticket_info.get_shared_secret()?,
                 *ticket,
                 stop.clone(),
@@ -60,7 +60,7 @@ where
                 } else {
                     log::error!("Failed to read ticket data from client");
                     // Remove the session, that has not been used properly
-                    session_manager.remove_session(&session_id);
+                    session_manager.remove_session(session.id());
                     return Err(anyhow::anyhow!("Failed to read ticket data from client"));
                 };
 
@@ -69,17 +69,11 @@ where
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
-            // Use an equivalent session id for future recovery, do not shows the internal session id
-            let equiv_id = session_manager.create_equiv_session(&session_id)?;
-            let response = OpenResponse::new(equiv_id, ticket_info.get_remotes_count() as u16);
-            let response_data = response.as_vec();
-            // Send the OpenResponse
-            crypt_writer
-                .write(&mut writer, ticket_channel_id, &response_data)
-                .await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers
             // (we already spent seq 0 for ticket exchange)
+            // In fact, we spent seq 1, because the crypt is pre-incrementing before use
+            // So next expected seq is 2 on both sides.
             session.set_inbound_seq(1);
             session.set_outbound_seq(1);
 
@@ -88,11 +82,9 @@ where
                 log::info!(
                     "Established connection to remote target {} for session {:?}",
                     target_addr,
-                    session_id
+                    session.id()
                 );
                 // Open a connection to the target server using the ticket info
-                // TODO: This currently only supports single remote target, extend later for multiple remotes
-                // Tunnel serverstreams are created here. This perfectly be a loop with all the remotes
                 let target_stream =
                     TcpStream::connect(ticket_info.target_addr(remote_index as u16).await?).await?;
 
@@ -100,7 +92,7 @@ where
                 let (target_reader, target_writer) = target_stream.into_split();
 
                 let client_stream = TunnelClientStream::new(
-                    session_id,
+                    *session.id(),
                     (remote_index + 1) as u16,
                     target_reader,
                     target_writer,
@@ -113,9 +105,17 @@ where
                 });
             }
 
-            // Server stream is the one connected to the client
-            let server_stream = TunnelServerStream::new(session_id, reader, writer);
+            // Use an equivalent session id for future recovery, avoid exposing the internal session id
+            let equiv_id = session_manager.create_equiv_session(session.id())?;
+            let response = OpenResponse::new(equiv_id, ticket_info.get_remotes_count() as u16);
+            let response_data = response.as_vec();
+            // Send the OpenResponse
+            crypt_writer
+                .write(&mut writer, ticket_channel_id, &response_data)
+                .await?;
 
+            // Server stream is the one connected to the client
+            let server_stream = TunnelServerStream::new(*session.id(), reader, writer);
             tokio::spawn(async move {
                 if let Err(e) = server_stream.run().await {
                     log::error!("Server stream error: {:?}", e);

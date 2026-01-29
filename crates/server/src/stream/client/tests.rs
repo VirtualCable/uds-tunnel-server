@@ -38,7 +38,7 @@ use shared::{
 
 use crate::session::{ServerEndpoints, Session, SessionId, SessionManager};
 
-async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::DuplexStream) {
+async fn create_test_server_stream() -> (Arc<Session>, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
     let ticket = Ticket::new([0x40u8; TICKET_LENGTH]);
@@ -52,18 +52,18 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     );
 
     // Add session to manager
-    let (session_id, session) = SessionManager::get_instance().add_session(session).unwrap();
+    let session = SessionManager::get_instance().add_session(session).unwrap();
 
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
 
-    let tss = TunnelClientStream::new(session_id, 1, tunnel_reader, tunnel_writer);
+    let tss = TunnelClientStream::new(*session.id(), 1, tunnel_reader, tunnel_writer);
 
     tokio::spawn(async move {
         tss.run().await.unwrap();
     });
 
-    (session_id, session, client_side)
+    (session, client_side)
 }
 
 async fn get_server_stream_components(
@@ -85,11 +85,11 @@ async fn get_server_stream_components(
 async fn init_server_test() -> (SessionId, tokio::io::DuplexStream, Trigger, ServerEndpoints) {
     log::setup_logging("debug", log::LogType::Test);
 
-    let (session_id, _session, client) = create_test_server_stream().await;
+    let (session, client) = create_test_server_stream().await;
 
-    let (stop, endpoints) = get_server_stream_components(&session_id).await.unwrap();
+    let (stop, endpoints) = get_server_stream_components(session.id()).await.unwrap();
 
-    (session_id, client, stop, endpoints)
+    (*session.id(), client, stop, endpoints)
 }
 
 #[serial_test::serial(manager)]
@@ -375,10 +375,13 @@ async fn test_outbound_multiple_packets() {
 #[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_client_stream_valid_packets() -> Result<()> {
-    let (_session_id, mut client, stop, endpoints) = init_server_test().await;
+    let (session_id, mut client, stop, endpoints) = init_server_test().await;
 
     let sent_msg = b"Hello, server!";
     client.write_all(sent_msg).await.unwrap();
+
+    // Should receive on tx on time
+    log::debug!("Waiting to receive message on server side");
 
     // Should receive on tx on time
     let (channel_id, recv_msg) =
@@ -386,8 +389,15 @@ async fn test_client_stream_valid_packets() -> Result<()> {
             .await??;
     assert_eq!(recv_msg, sent_msg);
 
+    log::debug!(
+        "Session Manager State 1: {:?}",
+        *SessionManager::get_instance()
+    );
+
     // Stop should not be triggered
     assert!(!stop.is_triggered());
+
+    log::debug!("Sending response back to client");
 
     // Send response back to client
     let response_msg = b"Hello, client!";
@@ -397,18 +407,26 @@ async fn test_client_stream_valid_packets() -> Result<()> {
         .await
         .unwrap();
 
+    log::debug!("Waiting to receive response on client side");
     // Read from client the forwarded mesage
     let mut buf = vec![0u8; response_msg.len()];
     client.read_exact(&mut buf).await.unwrap();
     assert_eq!(&buf, response_msg);
 
     // Trigger stop to end the test
+    log::debug!(
+        "Session Manager State 2: {:?}",
+        *SessionManager::get_instance()
+    );
+    log::debug!("Triggering stop");
+
     stop.trigger();
     // Wait a bit and theres session should be closed
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+
+    let _result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             if SessionManager::get_instance()
-                .get_session(&_session_id)
+                .get_session(&session_id)
                 .is_none()
             {
                 break;
@@ -416,6 +434,14 @@ async fn test_client_stream_valid_packets() -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     })
-    .await?;
+    .await;
+    log::debug!(
+        "Session Manager State 3: {:?}",
+        *SessionManager::get_instance()
+    );
+
+    let session = SessionManager::get_instance().get_session(&session_id);
+    assert!(session.is_none(), "Session should be removed after stop",);
+
     Ok(())
 }

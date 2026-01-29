@@ -217,9 +217,9 @@ where
                     local_stop.trigger();
                 }
                 _ = local_stop.wait_async() => {
-                    stop.trigger();
                 }
             }
+            log::debug!("Client stream for session {:?} stopping", session_id);
             // Notify stopping client side
             if let Err(e) = session_manager
                 .stop_client(&session_id, stream_channel_id)

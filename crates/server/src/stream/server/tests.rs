@@ -55,7 +55,7 @@ fn make_test_crypts() -> (Crypt, Crypt) {
     (inbound, outbound)
 }
 
-async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::DuplexStream) {
+async fn create_test_server_stream() -> (Arc<Session>, tokio::io::DuplexStream) {
     log::setup_logging("debug", log::LogType::Test);
 
     let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
@@ -70,18 +70,18 @@ async fn create_test_server_stream() -> (SessionId, Arc<Session>, tokio::io::Dup
     );
 
     // Add session to manager
-    let (session_id, session) = SessionManager::get_instance().add_session(session).unwrap();
+    let session = SessionManager::get_instance().add_session(session).unwrap();
 
     let (client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
 
-    let tss = TunnelServerStream::new(session_id, tunnel_reader, tunnel_writer);
+    let tss = TunnelServerStream::new(*session.id(), tunnel_reader, tunnel_writer);
 
     tokio::spawn(async move {
         tss.run().await.unwrap();
     });
 
-    (session_id, session, client_side)
+    (session, client_side)
 }
 
 async fn get_server_stream_components(
@@ -113,13 +113,13 @@ async fn init_server_test() -> (
 ) {
     log::setup_logging("debug", log::LogType::Test);
 
-    let (session_id, _session, client) = create_test_server_stream().await;
+    let (session, client) = create_test_server_stream().await;
 
     let (stop, endpoints, inbound_crypt, outbound_crypt) =
-        get_server_stream_components(&session_id).await.unwrap();
+        get_server_stream_components(session.id()).await.unwrap();
 
     (
-        session_id,
+        *session.id(),
         client,
         stop,
         endpoints,
@@ -250,7 +250,7 @@ async fn test_server_stream_with_invalid_packet() {
 
     // Trigger should stop the stream on invalid packet
     if !stop
-        .wait_timeout_async(std::time::Duration::from_secs(2))
+        .wait_timeout_async(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS+1))
         .await
     {
         panic!("Stream did not stop on invalid packet");

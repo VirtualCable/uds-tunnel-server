@@ -33,13 +33,14 @@ use super::*;
 
 const TEST_CHANNEL_ID: u16 = 1;
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn attach_detach_basic() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server = handle.attach_server().await?;
     let client = handle.attach_client(TEST_CHANNEL_ID).await?;
@@ -59,7 +60,7 @@ async fn messages_preserve_order() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server = handle.attach_server().await?;
     let client = handle.attach_client(TEST_CHANNEL_ID).await?;
@@ -89,7 +90,7 @@ async fn backpressure_does_not_panic() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server = handle.attach_server().await?;
     let _client = handle.attach_client(TEST_CHANNEL_ID).await?;
@@ -112,7 +113,7 @@ async fn closes_on_full_buffer() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server = handle.attach_server().await?;
     // No client, will cause buffer to fill up
@@ -138,7 +139,7 @@ async fn reattach_server_works() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server1 = handle.attach_server().await?;
     let client = handle.attach_client(TEST_CHANNEL_ID).await?;
@@ -169,7 +170,7 @@ async fn fairness_between_sides() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run();
+    let _task = proxy.run(SessionId::new_random());
 
     let server = handle.attach_server().await?;
     let client = handle.attach_client(TEST_CHANNEL_ID).await?;
@@ -196,7 +197,7 @@ async fn test_proxy_communication() -> Result<()> {
 
     let stop = Trigger::new();
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _proxy_task = proxy.run();
+    let _proxy_task = proxy.run(SessionId::new_random());
 
     let server_endpoints = handle.attach_server().await?;
     let client_endpoints = handle.attach_client(TEST_CHANNEL_ID).await?;

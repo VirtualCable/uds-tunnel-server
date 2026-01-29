@@ -30,6 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
@@ -48,6 +49,17 @@ pub struct SessionManager {
     last_cleanup: RwLock<Instant>,
 }
 
+impl fmt::Debug for SessionManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sessions = self.sessions.read().unwrap();
+        let equivs = self.equivs.read().unwrap();
+        f.debug_struct("SessionManager")
+            .field("sessions_count", &sessions.len())
+            .field("equivs_count", &equivs.len())
+            .finish()
+    }
+}
+
 impl SessionManager {
     // New is private, use get_session_manager instead
     fn new() -> Self {
@@ -61,20 +73,19 @@ impl SessionManager {
     // A new session is created with a new session id
     // Also add an idempotent entry in equivs, so wen recovering from this session id works
     // Without no more checks
-    pub fn add_session(&self, session: Session) -> Result<(SessionId, Arc<Session>)> {
-        let session_id = SessionId::new_random();
+    pub fn add_session(&self, session: Session) -> Result<Arc<Session>> {
         let session = {
             let mut sessions = self.sessions.write().unwrap();
             let session = Arc::new(session);
-            sessions.insert(session_id, session.clone());
+            sessions.insert(session.id, session.clone());
             session
         };
         // Also, insert an idempotent entry in equivs
         {
             let mut equivs = self.equivs.write().unwrap();
-            equivs.insert(session_id, (session_id, Instant::now()));
+            equivs.insert(session.id, (session.id, Instant::now()));
         }
-        Ok((session_id, session))
+        Ok(session)
     }
 
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {
@@ -108,10 +119,6 @@ impl SessionManager {
     pub async fn stop_server(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
             session.stop_server().await?;
-            // Alreasy knows that server is not running
-            if !session.is_client_running() {
-                self.remove_session(id);
-            }
         }
         Ok(())
     }
@@ -128,10 +135,10 @@ impl SessionManager {
     pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) -> Result<()> {
         if let Some(session) = self.get_session(id) {
             session.stop_client(stream_channel_id).await?;
-            // Remove the session. It's fine even if any check against
-            // this session is done after this point.
-            // Note: drop of session will invoke trigger stop
-            self.remove_session(id);
+            // If no clients are running, remove session
+            if !session.is_client_running() {
+                self.remove_session(id);
+            }
         }
         Ok(())
     }

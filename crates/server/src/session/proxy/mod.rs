@@ -33,7 +33,7 @@ use anyhow::Result;
 use flume::{Receiver, Sender, bounded};
 use futures::future::{Either, pending};
 
-use crate::consts::CHANNEL_SIZE;
+use crate::{consts::CHANNEL_SIZE, session::SessionId};
 use shared::{log, system::trigger::Trigger};
 
 enum ProxyCommand {
@@ -62,6 +62,7 @@ pub struct ClientEndpoints {
     pub rx: Receiver<Vec<u8>>,
 }
 
+#[derive(Debug)]
 pub(super) struct SessionProxyHandle {
     ctrl_tx: Sender<ProxyCommand>,
 }
@@ -117,13 +118,14 @@ impl ClientFanIn {
 
     pub fn add_client(&mut self, stream_channel_id: u16, client: Sender<Vec<u8>>) {
         if self.clients_senders.len() < stream_channel_id as usize {
-            self.clients_senders.resize(stream_channel_id as usize, None);
+            self.clients_senders
+                .resize(stream_channel_id as usize, None);
         }
         self.clients_senders[(stream_channel_id - 1) as usize] = Some(client);
     }
 
     #[allow(clippy::type_complexity)]
-    pub fn create_client(
+    pub fn new_channel_for(
         &mut self,
         stream_channel_id: u16,
     ) -> (Sender<(u16, Vec<u8>)>, Receiver<Vec<u8>>) {
@@ -141,12 +143,8 @@ impl ClientFanIn {
         }
         if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
             client.send_async(msg).await?;
-        } else {
-            return Err(anyhow::anyhow!(
-                "No client found for stream_channel_id: {}",
-                stream_channel_id
-            ));
         }
+        // If no client, just drop the message
         Ok(())
     }
 
@@ -155,22 +153,17 @@ impl ClientFanIn {
         Ok(msg)
     }
 
+    /// Closes the client for the given stream_channel_id
     pub fn close_client(&mut self, stream_channel_id: u16) {
         if self.clients_senders.len() >= stream_channel_id as usize {
             self.clients_senders[(stream_channel_id - 1) as usize] = None;
         }
     }
 
-    pub fn receiver(&self) -> &Receiver<(u16, Vec<u8>)> {
-        &self.receiver
-    }
-
-    pub fn sender(&self) -> &Sender<(u16, Vec<u8>)> {
-        &self.sender
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.clients_senders.iter().all(|c| c.is_none())
+        self.clients_senders
+            .iter()
+            .all(|sender_opt| sender_opt.is_none())
     }
 }
 
@@ -187,13 +180,21 @@ impl Proxy {
         (proxy, handle)
     }
 
-    pub fn run(self) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            // Catch panics to avoid bringing down the server
-            if let Err(e) = self.run_session_proxy().await {
-                log::error!("Session proxy encountered an error: {:?}", e);
-            } else {
-                log::debug!("Session proxy exited normally");
+    pub fn run(self, parent: SessionId) -> tokio::task::JoinHandle<()> {
+        tokio::spawn({
+            let stop = self.stop.clone();
+            async move {
+                // Catch panics to avoid bringing down the server
+                if let Err(e) = self.run_session_proxy().await {
+                    log::error!("Session proxy encountered an error: {:?}", e);
+                } else {
+                    log::debug!("Session proxy exited normally");
+                }
+                // Exiting proxy means end of session, as there is no possible recovery
+                stop.trigger();
+                let session_manager = crate::session::manager::SessionManager::get_instance();
+                log::debug!("Removing session {:?} from {:?}", parent, session_manager);
+                session_manager.remove_session(&parent);
             }
         })
     }
@@ -201,13 +202,6 @@ impl Proxy {
     async fn run_session_proxy(self) -> Result<()> {
         let Self { ctrl_rx, stop } = self;
 
-        // TODO:
-        // We will hold an array of client channels in the future, indexed by channel id
-        // All channels id, starting at one, must be sequential, to make a simple array possible
-        // The idea is receive a message from server with channel id, and forward to the correct client channel
-        // And viceversa, receive from client channel, and forward to server with the correct channel
-        // To allow simple multiplexing of multiple channels over a single session proxy, we will have
-        // a MPSC channel (for client to proxy) for all clients, and a SPSC channel (for proxy to client) for each client
         let mut clients: ClientFanIn = ClientFanIn::new();
 
         // Now we need the other sides for both sides (our sides)
@@ -216,15 +210,13 @@ impl Proxy {
         log::debug!("Session proxy started");
 
         loop {
-            // No clients, so we cannot receive from client side
-            // We can have already the channels, but they can be disconnected
-            // Any disconnected channel is considered as non-existing
-            // else, this loop will busy-wait, and hold tokio
+            // Disconnected server channels are treated as no server connected
+            // Because we can disconnect before unataching the server.
+            // The clients (the parts that connect to the remote server)
+            // Have a common channel, that persists until end of proxy
             let server_recv = if let Some(chs) = &our_server_channels
                 && !chs.rx.is_disconnected()
                 && !chs.tx.is_disconnected()
-                && !clients.receiver().is_disconnected()
-                && !clients.sender().is_disconnected()
             {
                 Either::Left(chs.rx.recv_async())
             } else {
@@ -250,22 +242,25 @@ impl Proxy {
                         Ok(ProxyCommand::AttachClient { channel_id, reply }) => {
                             // Note: currently we only support one channel id per proxy
                             log::debug!("Attaching client to session proxy");
-                            let (sender, receiver) = clients.create_client(channel_id);
+                            let (sender, receiver) = clients.new_channel_for(channel_id);
                             let endpoints = ClientEndpoints { tx: sender, rx: receiver };
                             let _ = reply.send(endpoints);
                         }
                         Ok(ProxyCommand::DetachServer) => {
                             log::debug!("Detaching server from session proxy");
                             our_server_channels = None;
+                            // If no clients here, stop the proxy as
+                            // this is not recoverable
+                            if clients.is_empty() {
+                                log::debug!("No more clients, stopping session proxy");
+                                break;
+                            }
                         }
                         Ok(ProxyCommand::DetachClient { channel_id }) => {
                             log::debug!("Detaching client {} from session proxy", channel_id);
                             clients.close_client(channel_id);
-                            // If no more clients, exit loop
-                            if clients.is_empty() {
-                                break;  
-                            }
-                            break;
+                            // With no more clients, session will trigger stop
+                            // No need to do anything else here
                         }
                         Err(_) => {
                             log::debug!("Control channel closed, stopping session proxy");
@@ -303,7 +298,6 @@ impl Proxy {
                 }
             }
         }
-        log::info!("Session proxy stopped");
         Ok(())
     }
 }
