@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/server", "crates/shared"]
+members = ["crates/client", "crates/server", "crates/shared"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -31,7 +31,6 @@ tokio = { version = "1.49.0", features = [
 futures = "0.3.31"
 async-trait = "0.1.89"
 tokio-test = "0.4.5"
-hickory-resolver = "*"
 
 # channel
 flume = { version = "0.12.0", features = ["async"] }

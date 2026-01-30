@@ -28,7 +28,6 @@ tokio-rustls = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
-hickory-resolver = { workspace = true }
 
 # channel
 flume = { workspace = true }

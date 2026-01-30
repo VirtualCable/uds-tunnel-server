@@ -31,7 +31,6 @@
 use std::net::SocketAddr;
 
 use anyhow::Result;
-use hickory_resolver::{Resolver, config::*, name_server::TokioConnectionProvider};
 use reqwest::Client;
 
 use crate::config;
@@ -63,32 +62,15 @@ impl TicketResponse {
         self.remotes.len()
     }
 
-    pub async fn target_addr(&self, remote_id: u16) -> Result<SocketAddr> {
+    pub async fn target_addr(&self, remote_id: u16) -> Result<String> {
         // Stream channel id is the index+1 of the remotes array
         if remote_id as usize >= self.remotes.len() {
             return Err(anyhow::anyhow!("Invalid stream_channel_id: {}", remote_id));
         }
-        let remote = &self.remotes[remote_id as usize];
-
-        let resolver = Resolver::builder_with_config(
-            ResolverConfig::default(),
-            TokioConnectionProvider::default(),
-        )
-        .build();
-
-        match resolver.lookup_ip(&remote.host).await {
-            Ok(lookup) => {
-                let ip = lookup.iter().next().ok_or_else(|| {
-                    anyhow::anyhow!("No IP addresses found for host: {}", remote.host)
-                })?;
-                Ok(SocketAddr::new(ip, remote.port))
-            }
-            Err(e) => Err(anyhow::anyhow!(
-                "DNS resolution failed for {}: {}",
-                remote.host,
-                e
-            )),
-        }
+        Ok(format!(
+            "{}:{}",
+            self.remotes[remote_id as usize].host, self.remotes[remote_id as usize].port
+        ))
     }
 
     pub fn validate(&self) -> Result<()> {
