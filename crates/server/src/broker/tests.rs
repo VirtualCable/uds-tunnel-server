@@ -4,6 +4,8 @@ use mockito::Server;
 use shared::consts::TICKET_LENGTH;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+
+// Pre checked base64 Kyber keys, ticket, etc.. for testing
 const PRIVATE_KEY_768_TESTING: &str = "TzpPr8sQk1BBjmEFpTqCqdhTNfGdTpK37GBFaQWnigW8AZqMzrlSxRa+grYDdjJ1JiaiuSkpptCtIKsf\
     6QiD6HRJrAPNCJyxbmihz3KS0IOmjzUx4BYh/Ap/nYbE/0qWZFG0KdGKtSKWnOoQFCph0vOLQKnN8HGq\
     ZMty+qxBWDZ7qJAQxaU2SpJSzPEeakmP6jxvQTjIMXTGN/iD8ViqntbIn7uyWoZmhpwMu0ioCvYZiahl\
@@ -67,6 +69,18 @@ vaSdDPA8O1h8sGhck2ewpLR3dGCHeyeJsEws1IiCnRa2cqxA+LxenDJV1WeGjWogd+MiNioBJ+kzpLpe
 AFohLlJG5zmHijRc/O4OYbzvH/NisQARHwX3ScApN7qAjG49j2fwJgcrKCM=";
 
 const TICKET_ID: &str = "c6s9FAa5fhb854BVMckqUBJ4hOXg2iE5i1FYPCuktks4eNZD";
+
+
+// Original JSON structure before encryption
+// {
+//     'remotes': 
+//         [
+//             {'host': 'example.com', 'port': 12345},
+//             {'host': 'example.com', 'port': 12345}
+//         ],
+//     'notify': 'notify_ticket',
+//     'shared_secret': '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+// }
 
 const TICKET_RESPONSE_JSON: &str = r#"{
     "algorithm": "AES-256-GCM",
