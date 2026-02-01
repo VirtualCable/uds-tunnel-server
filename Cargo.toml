@@ -59,6 +59,9 @@ aes-gcm = "0.10.3"
 hkdf = "0.12"
 sha2 = "0.10.9"
 
+# Post-quantum cryptography
+libcrux-ml-kem = "0.0.6"
+
 # regex
 regex = "1.12.2"
 

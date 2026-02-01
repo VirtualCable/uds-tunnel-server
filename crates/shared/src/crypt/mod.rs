@@ -35,10 +35,15 @@ use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
 
 use crate::log;
 
+// Comms related
 pub mod consts;
 pub mod stream;
 pub mod tunnel;
 pub mod types;
+
+// PQC related
+pub mod kem;
+pub mod ticket;
 
 pub struct Crypt {
     cipher: Aes256Gcm,

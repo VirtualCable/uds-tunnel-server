@@ -39,8 +39,10 @@ use super::{Crypt, types::SharedSecret};
 
 #[derive(Debug)]
 pub struct Material {
+    pub key_payload: SharedSecret,
     pub key_receive: SharedSecret,
     pub key_send: SharedSecret,
+    pub nonce_payload: [u8; 12],
 }
 
 pub fn derive_tunnel_material(
@@ -52,24 +54,28 @@ pub fn derive_tunnel_material(
     // HKDF-Extract + Expand with SHA-256
     let hk = Hkdf::<Sha256>::new(Some(ticket.as_ref()), shared_secret.as_ref());
 
-    let mut okm = [0u8; 96];
+    let mut okm = [0u8; 108];
     hk.expand(b"openuds-ticket-crypt", &mut okm)
         .map_err(|_| anyhow::format_err!("HKDF expand failed"))?;
 
-    let mut _not_used = [0u8; 32];
+    let mut key_payload = [0u8; 32];
     let mut key_send = [0u8; 32];
     let mut key_receive = [0u8; 32];
+    let mut nonce_payload = [0u8; 12];
 
     // Skipping first 32 bytes being not used here
-    _not_used.copy_from_slice(&okm[0..32]);
+    key_payload.copy_from_slice(&okm[0..32]);
     key_send.copy_from_slice(&okm[32..64]);
     key_receive.copy_from_slice(&okm[64..96]);
+    nonce_payload.copy_from_slice(&okm[96..108]);
 
     // Note: The key_send is the key used by sender, so we receive with key_receive
     //       and send with key_send that the client will use to receive our data
     Ok(Material {
+        key_payload: key_payload.into(),
         key_receive: key_send.into(),
         key_send: key_receive.into(),
+        nonce_payload,
     })
 }
 

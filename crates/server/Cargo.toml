@@ -11,6 +11,7 @@ anyhow = { workspace = true }
 
 # serialization
 serde = { workspace = true }
+base64 = { workspace = true }
 
 # http
 reqwest = { workspace = true }

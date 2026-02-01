@@ -9,10 +9,20 @@ anyhow = { workspace = true }
 rand = { workspace = true }
 num_enum = { workspace = true }
 
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Encoding/Decoding
+base64 = { workspace = true }
+
 # Encryption
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
+
+# Post-quantum cryptography
+libcrux-ml-kem = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
