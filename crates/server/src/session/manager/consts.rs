@@ -27,7 +27,7 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 // Interval for cleaning up old equivalent sessions
 pub(super) const CLEANUP_EQUIV_SESSIONS_INTERVAL_SECS: u64 = 16;

@@ -69,7 +69,6 @@ fn gen_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
     ))
 }
 
-#[cfg(debug_assertions)]
 pub mod debug;
 
 #[cfg(test)]

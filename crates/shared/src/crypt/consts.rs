@@ -27,7 +27,7 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 pub const MAX_PACKET_SIZE: usize = 4096; // Hard limit for packet size. Anythig abobe this will be rejected.
 pub const HEADER_LENGTH: usize = 8 + 2; // counter (8 bytes) + length (2 bytes)

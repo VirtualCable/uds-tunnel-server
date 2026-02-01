@@ -27,7 +27,7 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Authors: Adolfo Gómez, dkmaster at dkmon dot compub mod broker;
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use anyhow::Result;
 
 pub fn hex_to_bytes<const N: usize>(input: &str) -> Result<[u8; N]> {
