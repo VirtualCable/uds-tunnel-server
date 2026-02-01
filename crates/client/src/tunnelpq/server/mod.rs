@@ -89,27 +89,27 @@ impl TunnelListener {
     }
 }
 
-pub async fn create_listener(
-    local_port: Option<u16>,
-    enable_ipv6: bool,
-) -> Result<TcpListener> {
-    let addr = format!(
-        "{}:{}",
-        if enable_ipv6 {
-            consts::LISTEN_ADDRESS_V6
-        } else {
-            consts::LISTEN_ADDRESS
-        },
-        local_port.unwrap_or(0)
-    );
-    let listener = tokio::net::TcpListener::bind(&addr)
-        .await
-        .context("Failed to create TCP listener")?;
+// pub async fn create_listener(
+//     local_port: Option<u16>,
+//     enable_ipv6: bool,
+// ) -> Result<TcpListener> {
+//     let addr = format!(
+//         "{}:{}",
+//         if enable_ipv6 {
+//             consts::LISTEN_ADDRESS_V6
+//         } else {
+//             consts::LISTEN_ADDRESS
+//         },
+//         local_port.unwrap_or(0)
+//     );
+//     let listener = tokio::net::TcpListener::bind(&addr)
+//         .await
+//         .context("Failed to create TCP listener")?;
 
-    log::debug!("TCP listener created on {}", addr);
+//     log::debug!("TCP listener created on {}", addr);
 
-    Ok(listener)
-}
+//     Ok(listener)
+// }
 
 // Tests module
 #[cfg(test)]

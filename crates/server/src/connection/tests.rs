@@ -48,6 +48,7 @@ use shared::{
     protocol::{consts::HANDSHAKE_V2_SIGNATURE, handshake::HandshakeCommand},
     system::trigger::Trigger,
     ticket::Ticket,
+    crypt::kem::{debug::get_debug_kem_keypair_768, set_comms_keypair},
 };
 
 use crate::{config, connection::types::OpenResponse, session::SessionManager};
@@ -57,9 +58,15 @@ use crate::{config, connection::types::OpenResponse, session::SessionManager};
 const TEST_REMOTE_SERVER: &str = "echo.free.beeceptor.com";
 const TEST_REMOTE_PORT: u16 = 80;
 
+const TEST_REMOTE_SERVER2: &str = "echo.free.beeceptor.com";
+const TEST_REMOTE_PORT2: u16 = 80;
+
 // Note: Currently broker only supports one channel, so we use channel 1 that is the one used
 // Channel 0 is reserved for control messages
 const TEST_STREAM_CHANNEL_ID: u16 = 1;
+
+// Ticket used to encrypt sample responses
+pub const TICKET_ID: &str = "c6s9FAa5fhb854BVMckqUBJ4hOXg2iE5i1FYPCuktks4eNZD";
 
 // Creates a fake mocked broker API for testing
 async fn setup_testing_connection(
@@ -76,12 +83,17 @@ async fn setup_testing_connection(
     log::debug!("Setting up testing connection (proxy_v2={})", proxy_v2);
 
     let auth_token = "test_token";
-    let ticket = Ticket::new_random();
     let fake_src_ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let stop = Trigger::new();
 
     let mut server = Server::new_async().await;
     let url = server.url() + "/"; // For testing, our base URL will be the mockito server
+
+    // Set global comms config to known testint values
+    {
+        let (private_key, public_key) = get_debug_kem_keypair_768();
+        set_comms_keypair(private_key, public_key);
+    }
 
     // Setup global config for tests
     {
@@ -94,44 +106,46 @@ async fn setup_testing_connection(
     }
 
     let ticket_response_json = if !multi_channel {
-        format!(
-            r#"
-        {{
-            "remotes": [
-                {{
-                    "host": "{}",
-                    "port": {},
-                    "stream_channel_id": 1
-                }}
-            ],
-            "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-            "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        }}
-        "#,
-            TEST_REMOTE_SERVER, TEST_REMOTE_PORT
-        )
+        // Decripted values are:
+        // {
+        //     "remotes": [
+        //         {
+        //             "host": "echo.free.beeceptor.com",
+        //             "port": 80,
+        //             "stream_channel_id": 1
+        //         }
+        //     ],
+        //     "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        //     "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        // }
+        r#"{
+            "algorithm": "AES-256-GCM",
+            "ciphertext": "kZSEYJN/z3zZTkmEZBsCwIVhG5MmtxTRZijJ/PGsX27TGv3qv7086X9PWXN3HFjyiZ22LbZD2fDJP7GlxtwjWQkqh8vx0c/E16xMFHDQuEItEJVZFUD3qcFHHlVuhukV7N1IDGer6YC6cxvE+J1z9ei6+97hEkp6S9g9SJmj+YbaCR63qdiKFpXDcs863ZFnFdUy3lWvpC42hD16xwsYcIOePXVknFlqGQ05eKK8NFH13T5l5890UUn5hcefGO6fBwQxU5Z09BYXZ3TFxpNCoFOoCE36b8SCZIRqggI0nN5zBsSeyv+BnQIVlerA5Pmt68pSfutGreYttS30n7ViYaLuBSKUBeS7NhZ/giyZF9A56StDOa2HH5/31Jja8cyFTKLi4XIcWPFCt7cMu4ADD3hifh3OSXDzs9QUmJmXWGasrIArYnhHfQxBPH7KQ9TihjywthRG5orJX9guJlYFdgHDtlYSyY0PTzHZzrTZXBCTBi/jo8T1EpHB+vGua/C1nssbeDPUqzNnCgkIhTXr7AmOaXMy3xZ8cfCsL+mMzbMlQUfhkK22S/7G4gi5t0/24iN/qN1xK2qo/rpPPwZ1W/+3NFgQ1saO/yiy8BIgfd1NDj6+d4fRrghETerH4gIrh64onmAu3YSGyDG+Tmo7DMIWjzwDEYxb30AGWe+0+FCDvU/l8JnNDTqdlZqimJmBj0zZ3UR4TORm+bGt4ODNL8DYIqLIvTYXsDGiWzwsLm+v2mGgij4OerDWuvaNn3suGoKsaY1nJwHtVRXXy6ViNIOwnlh18rUdtsZ9B2pVvQs/uQTR+b8YJOMKTGEFEO3d5XluLgFuwZ7QRtEGKCy7flkGVEzWygjeULtFydHviS8khcOkpWRRjpe3ID6h9leUIG1wdYO7lVvOVf82X611Ex5/g/RNl6ZHySup3oFIcTwdka5ypbN77nQg90Ti/+DLb3sLeEYy6vZW8BBOV9gRYWiHDrzxTeEOS7irZ2f+bzB6P3ff7lROEVHdAojPuZjXN3i9SXNdcMqcRUq4AGiIIomB8Dg0P4zH7ns9qEhgAZb117s18ugi8dJBIRcb0SeOPaHCjDyezS2gv6RVksxIhpfdscEtTLlyjjxwMJxMJq0C42FZFYIm1AwYXJ1NAAX4bg8wMuA3Q8qUIOpgoq9i9LQitzeGIBZj336MizvgVLJUEKrWsXv77p2fYUh6Hc/8J5JMjp5ifM7X2SmEBl0coBpaHMLrTw9pdPEWJbJWn4k6tpbDFlmJtaTviF2bToJ398vwlsyUT/eO9tKIZuMM7GoxYlbHtH+8ttTaajbpfufuIreMW3WdJjjnPBJJ79kodHbMR+UPxwuIEuUIqWFNGQN4/6TnbSRNUsMpso84IbiIPFbQ8goAlZds9cf65cRvpkHitLDTFqh6tEmOUwdM2vlZqcjMk17dvaRgZDAbfPw=",
+            "data": "9F8HAK6YkJ2kIcX+IhsPhvV3NISJC05z1W84zsK+apovP7tD7tpIkK5RLYNCKGDuJgNzQqMU1Wdj/B+YTLOcpJaBMzyU6K93Ah3GdtTKe4LD+9U5j3Li5RJ6GAJ2EmWfl1eDQBM+by7HwNnYln3mbMr46D25EfB3bV1I0T4VVnZTRQU0fkzllI8oSFcbrJH6XZ7/3kOBhrf7vGz5XWExpbVGbZXfwb4/OqLFrekVsqP7Zkld+UxWJI8r593PoielOu7OzcjuIi9qy45scBl/AHIrczf4X7Uj3aRUFLLBIam7JivSDlLeuFkO9NMpQ3Rr8o5vViTY7pTw"
+        }"#
     } else {
-        format!(
-            r#"
-        {{
-            "remotes": [
-                {{
-                    "host": "{}",
-                    "port": {},
-                    "stream_channel_id": 1
-                }},
-                {{
-                    "host": "{}",
-                    "port": {},
-                    "stream_channel_id": 2
-                }}
-            ],
-            "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
-            "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-        }}
-        "#,
-            TEST_REMOTE_SERVER, TEST_REMOTE_PORT, TEST_REMOTE_SERVER, TEST_REMOTE_PORT
-        )
+        // Decripted values are:
+        // {
+        //     "remotes": [
+        //         {
+        //             "host": "echo.free.beeceptor.com",
+        //             "port": 80,
+        //             "stream_channel_id": 1
+        //         },
+        //         {
+        //             "host": "echo.free.beeceptor.com",
+        //             "port": 80,
+        //             "stream_channel_id": 2
+        //         }
+        //     ],
+        //     "notify": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        //     "shared_secret": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        // }
+        r#"{
+            "algorithm": "AES-256-GCM",
+            "ciphertext": "FHeg74x1Mt4pFTakGOdORqKb6KllCd7XoP7Pqq0CFC9+RjmqdNjZn0SKfw2FWKQxAb7+EScYBejkn4FekFXoB8QQmkzRdxa3UWcCb6HzI2ZWH2lBg9sIeaQRzUthSwbKEgEcFHM+xXv3bEMfToaeNyfYPeI/XnlSSwZ83Hh/okY0J5BM0jSDjeggIn6aAtX5zOvGHYX9gAu+6ppOfCxxm+gDsxswmwAXCIcWB2OjjWTyJMcRhJ2xrORAyq+ThKH5cBp3yPFRI77ogNgZbCmQnc/X72lFxCfPgNY0grR2fwTSPB3lu/LwLW3JrMesG4vY64R77+od+8CvPRA7GWpryhAS0l+F4ddjWJLEJgS9LK1mufcvUBwPaVe61Ojq70hwngPbq0T2zIrwhIfAuV3QTfWh3XTP+7l78BOo06N7Z2RF4aYu0z3jyz5uZ1vCL1ANqGOGzQNXP5XU8662buI0IbOzYZCB2PemiqfJ5JIZDovibl8jLyi8rBDpkmMaPLdvVItfBwWfW+txMrFVCXBbBdSUiBqjCty9kDHDqxKCeoO6S7b0YbLhlQlh+JfTvw3uS+wpVJbSXavoDEOFk+46DT5Za7Ne/hzMTuhTIYY8OslVxgCPfoFMxNWbJb9IEAmZgGuDH4JmXbmZKkNmZDMfNxT7zMf/0jCJGOIMIHujwdMDybcI4DwXDq2UOdbKh6RZzzFs9RkGVkpyYkCMeXScfxLjRk5bZ0eZEovTHTLsQhDPN+mJpN/ocInoLN6rZAnNw/AZd1V7TiVcIxKrvxgTlGcPutMy582yQdQW/Mdg2scLPKmuZCRuXdsKkqe/ib+K/G+yVEmq59Spn8mAxFaxxcSlgomLYYw8KEHnLqIAWZgzGVUYw3GCoe/vFHsaIhnpymZY1S93kKxqJv8JX24Dv5u8cl/8O49r9xYCUkZNxmOIdCcg86dS/8FfTGYXuPISvlH7keGtbcpAyR9jsBPVS0ZPr1sIIiuFjEyOkoClc/5/6FJi4gJvT3Gspywy4V/94TJPtdZ3dwFt7A/H6Cfege3ZN/HlNX8raBFI9dUoAENJmIdrO0p0VnpUD5YAnx7BX0ZUPL+9FhOHdxpw8fg8RQnyhht7KTHgbV7NBv1smftF2W8gKC6S/28cguGb2ksY46cDH1BRSBk8tFATKdivrLCwEe+ehJ3+xW503Hg9Fy/FStybUF6LIMKqkWj1qMZu5ax30IcsG9c9dn98QDEZ3rsTd+OKH8P+JtwUhuyISnnFnuxqFg9Sz/xi2L19cbUxO0fWOnDAqYIxQfLFoD74X+W5lDqGJ0zmNqTjjulKZSevkseZCRX7R3b8tPELdxca9CG6Lwr0YtEwXDh8uL5s0UFTKv++mGhTD3a+KWTujwDpi49mkBo+CoEXw0uIoamwyugsfO497q/Gp/5RcUP1Ue7A4XQ9SMTG+tyh4cQufAw=",
+            "data": "RFXKo7mYtbrcgK/OhbYsVAKcKF37Zg6vaIDnzkYq1oCVwBEFP2l+4Mp5Cu0L8lVJqjAyvAWQkv4S9zEs/n9hVRZC0kgEmrWP66yP5niaZShXUiZ5s9A+bRqvjltrSIiYNCRp1mb34+K1145oxu3fJ9eePc5Cqov1pXW4qoGZgP6Hvgr3e6AHRkuhb/NDy0fCBoAAqfaWQ8WOrx0zNcd76VMF45fXrsXJkZivaV4rLzaDMW/KL9ft88qbeoJc3us/xrMkt/vZqEyoWmMNc51aDZsRJ55CvCiJbVUKniIs6yU+JXSGWSmeZ7d+aW5IDvjeHeAoI08z+8hvo32bzPfFEmab19ffmAANIjkKWF83ZusvsXI7A2rlji6eI2nvZVcPPcNaGjelfvc+8r1qczEYoa1Y+YbQ0buyhIWNyFHDkf+wlQ=="
+        }"#
     };
     let mock = server
         .mock("POST", "/")
@@ -155,7 +169,13 @@ async fn setup_testing_connection(
     SessionManager::get_instance().finish_all_sessions().await;
 
     // Pass the base url (without /ui) to the API
-    (server, mock, client_stream, stop, ticket)
+    (
+        server,
+        mock,
+        client_stream,
+        stop,
+        Ticket::new(TICKET_ID.as_bytes().try_into().unwrap()),
+    )
 }
 
 fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {

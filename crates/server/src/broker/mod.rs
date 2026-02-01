@@ -171,5 +171,6 @@ pub fn get() -> impl BrokerApi {
     )
 }
 
+// pub because constants are used elsewhere
 #[cfg(test)]
-mod tests;
+pub mod tests;
