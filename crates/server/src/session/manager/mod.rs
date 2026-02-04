@@ -116,25 +116,22 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn stop_server(&self, id: &SessionId) -> Result<()> {
+    pub async fn stop_server(&self, id: &SessionId) {
         if let Some(session) = self.get_session(id) {
-            session.stop_server().await?;
+            session.stop_server().await;
         }
-        Ok(())
     }
 
-    pub async fn fail_server(&self, id: &SessionId) -> Result<()> {
+    pub async fn fail_server(&self, id: &SessionId) {
         if let Some(session) = self.get_session(id) {
-            session.fail_server().await?;
+            session.fail_server().await;
         }
-        Ok(())
     }
 
-    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) -> Result<()> {
+    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) {
         if let Some(session) = self.get_session(id) {
-            session.session_proxy.stop_client(stream_channel_id).await?;
+            session.stop_client(stream_channel_id).await;
         }
-        Ok(())
     }
 
     /// Note: equivs will fail if the target session is removed or the equiv entry does not exist

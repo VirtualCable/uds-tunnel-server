@@ -27,20 +27,15 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::os::unix::net::SocketAddr;
-
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
+use super::*;
+
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
 };
 
-use super::*;
-
-use shared::{
-    crypt::{ticket, types::SharedSecret},
-    ticket::Ticket,
-};
+use shared::{crypt::types::SharedSecret, ticket::Ticket};
 
 const TEST_CHANNEL_ID: u16 = 1;
 
@@ -154,7 +149,7 @@ async fn attach_detach_basic() -> Result<()> {
 
     assert!(!server.tx.is_disconnected());
 
-    handle.stop_server().await?; // Will end proxy, and in turn, the session 
+    handle.stop_server().await; // Will end proxy, and in turn, the session 
 
     // Should trigger stop, check on a timeout to avoid test lock
     assert!(
@@ -177,7 +172,7 @@ async fn messages_preserve_order() -> Result<()> {
         SharedSecret::new([0u8; 32]),
         Ticket::new_random(),
         stop.clone(),
-        "172.27.0.1:1234".parse().unwrap(),
+        "127.1.2.3:1234".parse().unwrap(),
         vec![host_port],
     ))?;
     let _task = proxy.run(*session.id());
@@ -272,7 +267,7 @@ async fn reattach_server_works() -> Result<()> {
         SharedSecret::new([0u8; 32]),
         Ticket::new_random(),
         stop.clone(),
-        "172.27.0.1:1234".parse().unwrap(),
+        "127.1.2.3:1234".parse().unwrap(),
         vec![host_port],
     ))?;
     let _task = proxy.run(*session.id());
@@ -305,7 +300,7 @@ async fn reattach_server_works() -> Result<()> {
     assert_eq!(chan, TEST_CHANNEL_ID);
 
     // Fail server will allow us to reattach
-    handle.fail_server().await?;
+    handle.fail_server().await;
 
     let server2 = handle.start_server().await?;
     server2
@@ -323,7 +318,7 @@ async fn reattach_server_works() -> Result<()> {
     assert_eq!(chan, TEST_CHANNEL_ID);
 
     // Close server will trigger stop as server is gone
-    handle.stop_server().await?;
+    handle.stop_server().await;
     assert!(
         stop.wait_timeout_async(std::time::Duration::from_secs(1))
             .await

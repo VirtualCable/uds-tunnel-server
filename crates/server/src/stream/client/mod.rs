@@ -225,16 +225,9 @@ where
             }
             log::debug!("Client stream for session {:?} stopping", session_id);
             // Notify stopping client side
-            if let Err(e) = session_manager
+            session_manager
                 .stop_client(&session_id, stream_channel_id)
-                .await
-            {
-                log::error!(
-                    "Error stopping client stream for session {:?}: {:?}",
-                    session_id,
-                    e
-                );
-            }
+                .await;
         });
         Ok(())
     }

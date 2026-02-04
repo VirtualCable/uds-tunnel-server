@@ -170,20 +170,20 @@ impl Session {
         Ok(())
     }
 
-    pub(super) async fn stop_server(&self) -> Result<()> {
+    pub(super) async fn stop_server(&self)  {
         self.server_running
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.session_proxy.stop_server().await
+        self.session_proxy.stop_server().await;
     }
 
-    pub(super) async fn fail_server(&self) -> Result<()> {
+    pub(super) async fn fail_server(&self)  {
         self.server_running
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.session_proxy.fail_server().await
+        self.session_proxy.fail_server().await;
     }
 
-    pub(super) async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
-        self.session_proxy.stop_client(stream_channel_id).await
+    pub(super) async fn stop_client(&self, stream_channel_id: u16)  {
+        self.session_proxy.stop_client(stream_channel_id).await;
     }
 }
 

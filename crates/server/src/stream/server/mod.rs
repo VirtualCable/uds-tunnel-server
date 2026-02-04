@@ -263,9 +263,8 @@ where
                     session_id
                 );
                 // Notify failing server side
-                if let Err(e) = session_manager.fail_server(&session_id).await {
-                    log::error!("Failed to fail server session {:?}: {:?}", session_id, e);
-                }
+                session_manager.fail_server(&session_id).await;
+
                 // Wait a bit for recovery grace period
                 tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
                     .await;
@@ -279,9 +278,7 @@ where
                     }
                     log::debug!("Stopping session {:?} after error grace period", session_id);
                     // Notify stopping server side, will stop proxy and remove session
-                    if let Err(e) = session_manager.stop_server(&session_id).await {
-                        log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
-                    }
+                    session_manager.stop_server(&session_id).await;
                 }
             } else {
                 log::debug!(
@@ -289,9 +286,7 @@ where
                     session_id
                 );
                 // Notify stopping server side
-                if let Err(e) = session_manager.stop_server(&session_id).await {
-                    log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
-                }
+                session_manager.stop_server(&session_id).await;
             }
         });
         Ok(())

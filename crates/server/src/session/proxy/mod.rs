@@ -76,21 +76,35 @@ impl SessionProxyHandle {
         Ok(endpoints)
     }
 
-    pub async fn stop_server(&self) -> Result<()> {
-        self.ctrl_tx.send_async(ProxyCommand::ServerStopped).await?;
-        Ok(())
+    pub async fn stop_server(&self) {
+        if let Err(e) = self.ctrl_tx.send_async(ProxyCommand::ServerStopped).await {
+            log::error!(
+                "Failed to send stop server command to session proxy: {:?}",
+                e
+            );
+        }
     }
 
-    pub async fn fail_server(&self) -> Result<()> {
-        self.ctrl_tx.send_async(ProxyCommand::ServerFailed).await?;
-        Ok(())
+    pub async fn fail_server(&self) {
+        if let Err(e) = self.ctrl_tx.send_async(ProxyCommand::ServerFailed).await {
+            log::error!(
+                "Failed to send fail server command to session proxy: {:?}",
+                e
+            );
+        }
     }
 
-    pub async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
-        self.ctrl_tx
+    pub async fn stop_client(&self, stream_channel_id: u16) {
+        if let Err(e) = self
+            .ctrl_tx
             .send_async(ProxyCommand::ClientStopped(stream_channel_id))
-            .await?;
-        Ok(())
+            .await
+        {
+            log::error!(
+                "Failed to send stop client command to session proxy: {:?}",
+                e
+            );
+        }
     }
 }
 
