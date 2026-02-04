@@ -55,19 +55,15 @@ impl TicketResponse {
         }
     }
 
-    pub fn get_remotes_count(&self) -> usize {
-        self.remotes.len()
+    pub fn channels_remotes(&self) -> Vec<String> {
+        self.remotes
+            .iter()
+            .map(|r| format!("{}:{}", r.host, r.port))
+            .collect()
     }
 
-    pub async fn target_addr(&self, remote_id: u16) -> Result<String> {
-        // Stream channel id is the index+1 of the remotes array
-        if remote_id as usize >= self.remotes.len() {
-            return Err(anyhow::anyhow!("Invalid stream_channel_id: {}", remote_id));
-        }
-        Ok(format!(
-            "{}:{}",
-            self.remotes[remote_id as usize].host, self.remotes[remote_id as usize].port
-        ))
+    pub fn remotes_count(&self) -> usize {
+        self.remotes.len()
     }
 
     pub fn validate(&self) -> Result<()> {

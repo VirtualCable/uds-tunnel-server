@@ -123,22 +123,16 @@ impl SessionManager {
         Ok(())
     }
 
-    // Client is the outgoing connection to the remote server
-    // This side is not recoverable, so if it stops, the session is finished
-    pub async fn start_client(&self, id: &SessionId) -> Result<()> {
+    pub async fn fail_server(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.start_client().await?;
+            session.fail_server().await?;
         }
         Ok(())
     }
 
     pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) -> Result<()> {
         if let Some(session) = self.get_session(id) {
-            session.stop_client(stream_channel_id).await?;
-            // If no clients are running, remove session
-            if !session.is_client_running() {
-                self.remove_session(id);
-            }
+            session.session_proxy.stop_client(stream_channel_id).await?;
         }
         Ok(())
     }

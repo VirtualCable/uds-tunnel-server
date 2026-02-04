@@ -28,26 +28,26 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
+use std::sync::Arc;
 
 use anyhow::Result;
 use flume::{Receiver, Sender, bounded};
 use futures::future::{Either, pending};
+use tokio::net::TcpStream;
 
-use crate::{consts::CHANNEL_SIZE, session::SessionId};
-use shared::{log, system::trigger::Trigger};
+use crate::{
+    consts::CHANNEL_SIZE,
+    session::{Session, SessionId, SessionManager},
+    stream::client::TunnelClientStream,
+};
+use shared::{log, protocol::command::Command, system::trigger::Trigger};
 
 enum ProxyCommand {
-    AttachServer {
-        reply: Sender<ServerEndpoints>,
-    },
-    AttachClient {
-        channel_id: u16,
-        reply: Sender<ClientEndpoints>,
-    },
-    DetachServer,
-    DetachClient {
-        channel_id: u16,
-    },
+    AttachServer { reply: Sender<ServerEndpoints> },
+    ServerFailed,  // Will not close the proxy, to allow recovery
+    ServerStopped, // Will close the proxy, as the server is done
+    // Client is attached by us, so no need for an attach command
+    ClientStopped(u16), // stream_channel_id, no need to know if it failed or stopped normally
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +68,7 @@ pub(super) struct SessionProxyHandle {
 }
 
 impl SessionProxyHandle {
-    pub async fn attach_server(&self) -> Result<ServerEndpoints> {
+    pub async fn start_server(&self) -> Result<ServerEndpoints> {
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = ProxyCommand::AttachServer { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
@@ -76,32 +76,32 @@ impl SessionProxyHandle {
         Ok(endpoints)
     }
 
-    pub async fn detach_server(&self) -> Result<()> {
-        let cmd = ProxyCommand::DetachServer;
-        self.ctrl_tx.send_async(cmd).await?;
+    pub async fn stop_server(&self) -> Result<()> {
+        self.ctrl_tx.send_async(ProxyCommand::ServerStopped).await?;
         Ok(())
     }
 
-    pub async fn attach_client(&self, channel_id: u16) -> Result<ClientEndpoints> {
-        let (reply_tx, reply_rx) = flume::bounded(1);
-        let cmd = ProxyCommand::AttachClient {
-            channel_id,
-            reply: reply_tx,
-        };
-        self.ctrl_tx.send_async(cmd).await?;
-        let endpoints = reply_rx.recv_async().await?;
-        Ok(endpoints)
+    pub async fn fail_server(&self) -> Result<()> {
+        self.ctrl_tx.send_async(ProxyCommand::ServerFailed).await?;
+        Ok(())
     }
 
-    pub async fn detach_client(&self, channel_id: u16) -> Result<()> {
-        let cmd = ProxyCommand::DetachClient { channel_id };
-        self.ctrl_tx.send_async(cmd).await?;
+    pub async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(ProxyCommand::ClientStopped(stream_channel_id))
+            .await?;
         Ok(())
     }
 }
 
+#[derive(Debug, Clone)]
+struct ClientInfo {
+    sender: Sender<Vec<u8>>,
+    stop: Trigger,
+}
+
 struct ClientFanIn {
-    clients_senders: Vec<Option<Sender<Vec<u8>>>>,
+    clients_senders: Vec<Option<ClientInfo>>,
     sender: Sender<(u16, Vec<u8>)>,
     receiver: Receiver<(u16, Vec<u8>)>,
 }
@@ -116,22 +116,54 @@ impl ClientFanIn {
         }
     }
 
-    pub fn add_client(&mut self, stream_channel_id: u16, client: Sender<Vec<u8>>) {
+    async fn create_client(&mut self, stream_channel_id: u16, session: Arc<Session>) -> Result<()> {
+        // Ensure vector is large enough
         if self.clients_senders.len() < stream_channel_id as usize {
             self.clients_senders
                 .resize(stream_channel_id as usize, None);
         }
-        self.clients_senders[(stream_channel_id - 1) as usize] = Some(client);
-    }
 
-    #[allow(clippy::type_complexity)]
-    pub fn new_channel_for(
-        &mut self,
-        stream_channel_id: u16,
-    ) -> (Sender<(u16, Vec<u8>)>, Receiver<Vec<u8>>) {
+        // If current client is Some, we are replacing it, so ensure old one receives the stop signal
+        if let Some(old_client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
+            // Ensure notify old client to stop before replacing
+            old_client.stop.trigger();
+        }
+
         let (sender, receiver) = flume::bounded(CHANNEL_SIZE);
-        self.add_client(stream_channel_id, sender);
-        (self.sender.clone(), receiver)
+        // (self.sender.clone(), receiver)
+
+        // If outside remotes, will fail and return error
+        let target_stream =
+            TcpStream::connect(&session.remotes[stream_channel_id as usize - 1]).await?;
+
+        // Split the target stream into reader and writer
+        let (target_reader, target_writer) = target_stream.into_split();
+
+        let stop = Trigger::new();
+
+        // Note: The TunnelClientStream will not receive the global stop, but its own stop trigger
+        // managed by the ClientFanIn
+        let client_stream = TunnelClientStream::new(
+            *session.id(),
+            stop.clone(),
+            stream_channel_id,
+            target_reader,
+            target_writer,
+            ClientEndpoints {
+                tx: self.sender.clone(),
+                rx: receiver,
+            },
+        );
+
+        // Spawn a task to run the client stream
+        tokio::spawn(async move {
+            if let Err(e) = client_stream.run().await {
+                log::error!("Client stream error: {:?}", e);
+            }
+        });
+
+        self.clients_senders[(stream_channel_id - 1) as usize] = Some(ClientInfo { sender, stop });
+        Ok(())
     }
 
     pub async fn send_to_channel(&self, stream_channel_id: u16, msg: Vec<u8>) -> Result<()> {
@@ -142,10 +174,25 @@ impl ClientFanIn {
             ));
         }
         if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
-            client.send_async(msg).await?;
+            client.sender.send_async(msg).await?;
         }
         // If no client, just drop the message
         Ok(())
+    }
+
+    pub async fn stop_client(&self, stream_channel_id: u16) {
+        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+            return;
+        }
+        if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
+            client.stop.trigger();
+        }
+    }
+
+    pub fn stop_all_clients(&self) {
+        for client in self.clients_senders.iter().flatten() {
+            client.stop.trigger();
+        }
     }
 
     pub async fn recv(&self) -> Result<(u16, Vec<u8>)> {
@@ -158,12 +205,6 @@ impl ClientFanIn {
         if self.clients_senders.len() >= stream_channel_id as usize {
             self.clients_senders[(stream_channel_id - 1) as usize] = None;
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.clients_senders
-            .iter()
-            .all(|sender_opt| sender_opt.is_none())
     }
 }
 
@@ -185,13 +226,14 @@ impl Proxy {
             let stop = self.stop.clone();
             async move {
                 // Catch panics to avoid bringing down the server
-                if let Err(e) = self.run_session_proxy().await {
+                if let Err(e) = self.run_session_proxy(parent).await {
                     log::error!("Session proxy encountered an error: {:?}", e);
                 } else {
                     log::debug!("Session proxy exited normally");
                 }
                 // Exiting proxy means end of session, as there is no possible recovery
                 stop.trigger();
+                // Remove session from manager, as it is ended
                 let session_manager = crate::session::manager::SessionManager::get_instance();
                 log::debug!("Removing session {:?} from {:?}", parent, session_manager);
                 session_manager.remove_session(&parent);
@@ -199,7 +241,7 @@ impl Proxy {
         })
     }
 
-    async fn run_session_proxy(self) -> Result<()> {
+    async fn run_session_proxy(self, parent: SessionId) -> Result<()> {
         let Self { ctrl_rx, stop } = self;
 
         let mut clients: ClientFanIn = ClientFanIn::new();
@@ -239,28 +281,18 @@ impl Proxy {
                             let endpoints = ServerEndpoints { tx: server_tx, rx: server_rx };
                             let _ = reply.send(endpoints);
                         }
-                        Ok(ProxyCommand::AttachClient { channel_id, reply }) => {
-                            // Note: currently we only support one channel id per proxy
-                            log::debug!("Attaching client to session proxy");
-                            let (sender, receiver) = clients.new_channel_for(channel_id);
-                            let endpoints = ClientEndpoints { tx: sender, rx: receiver };
-                            let _ = reply.send(endpoints);
-                        }
-                        Ok(ProxyCommand::DetachServer) => {
+                        Ok(ProxyCommand::ServerFailed) => {
                             log::debug!("Detaching server from session proxy");
                             our_server_channels = None;
-                            // If no clients here, stop the proxy as
-                            // this is not recoverable
-                            if clients.is_empty() {
-                                log::debug!("No more clients, stopping session proxy");
-                                break;
-                            }
                         }
-                        Ok(ProxyCommand::DetachClient { channel_id }) => {
-                            log::debug!("Detaching client {} from session proxy", channel_id);
-                            clients.close_client(channel_id);
-                            // With no more clients, session will trigger stop
-                            // No need to do anything else here
+                        Ok(ProxyCommand::ServerStopped) => {
+                            log::debug!("Server stopped, closing session proxy");
+                            break;  // exit loop on server stopped
+                        }
+                        Ok(ProxyCommand::ClientStopped(stream_channel_id)) => {
+                            log::debug!("Client {} stopped, removing from session proxy", stream_channel_id);
+                            clients.stop_client(stream_channel_id).await;
+                            clients.close_client(stream_channel_id);
                         }
                         Err(_) => {
                             log::debug!("Control channel closed, stopping session proxy");
@@ -271,6 +303,15 @@ impl Proxy {
                 msg = server_recv => {
                     match msg {
                         Ok((stream_channel_id, msg)) => {
+                            // stream channel 0 is control channel, process it here
+                            if stream_channel_id == 0 {
+                                // Failures on commands closes the proxy and consecuently, the session
+                                if Self::handle_incoming_command(msg, &parent, &mut clients).await? {
+                                    log::debug!("Control channel requested session close");
+                                    break;  // exit loop on command request
+                                }
+                                continue;
+                            }
                             if let Err(e) = clients.send_to_channel(stream_channel_id, msg).await {
                                 log::warn!("Failed to forward message to client: {:?}", e);
                                 break;  // exit loop on error
@@ -298,7 +339,60 @@ impl Proxy {
                 }
             }
         }
+        log::debug!("Session proxy exiting, cleaning up clients");
+        // Stop all clients. Do not need to clean up the clients vector, as we are exiting anyway
+        clients.stop_all_clients();
         Ok(())
+    }
+
+    async fn handle_incoming_command(
+        data: Vec<u8>,
+        parent: &SessionId,
+        clients: &mut ClientFanIn,
+    ) -> Result<bool> {
+        // Errors parsing commands, mean intentional error or misbehavior (or big bug :P), so we will always
+        // close the session on command errors
+        let cmd = Command::from_bytes(&data)?;
+        log::debug!("Processing command in proxy: {:?}", cmd);
+        match cmd {
+            Command::Close => {
+                log::info!(
+                    "Received Close command in session {:?}, closing session",
+                    parent
+                );
+                // Just return an error to close the session
+                return Ok(true);
+            }
+            Command::OpenChannel { channel_id } => {
+                let session = {
+                    let session_manager = SessionManager::get_instance();
+                    session_manager
+                        .get_session(parent)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Session {:?} not found when opening channel", parent)
+                        })?
+                        .clone()
+                };
+                clients.create_client(channel_id, session).await?;
+            }
+            Command::CloseChannel { channel_id } => {
+                clients.stop_client(channel_id).await;
+                clients.close_client(channel_id);
+            }
+            _ => {
+                log::warn!(
+                    "Received unexpected command in session {:?}: {:?}",
+                    parent,
+                    cmd
+                );
+                // Other commands are unexpected on control channel, log them and close session
+                return Err(anyhow::anyhow!(
+                    "Unexpected command on control channel: {:?}",
+                    cmd
+                ));
+            }
+        }
+        Ok(false)
     }
 }
 

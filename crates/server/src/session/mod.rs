@@ -31,10 +31,7 @@
 
 use std::{
     net::SocketAddr,
-    sync::{
-        RwLock,
-        atomic::{AtomicBool, AtomicU16},
-    },
+    sync::{RwLock, atomic::AtomicBool},
 };
 
 use anyhow::Result;
@@ -63,19 +60,21 @@ pub struct Session {
 
     // proxy async task handle
     proxy_task: tokio::task::JoinHandle<()>,
-    // Client not started will be allowed for 2 seconds
-    // Client stopped, will stop session also
-    // Server disconnect, allows some time before stopping session
-    // to allow client reconnection
+    // Server side status
     server_running: AtomicBool,
-    clients_count: AtomicU16, // So we can stop as soon as no clients are connected also
+
+    // Session is closed when:
+    //   - client (connetecto to ou server side) disconnects correctly
+    //   - client sends a Close command
+    //   - client does not reconnect on recovery window
+    remotes: Vec<String>, // List of remote addresses that can be used on this session
 
     // seq numbers for crypto part
     // only updated on server side killed. (the one receives/sends data from client)
     seq: RwLock<(u64, u64)>,
 
     // Ip of the client connected
-    ip: RwLock<SocketAddr>,
+    src_ip: RwLock<SocketAddr>,
 }
 
 impl Session {
@@ -83,7 +82,8 @@ impl Session {
         shared_secret: SharedSecret,
         ticket: ticket::Ticket,
         stop: Trigger,
-        ip: SocketAddr,
+        src_ip: SocketAddr,
+        remotes: Vec<String>, // List of remote addresses that can be used on this session
     ) -> Self {
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         let id = SessionId::new_random();
@@ -98,9 +98,9 @@ impl Session {
             session_proxy,
             proxy_task,
             server_running: AtomicBool::new(false),
-            clients_count: AtomicU16::new(0),
             seq: RwLock::new((0, 0)),
-            ip: RwLock::new(ip),
+            src_ip: RwLock::new(src_ip),
+            remotes,
         }
     }
 
@@ -109,17 +109,13 @@ impl Session {
     }
 
     pub fn set_ip(&self, ip: SocketAddr) {
-        if let Ok(mut ip_lock) = self.ip.write() {
+        if let Ok(mut ip_lock) = self.src_ip.write() {
             *ip_lock = ip;
         }
     }
 
     pub async fn server_sender_receiver(&self) -> Result<ServerEndpoints> {
-        self.session_proxy.attach_server().await
-    }
-
-    pub async fn client_sender_receiver(&self, stream_channel_id: u16) -> Result<ClientEndpoints> {
-        self.session_proxy.attach_client(stream_channel_id).await
+        self.session_proxy.start_server().await
     }
 
     pub fn set_inbound_seq(&self, seq_rx: u64) {
@@ -160,55 +156,34 @@ impl Session {
     }
 
     pub fn is_server_running(&self) -> bool {
-        self.is_running()
-            && self
-                .server_running
-                .load(std::sync::atomic::Ordering::SeqCst)
-    }
-
-    pub fn is_client_running(&self) -> bool {
-        self.is_running() && self.clients_count.load(std::sync::atomic::Ordering::SeqCst) > 0
+        self.server_running
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
         crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
     }
 
-    pub(super) async fn start_client(&self) -> Result<()> {
-        self.clients_count
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-
-    /// Stops a client stream, returns the number of remaining running clients
-    /// Note: This function will invoke stop trigger if no more clients are running
-    pub(super) async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
-        // Ensure proxy detaches client channels
-        self.clients_count
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        self.session_proxy.detach_client(stream_channel_id).await?;
-        Ok(())
-    }
-
     pub(super) async fn start_server(&self) -> Result<()> {
         self.server_running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
     pub(super) async fn stop_server(&self) -> Result<()> {
-        // Ensure proxy detaches server channels
         self.server_running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        if !self.is_client_running() {
-            log::warn!(
-                "Session proxy task already finished for session {:?}",
-                self.id()
-            );
-            Ok(())
-        } else {
-            self.session_proxy.detach_server().await
-        }
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.session_proxy.stop_server().await
+    }
+
+    pub(super) async fn fail_server(&self) -> Result<()> {
+        self.server_running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.session_proxy.fail_server().await
+    }
+
+    pub(super) async fn stop_client(&self, stream_channel_id: u16) -> Result<()> {
+        self.session_proxy.stop_client(stream_channel_id).await
     }
 }
 

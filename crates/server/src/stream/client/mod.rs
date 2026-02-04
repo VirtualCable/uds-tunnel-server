@@ -33,7 +33,7 @@ use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::session::{SessionId, SessionManager};
+use crate::session::{ClientEndpoints, SessionId, SessionManager};
 
 use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, system::trigger::Trigger};
 
@@ -143,9 +143,11 @@ where
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
     session_id: SessionId,
+    local_stop: Trigger,
     stream_channel_id: u16,
     reader: R,
     writer: W,
+    channels: ClientEndpoints,
 }
 
 impl<R, W> TunnelClientStream<R, W>
@@ -153,36 +155,45 @@ where
     R: AsyncReadExt + Send + Unpin + 'static,
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
-    pub fn new(id: SessionId, stream_channel_id: u16, reader: R, writer: W) -> Self {
+    pub fn new(
+        session_id: SessionId,
+        local_stop: Trigger,
+        stream_channel_id: u16,
+        reader: R,
+        writer: W,
+        channels: ClientEndpoints,
+    ) -> Self {
         TunnelClientStream {
-            session_id: id,
+            session_id,
+            local_stop,
             stream_channel_id,
             reader,
             writer,
+            channels,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         let Self {
             session_id,
+            local_stop,
             stream_channel_id,
             reader,
             writer,
+            channels,
         } = self;
 
         let session_manager = SessionManager::get_instance();
 
-        let (stop, channels) = if let Some(session) = session_manager.get_session(&session_id) {
-            (
-                session.stop_trigger(),
-                session.client_sender_receiver(stream_channel_id).await?,
-            )
+        let stop = if let Some(session) = session_manager.get_session(&session_id) {
+            session.stop_trigger()
         } else {
             log::warn!("Session {:?} not found, aborting stream", session_id);
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Session {:?} not found, aborting stream",
+                session_id
+            ));
         };
-
-        let local_stop = Trigger::new();
 
         let mut inbound = TunnelClientInboundStream::new(
             stream_channel_id,
@@ -205,13 +216,6 @@ where
             outbound.stop.trigger();
         });
         tokio::spawn(async move {
-            // Notify starting client side
-            if let Err(e) = session_manager.start_client(&session_id).await {
-                log::error!("Failed to start client session {:?}: {:?}", session_id, e);
-                local_stop.trigger();
-                stop.trigger();
-                return;
-            }
             tokio::select! {
                 _ = stop.wait_async() => {
                     local_stop.trigger();
@@ -225,7 +229,11 @@ where
                 .stop_client(&session_id, stream_channel_id)
                 .await
             {
-                log::error!("Failed to stop client session {:?}: {:?}", session_id, e);
+                log::error!(
+                    "Error stopping client stream for session {:?}: {:?}",
+                    session_id,
+                    e
+                );
             }
         });
         Ok(())

@@ -29,6 +29,8 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+use std::sync::{Arc, atomic::AtomicBool};
+
 use anyhow::Result;
 use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -76,11 +78,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 // Connection closed
                 break;
             }
-            // TODO: Ignoring channel 0 streams for now
-            if stream_channel_id == 0 {
-                log::debug!("Ignoring data on channel 0 (control channel)");
-                continue;
-            }
+            // Channels are processed on the proxy side, so just forward data
             self.sender
                 .try_send((stream_channel_id, decrypted_data.to_vec()))?;
         }
@@ -135,6 +133,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
     async fn send_data(&mut self, channel: u16, data: &[u8]) -> Result<()> {
         let mut offset = 0;
 
+        // Divide data into CRYPT_PACKET_SIZE chunks and send them
         while offset < data.len() {
             let end = (offset + CRYPT_PACKET_SIZE).min(data.len());
             let chunk = &data[offset..end];
@@ -215,20 +214,30 @@ where
             channels.rx,
             local_stop.clone(),
         );
-        tokio::spawn(async move {
-            if let Err(e) = inbound.run().await {
-                log::error!("Inbound stream error: {:?}", e);
+
+        let tunnel_error = Arc::new(AtomicBool::new(false));
+        tokio::spawn({
+            let tunnel_error = tunnel_error.clone();
+            async move {
+                if let Err(e) = inbound.run().await {
+                    log::error!("Inbound stream error: {:?}", e);
+                    tunnel_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                // let's ensure the other side is also stopped
+                inbound.stop.trigger();
             }
-            // let's ensure the other side is also stopped
-            inbound.stop.trigger();
         });
 
-        tokio::spawn(async move {
-            if let Err(e) = outbound.run().await {
-                log::error!("Outbound stream error: {:?}", e);
+        tokio::spawn({
+            let tunnel_error = tunnel_error.clone();
+            async move {
+                if let Err(e) = outbound.run().await {
+                    log::error!("Outbound stream error: {:?}", e);
+                    tunnel_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                // let's ensure the other side is also stopped
+                outbound.stop.trigger();
             }
-            // let's ensure the other side is also stopped
-            outbound.stop.trigger();
         });
 
         tokio::spawn(async move {
@@ -246,29 +255,44 @@ where
                 }
                 _ = local_stop.wait_async() => {}
             }
-            // Notify stopping server side
-            if let Err(e) = session_manager.stop_server(&session_id).await {
-                log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
-            }
 
-            // Insert a task that, after a couple of seconds, sets the stop trigger
-            // if the session already exists and the server is not running
-            tokio::spawn({
-                let stop = stop.clone();
-                async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
-                        .await;
-                    if let Some(session) = session_manager.get_session(&session_id)
-                        && !session.is_server_running()
-                    {
-                        log::info!(
-                            "Server side not running for session {:?}, setting stop trigger",
+            let ended_with_error = tunnel_error.load(std::sync::atomic::Ordering::Relaxed);
+            if ended_with_error {
+                log::debug!(
+                    "Server stream for session {:?} stopping due to error",
+                    session_id
+                );
+                // Notify failing server side
+                if let Err(e) = session_manager.fail_server(&session_id).await {
+                    log::error!("Failed to fail server session {:?}: {:?}", session_id, e);
+                }
+                // Wait a bit for recovery grace period
+                tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
+                    .await;
+                if let Some(session) = session_manager.get_session(&session_id) {
+                    if session.is_server_running() {
+                        log::debug!(
+                            "Session {:?} is still running after error grace period, not stopping",
                             session_id
                         );
-                        stop.trigger();
+                        return;
+                    }
+                    log::debug!("Stopping session {:?} after error grace period", session_id);
+                    // Notify stopping server side, will stop proxy and remove session
+                    if let Err(e) = session_manager.stop_server(&session_id).await {
+                        log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
                     }
                 }
-            });
+            } else {
+                log::debug!(
+                    "Server stream for session {:?} stopping normally",
+                    session_id
+                );
+                // Notify stopping server side
+                if let Err(e) = session_manager.stop_server(&session_id).await {
+                    log::error!("Failed to stop server session {:?}: {:?}", session_id, e);
+                }
+            }
         });
         Ok(())
     }
