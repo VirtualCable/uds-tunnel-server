@@ -114,8 +114,17 @@ impl Session {
         }
     }
 
-    pub async fn server_sender_receiver(&self) -> Result<ServerEndpoints> {
+    pub async fn start_server(&self) -> Result<ServerEndpoints> {
+        self.server_running
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         self.session_proxy.start_server().await
+    }
+
+    pub(super) async fn stop_server(&self) {
+        self.server_running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.session_proxy.stop_server().await;
     }
 
     pub fn set_inbound_seq(&self, seq_rx: u64) {
@@ -164,25 +173,13 @@ impl Session {
         crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
     }
 
-    pub(super) async fn start_server(&self) -> Result<()> {
-        self.server_running
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub(super) async fn stop_server(&self)  {
-        self.server_running
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        self.session_proxy.stop_server().await;
-    }
-
-    pub(super) async fn fail_server(&self)  {
+    pub(super) async fn fail_server(&self) {
         self.server_running
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.session_proxy.fail_server().await;
     }
 
-    pub(super) async fn stop_client(&self, stream_channel_id: u16)  {
+    pub(super) async fn stop_client(&self, stream_channel_id: u16) {
         self.session_proxy.stop_client(stream_channel_id).await;
     }
 }

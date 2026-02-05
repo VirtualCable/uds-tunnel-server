@@ -328,7 +328,15 @@ impl Proxy {
                             }
                             if let Err(e) = clients.send_to_channel(stream_channel_id, msg).await {
                                 log::warn!("Failed to forward message to client: {:?}", e);
-                                break;  // exit loop on error
+                                // Return error to server and continue
+                                if let Some(server) = &our_server_channels {
+                                    let _ = server.tx.send_async(
+                                        Command::ChannelError {
+                                            channel_id: stream_channel_id,
+                                            message: format!("Failed to forward message to client: {:?}", e)
+                                        }.to_message()
+                                    ).await;
+                                }
                             }
                         }
                         Err(e) => {

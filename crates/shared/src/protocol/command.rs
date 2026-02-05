@@ -162,6 +162,10 @@ impl Command {
         data
     }
 
+    pub fn to_message(&self) -> (u16, Vec<u8>) {
+        (0, self.to_bytes()) // channel 0 is reserved for commands
+    }
+
     pub fn is_close_command(&self) -> bool {
         matches!(
             self,

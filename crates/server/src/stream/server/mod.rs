@@ -194,7 +194,7 @@ where
                 let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
                 (
                     session.stop_trigger(),
-                    session.server_sender_receiver().await?,
+                    session.start_server().await?,
                     inbound_crypt,
                     outbound_crypt,
                 )
