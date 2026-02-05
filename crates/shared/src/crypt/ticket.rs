@@ -8,9 +8,7 @@ use sha2::digest::typenum;
 
 use crate::{
     crypt::{
-        kem::{
-            CIPHERTEXT_SIZE, CipherText, PRIVATE_KEY_SIZE, PrivateKey, decapsulate,
-        },
+        kem::{CIPHERTEXT_SIZE, CipherText, PRIVATE_KEY_SIZE, PrivateKey, decapsulate},
         tunnel::derive_tunnel_material,
     },
     ticket::Ticket,

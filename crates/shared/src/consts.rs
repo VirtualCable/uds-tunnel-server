@@ -39,3 +39,7 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 
 // Ticket related constants
 pub const TICKET_LENGTH: usize = 48;
+
+// Max time once a crypt packet is started before receive it completely, to avoid hanging connections
+// Its long enough to allow for slow connections, but short enough to avoid a malformed packet to keep the connection hanging indefinitely
+pub const CRYPT_PACKET_TIMEOUT_SECS: u64 = 5;

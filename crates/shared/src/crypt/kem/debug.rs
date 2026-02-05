@@ -72,7 +72,7 @@ pub fn get_debug_kem_keypair_768() -> ([u8; PRIVATE_KEY_SIZE], [u8; PUBLIC_KEY_S
         .expect("Failed to decode base64 KEM private key")
         .try_into()
         .expect("Invalid KEM private key size");
-    
+
     let kem_public_key = general_purpose::STANDARD
         .decode(PUBLIC_KEY_768_TESTING)
         .expect("Failed to decode base64 KEM public key")

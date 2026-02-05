@@ -155,6 +155,7 @@ async fn attach_detach_basic() -> Result<()> {
     assert!(
         stop.wait_timeout_async(std::time::Duration::from_secs(2))
             .await
+            .is_ok()
     );
     Ok(())
 }
@@ -181,13 +182,12 @@ async fn messages_preserve_order() -> Result<()> {
     // Send open channel command
     server
         .tx
-        .send_async((
-            0,
-            Command::OpenChannel {
+        .send_async(
+            protocol::Command::OpenChannel {
                 channel_id: TEST_CHANNEL_ID,
             }
-            .to_bytes(),
-        ))
+            .to_message(),
+        )
         .await?;
 
     let count = 1000;
@@ -195,7 +195,10 @@ async fn messages_preserve_order() -> Result<()> {
     for i in 0u32..count {
         server
             .tx
-            .send_async((TEST_CHANNEL_ID, i.to_be_bytes().to_vec()))
+            .send_async(protocol::PayloadWithChannel::new(
+                TEST_CHANNEL_ID,
+                i.to_be_bytes().as_slice(),
+            ))
             .await?;
     }
 
@@ -228,8 +231,6 @@ async fn messages_preserve_order() -> Result<()> {
 
 #[tokio::test]
 async fn buffer_size_works() -> Result<()> {
-    use crate::consts::CHANNEL_SIZE;
-
     log::setup_logging("debug", log::LogType::Test);
 
     let stop = Trigger::new();
@@ -239,13 +240,19 @@ async fn buffer_size_works() -> Result<()> {
     let server = handle.start_server().await?;
     // No client, will cause buffer to fill up
     // Send until full buffer
-    for _ in 0..(CHANNEL_SIZE) {
-        server.tx.try_send((TEST_CHANNEL_ID, vec![1, 2, 3]))?;
+    for _ in 0..(protocol::consts::CHANNEL_SIZE) {
+        server.tx.try_send(protocol::PayloadWithChannel::new(
+            TEST_CHANNEL_ID,
+            &[1, 2, 3],
+        ))?;
     }
     // No fail yet
 
     // Next send should fail
-    if let Err(e) = server.tx.try_send((TEST_CHANNEL_ID, vec![1, 2, 3])) {
+    if let Err(e) = server.tx.try_send(protocol::PayloadWithChannel::new(
+        TEST_CHANNEL_ID,
+        &[1, 2, 3],
+    )) {
         log::info!("Expected error on full buffer: {}", e);
     } else {
         panic!("Expected error on full buffer");
@@ -277,27 +284,26 @@ async fn reattach_server_works() -> Result<()> {
     // Send open channel command
     server1
         .tx
-        .send_async((
-            0,
-            Command::OpenChannel {
+        .send_async(
+            protocol::Command::OpenChannel {
                 channel_id: TEST_CHANNEL_ID,
             }
-            .to_bytes(),
-        ))
+            .to_message(),
+        )
         .await?;
 
     // let client = handle.attach_client(TEST_CHANNEL_ID).await?;
     server1
         .tx
-        .send_async((TEST_CHANNEL_ID, b"first".to_vec()))
+        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"first"))
         .await?;
     let msg = server_rx.recv_async().await?;
     assert_eq!(msg, b"first");
 
     server_tx.send_async(b"from server".to_vec()).await?;
-    let (chan, msg) = server1.rx.recv_async().await?;
-    assert_eq!(&msg, b"from server");
-    assert_eq!(chan, TEST_CHANNEL_ID);
+    let msg = server1.rx.recv_async().await?;
+    assert_eq!(msg.payload.as_ref(), b"from server");
+    assert_eq!(msg.channel_id, TEST_CHANNEL_ID);
 
     // Fail server will allow us to reattach
     handle.fail_server().await;
@@ -305,7 +311,7 @@ async fn reattach_server_works() -> Result<()> {
     let server2 = handle.start_server().await?;
     server2
         .tx
-        .send_async((TEST_CHANNEL_ID, b"second".to_vec()))
+        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"second"))
         .await?;
     let msg = server_rx.recv_async().await?;
     assert_eq!(msg, b"second");
@@ -313,15 +319,16 @@ async fn reattach_server_works() -> Result<()> {
     assert!(!stop.is_triggered());
 
     server_tx.send_async(b"from server".to_vec()).await?;
-    let (chan, msg) = server2.rx.recv_async().await?;
-    assert_eq!(&msg, b"from server");
-    assert_eq!(chan, TEST_CHANNEL_ID);
+    let msg = server2.rx.recv_async().await?;
+    assert_eq!(msg.payload.as_ref(), b"from server");
+    assert_eq!(msg.channel_id, TEST_CHANNEL_ID);
 
     // Close server will trigger stop as server is gone
     handle.stop_server().await;
     assert!(
         stop.wait_timeout_async(std::time::Duration::from_secs(1))
             .await
+            .is_ok()
     );
 
     // Session should be removed

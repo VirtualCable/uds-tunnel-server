@@ -29,7 +29,6 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-
 // Tests module
 #[cfg(test)]
 mod tests;

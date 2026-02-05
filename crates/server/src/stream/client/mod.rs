@@ -30,17 +30,16 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use anyhow::Result;
-use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::session::{ClientEndpoints, SessionId, SessionManager};
 
-use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, system::trigger::Trigger};
+use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, protocol::{PayloadWithChannel, PayloadWithChannelSender, Command, PayloadReceiver}, system::trigger::Trigger};
 
 struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stream_channel_id: u16,
     stop: Trigger,
-    sender: Sender<(u16, Vec<u8>)>,
+    sender: PayloadWithChannelSender,
 
     reader: R,
 }
@@ -49,7 +48,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
     pub fn new(
         stream_channel_id: u16,
         reader: R,
-        sender: Sender<(u16, Vec<u8>)>,
+        sender: PayloadWithChannelSender,
         stop: Trigger,
     ) -> Self {
         TunnelClientInboundStream {
@@ -73,16 +72,28 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                     match result {
                         Ok(0) => {
                             log::debug!("Client inbound stream reached EOF");
-                            // Connection closed
+                            // Connection closed, send message
+                            self.sender.try_send(
+                                Command::CloseChannel {
+                                    channel_id: self.stream_channel_id
+                                }.to_message()
+                            )?;
                             break;
                         }
                         Ok(count) => {
                             // Send to channel, fail if full or disconnected
                             // Does not wait for space in channel
-                            self.sender.try_send((self.stream_channel_id, buffer[..count].to_vec()))?;
+                            // This is an internal error, and there is no way to send error here.
+                            self.sender.try_send(PayloadWithChannel::new(self.stream_channel_id, &buffer[..count]))?;
                         }
                         Err(e) => {
                             log::error!("Client inbound read error: {:?}", e);
+                            self.sender.try_send(
+                                Command::ChannelError {
+                                    channel_id: self.stream_channel_id,
+                                    message: format!("Client read error: {:?}", e),
+                                }.to_message()
+                            )?;
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
                         }
                     }
@@ -95,15 +106,22 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
 
 struct TunnelClientOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
-    receiver: Receiver<Vec<u8>>,
+    err_sender: PayloadWithChannelSender, // Just for error reporting, not used for normal data
+    receiver: PayloadReceiver,
 
     writer: W,
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
-    pub fn new(writer: W, receiver: Receiver<Vec<u8>>, stop: Trigger) -> Self {
+    pub fn new(
+        writer: W,
+        err_sender: PayloadWithChannelSender,
+        receiver: PayloadReceiver,
+        stop: Trigger,
+    ) -> Self {
         TunnelClientOutboundStream {
             stop,
+            err_sender,
             receiver,
             writer,
         }
@@ -119,10 +137,23 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(data) => {
-                            self.writer.write_all(&data).await?;
+                            match self.writer.write_all(&data.0).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    log::error!("Client outbound write error: {:?}", e);
+                                    self.err_sender.try_send(
+                                        Command::ChannelError {
+                                            channel_id: 0, // No channel id, this is a connection error
+                                            message: format!("Client write error: {:?}", e),
+                                        }.to_message()
+                                    )?;
+                                    return Err(anyhow::anyhow!("Client outbound write error: {:?}", e));
+                                }
+                            }
                         }
                         Err(_) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
+                            // Note: internal channel error, not a client error, so we just log and return
                             if self.stop.is_triggered() {
                                 break;
                             }
@@ -195,6 +226,7 @@ where
             ));
         };
 
+        let error_sender = channels.tx.clone();
         let mut inbound = TunnelClientInboundStream::new(
             stream_channel_id,
             reader,
@@ -202,7 +234,8 @@ where
             local_stop.clone(),
         );
 
-        let mut outbound = TunnelClientOutboundStream::new(writer, channels.rx, local_stop.clone());
+        let mut outbound =
+            TunnelClientOutboundStream::new(writer, error_sender, channels.rx, local_stop.clone());
         tokio::spawn(async move {
             if let Err(e) = inbound.run().await {
                 log::error!("Client inbound stream error: {:?}", e);

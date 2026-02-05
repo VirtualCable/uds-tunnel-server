@@ -30,6 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use std::sync::{Arc, Condvar, Mutex};
 
+use anyhow::Result;
 use tokio::sync::Notify;
 
 #[derive(Clone, Debug)]
@@ -52,6 +53,14 @@ impl Trigger {
         notify.notify_waiters();
     }
 
+    pub fn trigger_after(&self, delay: std::time::Duration) {
+        let trigger = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            trigger.trigger();
+        });
+    }
+
     pub fn is_triggered(&self) -> bool {
         let (lock, _, _) = &*self.state;
         *lock.lock().unwrap()
@@ -65,13 +74,17 @@ impl Trigger {
         }
     }
 
-    pub fn wait_timeout(&self, timeout: std::time::Duration) -> bool {
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> Result<()> {
         let (lock, cvar, _) = &*self.state;
         let triggered = lock.lock().unwrap();
         let (guard, _result) = cvar
             .wait_timeout_while(triggered, timeout, |t| !*t)
             .unwrap();
-        *guard
+        if *guard {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Timeout"))
+        }
     }
 
     pub async fn is_triggered_async(&self) -> bool {
@@ -90,18 +103,28 @@ impl Trigger {
         notify.notified().await;
     }
 
-    pub async fn wait_timeout_async(&self, timeout: std::time::Duration) -> bool {
+    pub async fn wait_timeout_async(&self, timeout: std::time::Duration) -> Result<()> {
         let (lock, _, notify) = &*self.state;
         {
             let guard = lock.lock().unwrap();
             if *guard {
-                return true;
+                return Ok(());
             }
         }
         tokio::select! {
-            _ = notify.notified() => true,
-            _ = tokio::time::sleep(timeout) => false,
+            _ = notify.notified() => Ok(()),
+            _ = tokio::time::sleep(timeout) => Err(anyhow::anyhow!("Timeout")),
         }
+    }
+
+    pub async fn trigger_after_async(&self, delay: std::time::Duration) {
+        tokio::task::spawn({
+            let trigger = self.clone();
+            async move {
+                tokio::time::sleep(delay).await;
+                trigger.trigger();
+            }
+        });
     }
 }
 
@@ -134,7 +157,7 @@ mod tests {
     fn trigger_wait_timeout() {
         let trigger = Trigger::new();
         let result = trigger.wait_timeout(Duration::from_millis(100));
-        assert!(!result);
+        assert!(result.is_err());
     }
 
     #[test]

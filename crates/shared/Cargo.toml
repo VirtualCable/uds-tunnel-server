@@ -16,6 +16,9 @@ serde_json = { workspace = true }
 # Encoding/Decoding
 base64 = { workspace = true }
 
+# Asynchronous channels
+flume = { workspace = true }
+
 # Encryption
 aes-gcm = { workspace = true }
 hkdf = { workspace = true }

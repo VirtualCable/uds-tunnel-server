@@ -1756,6 +1756,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "base64",
+ "flume",
  "hkdf",
  "libcrux-ml-kem",
  "num_enum",

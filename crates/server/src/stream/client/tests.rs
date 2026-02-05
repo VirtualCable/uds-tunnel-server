@@ -33,7 +33,11 @@ use super::*;
 use anyhow::Result;
 
 use shared::{
-    consts::TICKET_LENGTH, crypt::types::SharedSecret, system::trigger::Trigger, ticket::Ticket,
+    consts::TICKET_LENGTH,
+    crypt::types::SharedSecret,
+    protocol::{self, Payload, PayloadWithChannel},
+    system::trigger::Trigger,
+    ticket::Ticket,
 };
 
 use crate::session::{ClientEndpoints, Session, SessionManager};
@@ -53,7 +57,7 @@ async fn test_read_and_send() {
 
     inbound.run().await.unwrap();
 
-    assert_eq!(rx.recv().unwrap().1, b"hello");
+    assert_eq!(b"hello", rx.recv().unwrap().payload.as_ref());
 }
 
 #[serial_test::serial(manager)]
@@ -63,16 +67,17 @@ async fn test_receive_and_write() {
 
     let (client, mut server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
+    let (err_tx, _err_rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
-    let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
+    let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
     tokio::spawn({
         let stop = stop.clone();
 
         async move {
             log::debug!("Sending data through outbound stream");
-            tx.send_async(b"hello".to_vec()).await.unwrap();
+            tx.send_async(b"hello".into()).await.unwrap();
             // Wait for stop signal
             stop.wait_async().await;
         }
@@ -94,7 +99,7 @@ async fn test_receive_and_write() {
 
 #[serial_test::serial(manager)]
 #[tokio::test]
-async fn test_inbound_remote_close() {
+async fn test_inbound_remote_close() -> Result<()> {
     let (client, server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
@@ -109,19 +114,20 @@ async fn test_inbound_remote_close() {
         .expect("Inbound stream should finish on remote close")
         .expect("Inbound stream should not error on remote close");
 
-    // Should not receive any data
-    let result = rx.try_recv();
-    assert!(
-        result.is_err(),
-        "Expected no data, but received some: {:?}",
-        result
+    // Should receive error channel closed
+    let result = rx.try_recv()?;
+    assert_eq!(result.channel_id, 0);
+    assert_eq!(
+        result.payload.as_ref(),
+        protocol::Command::CloseChannel { channel_id: 1 }.to_bytes()
     );
     stop.trigger();
+    Ok(())
 }
 
 #[serial_test::serial(manager)]
 #[tokio::test]
-async fn test_inbound_read_error() {
+async fn test_inbound_read_error() -> Result<()> {
     struct FailingReader;
 
     impl tokio::io::AsyncRead for FailingReader {
@@ -134,26 +140,34 @@ async fn test_inbound_read_error() {
         }
     }
 
-    let (tx, _rx) = flume::bounded(10);
+    let (tx, rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
     let mut inbound = TunnelClientInboundStream::new(1, FailingReader, tx, stop.clone());
 
     let res = inbound.run().await;
     assert!(res.is_err());
+    // Should receive error channel error
+    let result = rx.try_recv()?;
+    assert_eq!(result.channel_id, 0);
+    let command = protocol::Command::from_bytes(result.payload.as_ref());
+    assert!(matches!(command, Ok(protocol::Command::ChannelError { channel_id: 1, .. })));
+
     stop.trigger();
+    Ok(())
 }
 
 #[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_outbound_channel_closed() {
     let (client, _server) = tokio::io::duplex(1024);
-    let (_tx, rx) = flume::bounded::<Vec<u8>>(10);
+    let (tx, rx) = protocol::payload_pair();
+    let (err_tx, _err_rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
-    drop(_tx); // cerrar canal
+    let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
-    let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
+    drop(tx);  // Close the sending side to simulate channel closed
 
     let res = outbound.run().await;
     assert!(res.is_err());
@@ -164,10 +178,11 @@ async fn test_outbound_channel_closed() {
 #[tokio::test]
 async fn test_outbound_stop_before_data() {
     let (client, _server) = tokio::io::duplex(1024);
-    let (_tx, rx) = flume::bounded::<Vec<u8>>(10);
+    let (_tx, rx) = protocol::payload_pair();
+    let (err_tx, _err_rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
-    let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
+    let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
     stop.trigger(); // detener antes de arrancar
 
@@ -179,17 +194,18 @@ async fn test_outbound_stop_before_data() {
 #[tokio::test]
 async fn test_outbound_backpressure() {
     let (client, mut server) = tokio::io::duplex(1024);
-    let (tx, rx) = flume::bounded::<Vec<u8>>(1);
+    let (tx, rx) = protocol::payload_pair();
+    let (err_tx, _err_rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
-    let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
+    let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
     // Enviar dos mensajes: el segundo se bloqueará hasta que el primero se consuma
     tokio::spawn({
         let stop = stop.clone();
         async move {
-            tx.send_async(b"one".to_vec()).await.unwrap();
-            tx.send_async(b"two".to_vec()).await.unwrap();
+            tx.send_async(b"one".into()).await.unwrap();
+            tx.send_async(b"two".into()).await.unwrap();
             stop.wait_async().await;
         }
     });
@@ -215,13 +231,13 @@ async fn test_full_tunnel_echo() {
     let (client_side, mut server) = tokio::io::duplex(1024);
     let (server_side, mut client) = tokio::io::duplex(1024);
 
-    let (tx_in, rx_in) = flume::bounded::<(u16, Vec<u8>)>(10);
-    let (tx_out, rx_out) = flume::bounded::<Vec<u8>>(10);
+    let (tx_in, rx_in) = flume::bounded::<PayloadWithChannel>(10);
+    let (tx_out, rx_out) = flume::bounded::<Payload>(10);
 
     let stop = Trigger::new();
 
-    let mut inbound = TunnelClientInboundStream::new(1, server_side, tx_in, stop.clone());
-    let mut outbound = TunnelClientOutboundStream::new(client_side, rx_out, stop.clone());
+    let mut inbound = TunnelClientInboundStream::new(1, server_side, tx_in.clone(), stop.clone());
+    let mut outbound = TunnelClientOutboundStream::new(client_side, tx_in, rx_out, stop.clone());
 
     // Task inbound
     tokio::spawn(async move {
@@ -238,7 +254,7 @@ async fn test_full_tunnel_echo() {
         let stop = stop.clone();
         async move {
             while let Ok(msg) = rx_in.recv_async().await {
-                tx_out.send_async(msg.1).await.unwrap();
+                tx_out.send_async(msg.payload).await.unwrap();
             }
             stop.trigger();
         }
@@ -278,9 +294,9 @@ async fn test_inbound_multiple_packets() {
         client.write_all(b"333").await.unwrap();
     });
 
-    assert_eq!(rx.recv_async().await.unwrap().1, b"111");
-    assert_eq!(rx.recv_async().await.unwrap().1, b"222");
-    assert_eq!(rx.recv_async().await.unwrap().1, b"333");
+    assert_eq!(rx.recv_async().await.unwrap().payload.as_ref(), b"111");
+    assert_eq!(rx.recv_async().await.unwrap().payload.as_ref(), b"222");
+    assert_eq!(rx.recv_async().await.unwrap().payload.as_ref(), b"333");
     log::debug!("All packets received");
     stop.trigger();
 }
@@ -290,16 +306,17 @@ async fn test_inbound_multiple_packets() {
 async fn test_outbound_multiple_packets() {
     let (client, mut server) = tokio::io::duplex(1024);
     let (tx, rx) = flume::bounded(10);
+    let (err_tx, _err_rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
-    let mut outbound = TunnelClientOutboundStream::new(client, rx, stop.clone());
+    let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
     tokio::spawn({
         let stop = stop.clone();
         async move {
-            tx.send_async(b"one".to_vec()).await.unwrap();
-            tx.send_async(b"two".to_vec()).await.unwrap();
-            tx.send_async(b"three".to_vec()).await.unwrap();
+            tx.send_async(b"one".into()).await.unwrap();
+            tx.send_async(b"two".into()).await.unwrap();
+            tx.send_async(b"three".into()).await.unwrap();
             stop.wait_async().await;
         }
     });
@@ -342,8 +359,8 @@ async fn test_tunnel_outbound() -> Result<()> {
 
     let (mut client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
-    let (our_sender, client_receiver) = flume::bounded::<Vec<u8>>(128);
-    let (client_sender, our_receiver) = flume::bounded::<(u16, Vec<u8>)>(128);
+    let (our_sender, client_receiver) = flume::bounded::<Payload>(128);
+    let (client_sender, our_receiver) = flume::bounded::<PayloadWithChannel>(128);
     let channels = ClientEndpoints {
         tx: client_sender,
         rx: client_receiver,
@@ -372,7 +389,7 @@ async fn test_tunnel_outbound() -> Result<()> {
     });
 
     // Send message to tunnel
-    our_sender.send_async(b"hello tunnel".to_vec()).await?;
+    our_sender.send_async(b"hello tunnel".into()).await?;
 
     // Should output on client side
     let mut buf = [0u8; 12];
@@ -387,17 +404,17 @@ async fn test_tunnel_outbound() -> Result<()> {
     client_side.write_all(b"hello client").await?;
 
     // Should output on our_receiver
-    let (channel_id, data) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), our_receiver.recv_async())
-            .await??;
-    assert_eq!(channel_id, 1);
-    assert_eq!(&data, b"hello client");
+    let data = tokio::time::timeout(std::time::Duration::from_secs(2), our_receiver.recv_async())
+        .await??;
+    assert_eq!(data.channel_id, 1);
+    assert_eq!(&data.payload.as_ref(), b"hello client");
 
     // stop the tunnel stream, and ensure it's stopped
     stop.trigger();
     stopped
         .wait_timeout_async(std::time::Duration::from_secs(1))
-        .await;
+        .await
+        .expect("Tunnel stream should stop on trigger");
 
     Ok(())
 }

@@ -32,12 +32,12 @@
 use std::sync::{Arc, atomic::AtomicBool};
 
 use anyhow::Result;
-use flume::{Receiver, Sender};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use shared::{
     crypt::{Crypt, consts::CRYPT_PACKET_SIZE, types::PacketBuffer},
     log,
+    protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender},
     system::trigger::Trigger,
 };
 
@@ -48,7 +48,7 @@ use crate::{
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
     stop: Trigger,
-    sender: Sender<(u16, Vec<u8>)>,
+    sender: PayloadWithChannelSender,
     buffer: PacketBuffer,
     crypt: Crypt,
 
@@ -56,7 +56,7 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
-    pub fn new(reader: R, crypt: Crypt, sender: Sender<(u16, Vec<u8>)>, stop: Trigger) -> Self {
+    pub fn new(reader: R, crypt: Crypt, sender: PayloadWithChannelSender, stop: Trigger) -> Self {
         TunnelServerInboundStream {
             stop,
             sender,
@@ -80,7 +80,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
             }
             // Channels are processed on the proxy side, so just forward data
             self.sender
-                .try_send((stream_channel_id, decrypted_data.to_vec()))?;
+                .try_send(PayloadWithChannel::new(stream_channel_id, decrypted_data))?;
         }
         Ok(())
     }
@@ -88,14 +88,14 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
 
 struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
-    receiver: Receiver<(u16, Vec<u8>)>, // Channel id + data
+    receiver: PayloadWithChannelReceiver,
     crypt: Crypt,
 
     writer: W,
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
-    pub fn new(writer: W, crypt: Crypt, receiver: Receiver<(u16, Vec<u8>)>, stop: Trigger) -> Self {
+    pub fn new(writer: W, crypt: Crypt, receiver: PayloadWithChannelReceiver, stop: Trigger) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,
@@ -112,15 +112,15 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 }
                 result = self.receiver.recv_async() => {
                     match result {
-                        Ok((channel_id, data)) => {
-                            self.send_data(channel_id, &data).await?
+                        Ok(channel_data) => {
+                            self.send_data(channel_data).await?
                         }
-                        Err(_) => {
+                        Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
                             if self.stop.is_triggered() {
                                 break;
                             }
-                            log::error!("Server outbound receiver channel closed");
+                            log::error!("Server outbound receiver channel closed: {:?}", e);
                             return Err(anyhow::anyhow!("Receiver channel closed"));
                         }
                     }
@@ -130,14 +130,15 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         Ok(())
     }
 
-    async fn send_data(&mut self, channel: u16, data: &[u8]) -> Result<()> {
+    async fn send_data(&mut self, data: PayloadWithChannel) -> Result<()> {
         let mut offset = 0;
 
+        let payload = data.payload.as_ref();
         // Divide data into CRYPT_PACKET_SIZE chunks and send them
-        while offset < data.len() {
-            let end = (offset + CRYPT_PACKET_SIZE).min(data.len());
-            let chunk = &data[offset..end];
-            self.crypt.write(&mut self.writer, channel, chunk).await?;
+        while offset < payload.len() {
+            let end = (offset + CRYPT_PACKET_SIZE).min(payload.len());
+            let chunk = &payload[offset..end];
+            self.crypt.write(&mut self.writer, data.channel_id, chunk).await?;
             offset = end;
         }
 
@@ -241,14 +242,6 @@ where
         });
 
         tokio::spawn(async move {
-            // Notify starting server side
-            if let Err(e) = session_manager.start_server(&session_id).await {
-                log::error!("Failed to start server session {:?}: {:?}", session_id, e);
-                local_stop.trigger();
-                // Note: Server side does not trigger stop of the session on failure
-                //       as it is recoverable.
-                return;
-            }
             tokio::select! {
                 _ = stop.wait_async() => {
                     local_stop.trigger();

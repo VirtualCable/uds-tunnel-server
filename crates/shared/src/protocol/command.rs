@@ -33,9 +33,11 @@
 use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
+use crate::protocol::PayloadWithChannel;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
 #[repr(u8)]
-pub enum CommandType {
+enum CommandType {
     // Generic OK response
     //   - From client to tunnel: not used
     //   - From tunnel to client: means "last command was successful"
@@ -162,8 +164,8 @@ impl Command {
         data
     }
 
-    pub fn to_message(&self) -> (u16, Vec<u8>) {
-        (0, self.to_bytes()) // channel 0 is reserved for commands
+    pub fn to_message(&self) -> PayloadWithChannel {
+        PayloadWithChannel::new(0, self.to_bytes().as_slice()) // channel 0 is reserved for commands
     }
 
     pub fn is_close_command(&self) -> bool {

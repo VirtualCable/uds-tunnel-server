@@ -41,14 +41,14 @@ use shared::{
     consts::TICKET_LENGTH,
     crypt::{
         Crypt,
+        kem::{debug::get_debug_kem_keypair_768, set_comms_keypair},
         tunnel::derive_tunnel_material,
         types::{PacketBuffer, SharedSecret},
     },
     log,
-    protocol::{consts::HANDSHAKE_V2_SIGNATURE, handshake::HandshakeCommand},
+    protocol::{Command, consts::HANDSHAKE_V2_SIGNATURE, handshake::HandshakeCommand},
     system::trigger::Trigger,
     ticket::Ticket,
-    crypt::kem::{debug::get_debug_kem_keypair_768, set_comms_keypair},
 };
 
 use crate::{config, connection::types::OpenResponse, session::SessionManager};
@@ -156,6 +156,7 @@ async fn setup_testing_connection(
 
     // Create a pair of connected TCP streams
     let (client_stream, server_stream) = tokio::io::duplex(1024);
+    SessionManager::get_instance().finish_all_sessions().await;
 
     tokio::spawn(async move {
         let (server_reader, server_writer) = tokio::io::split(server_stream);
@@ -165,8 +166,6 @@ async fn setup_testing_connection(
             log::error!("Server connection handling failed: {:?}", e);
         }
     });
-
-    SessionManager::get_instance().finish_all_sessions().await;
 
     // Pass the base url (without /ui) to the API
     (
@@ -222,17 +221,35 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
         .read(&stop, &mut client_stream, &mut buffer)
         .await?;
 
+    log::debug!(
+        "Received session response on channel {}: {:?}",
+        stream_channel_id,
+        session_response_data
+    );
     let session_response = OpenResponse::from_slice(session_response_data)?;
     assert_eq!(
         session_response.channel_count, 1,
         "Channel mismatch in response"
     );
 
+    log::debug!(
+        "Session established with id {:?}",
+        session_response.session_id
+    );
     // Ensure its on session manager
     let session_manager = crate::session::SessionManager::get_instance();
     let _equiv_session = session_manager
         .get_equiv_session(&session_response.session_id)
         .expect("Session not found");
+
+    // Now, open the remote channel (1)
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
+        )
+        .await?;
 
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(

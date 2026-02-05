@@ -36,11 +36,10 @@ use futures::future::{Either, pending};
 use tokio::net::TcpStream;
 
 use crate::{
-    consts::CHANNEL_SIZE,
     session::{Session, SessionId, SessionManager},
     stream::client::TunnelClientStream,
 };
-use shared::{log, protocol::command::Command, system::trigger::Trigger};
+use shared::{log, protocol, system::trigger::Trigger};
 
 enum ProxyCommand {
     AttachServer { reply: Sender<ServerEndpoints> },
@@ -52,14 +51,14 @@ enum ProxyCommand {
 
 #[derive(Debug, Clone)]
 pub struct ServerEndpoints {
-    pub tx: Sender<(u16, Vec<u8>)>,
-    pub rx: Receiver<(u16, Vec<u8>)>,
+    pub tx: protocol::PayloadWithChannelSender,
+    pub rx: protocol::PayloadWithChannelReceiver,
 }
 
 #[derive(Debug, Clone)]
 pub struct ClientEndpoints {
-    pub tx: Sender<(u16, Vec<u8>)>,
-    pub rx: Receiver<Vec<u8>>,
+    pub tx: protocol::PayloadWithChannelSender,
+    pub rx: protocol::PayloadReceiver,
 }
 
 #[derive(Debug)]
@@ -69,6 +68,7 @@ pub(super) struct SessionProxyHandle {
 
 impl SessionProxyHandle {
     pub async fn start_server(&self) -> Result<ServerEndpoints> {
+        log::debug!("Starting server in session proxy");
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = ProxyCommand::AttachServer { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
@@ -110,19 +110,19 @@ impl SessionProxyHandle {
 
 #[derive(Debug, Clone)]
 struct ClientInfo {
-    sender: Sender<Vec<u8>>,
+    sender: protocol::PayloadSender,
     stop: Trigger,
 }
 
 struct ClientFanIn {
     clients_senders: Vec<Option<ClientInfo>>,
-    sender: Sender<(u16, Vec<u8>)>,
-    receiver: Receiver<(u16, Vec<u8>)>,
+    sender: protocol::PayloadWithChannelSender,
+    receiver: protocol::PayloadWithChannelReceiver,
 }
 
 impl ClientFanIn {
     pub fn new() -> Self {
-        let (sender, receiver) = flume::bounded(CHANNEL_SIZE);
+        let (sender, receiver) = protocol::payload_with_channel_pair();
         Self {
             clients_senders: Vec::new(),
             sender,
@@ -143,7 +143,7 @@ impl ClientFanIn {
             old_client.stop.trigger();
         }
 
-        let (sender, receiver) = flume::bounded(CHANNEL_SIZE);
+        let (sender, receiver) = protocol::payload_pair();
         // (self.sender.clone(), receiver)
 
         // If outside remotes, will fail and return error
@@ -180,15 +180,15 @@ impl ClientFanIn {
         Ok(())
     }
 
-    pub async fn send_to_channel(&self, stream_channel_id: u16, msg: Vec<u8>) -> Result<()> {
-        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+    pub async fn send_to_channel(&self, msg: protocol::PayloadWithChannel) -> Result<()> {
+        if msg.channel_id == 0 || msg.channel_id as usize > self.clients_senders.len() {
             return Err(anyhow::anyhow!(
                 "Invalid stream_channel_id: {}",
-                stream_channel_id
+                msg.channel_id
             ));
         }
-        if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
-            client.sender.send_async(msg).await?;
+        if let Some(client) = &self.clients_senders[(msg.channel_id - 1) as usize] {
+            client.sender.send_async(msg.payload).await?;
         }
         // If no client, just drop the message
         Ok(())
@@ -209,7 +209,7 @@ impl ClientFanIn {
         }
     }
 
-    pub async fn recv(&self) -> Result<(u16, Vec<u8>)> {
+    pub async fn recv(&self) -> Result<protocol::PayloadWithChannel> {
         let msg = self.receiver.recv_async().await?;
         Ok(msg)
     }
@@ -289,8 +289,8 @@ impl Proxy {
                     match cmd {
                         Ok(ProxyCommand::AttachServer { reply }) => {
                             log::debug!("Attaching server to session proxy");
-                            let (server_tx, our_rx) = bounded(CHANNEL_SIZE);
-                            let (our_tx, server_rx) = bounded(CHANNEL_SIZE);
+                            let (server_tx, our_rx) = protocol::payload_with_channel_pair();
+                            let (our_tx, server_rx) = protocol::payload_with_channel_pair();
                             our_server_channels = Some(ServerEndpoints { tx: our_tx, rx: our_rx });
                             let endpoints = ServerEndpoints { tx: server_tx, rx: server_rx };
                             let _ = reply.send(endpoints);
@@ -316,23 +316,24 @@ impl Proxy {
                 }
                 msg = server_recv => {
                     match msg {
-                        Ok((stream_channel_id, msg)) => {
+                        Ok(msg) => {
                             // stream channel 0 is control channel, process it here
-                            if stream_channel_id == 0 {
+                            if msg.channel_id == 0 {
                                 // Failures on commands closes the proxy and consecuently, the session
-                                if Self::handle_incoming_command(msg, &parent, &mut clients).await? {
+                                if Self::handle_incoming_command(msg.payload.as_ref(), &parent, &mut clients).await? {
                                     log::debug!("Control channel requested session close");
                                     break;  // exit loop on command request
                                 }
                                 continue;
                             }
-                            if let Err(e) = clients.send_to_channel(stream_channel_id, msg).await {
+                            let channel_id = msg.channel_id;
+                            if let Err(e) = clients.send_to_channel(msg).await {
                                 log::warn!("Failed to forward message to client: {:?}", e);
                                 // Return error to server and continue
                                 if let Some(server) = &our_server_channels {
                                     let _ = server.tx.send_async(
-                                        Command::ChannelError {
-                                            channel_id: stream_channel_id,
+                                        protocol::Command::ChannelError {
+                                            channel_id,
                                             message: format!("Failed to forward message to client: {:?}", e)
                                         }.to_message()
                                     ).await;
@@ -347,8 +348,8 @@ impl Proxy {
                 }
                 msg = clients.recv() => {
                     match msg {
-                        Ok((stream_channel_id, msg)) => {
-                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async((stream_channel_id, msg)).await {
+                        Ok(msg) => {
+                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async(msg).await {
                                 log::warn!("Failed to forward message to server: {:?}", e);
                                 break;  // exit loop on error
                             }
@@ -368,16 +369,16 @@ impl Proxy {
     }
 
     async fn handle_incoming_command(
-        data: Vec<u8>,
+        data: &[u8],
         parent: &SessionId,
         clients: &mut ClientFanIn,
     ) -> Result<bool> {
         // Errors parsing commands, mean intentional error or misbehavior (or big bug :P), so we will always
         // close the session on command errors
-        let cmd = Command::from_bytes(&data)?;
+        let cmd = protocol::Command::from_bytes(data)?;
         log::debug!("Processing command in proxy: {:?}", cmd);
         match cmd {
-            Command::Close => {
+            protocol::Command::Close => {
                 log::info!(
                     "Received Close command in session {:?}, closing session",
                     parent
@@ -385,7 +386,7 @@ impl Proxy {
                 // Just return an error to close the session
                 return Ok(true);
             }
-            Command::OpenChannel { channel_id } => {
+            protocol::Command::OpenChannel { channel_id } => {
                 let session = {
                     let session_manager = SessionManager::get_instance();
                     session_manager
@@ -397,7 +398,7 @@ impl Proxy {
                 };
                 clients.create_client(channel_id, session).await?;
             }
-            Command::CloseChannel { channel_id } => {
+            protocol::Command::CloseChannel { channel_id } => {
                 clients.stop_client(channel_id).await;
                 clients.close_client(channel_id);
             }

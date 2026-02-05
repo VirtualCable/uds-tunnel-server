@@ -56,7 +56,7 @@ where
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
     log::debug!("Starting connection handshake");
-    let (ip, action) = match timeout(
+    let (src_ip, action) = match timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
         handshake::Handshake::parse(&mut reader, use_proxy_v2),
     )
@@ -84,10 +84,13 @@ where
             Ok(())
         }
         handshake::HandshakeAction::Open { ticket } => {
-            connect::connect(reader, writer, &ticket, ip)
+            connect::connect(reader, writer, &ticket, src_ip)
                 .await
                 .map_err(|e| {
-                    ErrorWithAddres::new(Some(ip), format!("Connection failed: {:?}", e).as_str())
+                    ErrorWithAddres::new(
+                        Some(src_ip),
+                        format!("Connection failed: {:?}", e).as_str(),
+                    )
                 })
         }
         handshake::HandshakeAction::Recover { ticket } => {

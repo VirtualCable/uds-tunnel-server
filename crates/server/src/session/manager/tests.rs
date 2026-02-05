@@ -134,6 +134,7 @@ async fn test_session_lifecycle() {
             .stop
             .wait_timeout_async(std::time::Duration::from_millis(500))
             .await
+            .is_ok()
     );
     assert!(!session.is_server_running());
     wait_for_session_existence(session.id(), false)
