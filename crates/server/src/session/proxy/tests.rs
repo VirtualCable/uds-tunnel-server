@@ -263,6 +263,7 @@ async fn buffer_size_works() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn reattach_server_works() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);

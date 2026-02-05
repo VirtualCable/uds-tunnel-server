@@ -33,7 +33,6 @@ use super::*;
 
 use std::net::SocketAddr;
 
-use anyhow::Ok;
 use mockito::{Matcher, Server};
 use tokio::io::{AsyncWriteExt, DuplexStream};
 
@@ -196,6 +195,48 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
     Ok((out_crypt, in_crypt))
 }
 
+async fn wait_for_session_manager_empty() {
+    let session_manager = SessionManager::get_instance();
+    for _ in 0..10 {
+        if session_manager.count() == 0 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("Session manager not empty after waiting");
+}
+
+async fn read_until_close(
+    in_crypt: &mut Crypt,
+    mut client_stream: &mut DuplexStream,
+    channel_id: u16,
+    stop: &Trigger,
+) -> anyhow::Result<String> {
+    let mut received = Vec::new();
+    let mut buffer = PacketBuffer::new();
+    loop {
+        // Read response (also encrypted)
+        log::debug!("Waiting for GET response from server");
+        let (data, channel) = in_crypt.read(stop, &mut client_stream, &mut buffer).await?;
+        if channel == channel_id {
+            log::debug!("Received data on channel {}", channel_id);
+            received.extend_from_slice(data);
+        } else {
+            log::debug!("Received data on channel {}: {:?}", channel, data);
+            assert_eq!(
+                channel, 0,
+                "Channel mismatch in response: {} - {:?}",
+                channel, data
+            );
+            let command = Command::from_slice(data)?;
+            assert!(matches!(command, Command::CloseChannel { channel_id, .. }));
+            break;
+        }
+    }
+    let response_str = String::from_utf8_lossy(&received);
+    Ok(response_str.into_owned())
+}
+
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
@@ -261,24 +302,17 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
         .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
         .await?;
     // Read response (also encrypted)
-    let mut buffer = PacketBuffer::new();
-    let (data, stream_channel_id) = in_crypt
-        .read(&stop, &mut client_stream, &mut buffer)
-        .await?;
+    let response = read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID, &stop).await?;
 
-    let response_str = String::from_utf8_lossy(data);
-    log::info!("Received response: {}", response_str);
-    assert!(response_str.contains("HTTP/1.1 200 OK"));
-    assert!(
-        stream_channel_id == TEST_STREAM_CHANNEL_ID,
-        "Channel mismatch in response"
-    );
+    log::info!("Received response: {}", response);
+    assert!(response.contains("HTTP/1.1 200 OK"));
 
-    // Slice some time to tokio tasks to complete
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    // Should not have any session on session manager
     let session_manager = crate::session::SessionManager::get_instance();
-    assert_eq!(session_manager.count(), 0);
+    // The session should still be there, as we have not closed server side
+    assert_eq!(session_manager.count(), 1);
+    // Close the server side
+    client_stream.shutdown().await?;
+    wait_for_session_manager_empty().await;
     Ok(())
 }
 
@@ -443,6 +477,15 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         .get_equiv_session(&session_response.session_id)
         .expect("Session not found");
 
+    // Now, open the remote channel (1)
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
+        )
+        .await?;
+
     // Create a simple GET packet to be encrypted and sent after handshake
     let get_request = format!(
         "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
@@ -451,14 +494,19 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let get_request = get_request.as_bytes();
     out_crypt.write(&mut client_stream, 1, get_request).await?;
     // Read response (also encrypted)
-    log::debug!("Waiting for GET response from server");
-    let (data, channel) = in_crypt
-        .read(&stop, &mut client_stream, &mut buffer)
+    log::debug!("Waiting for GET response from server on channel 1");
+    let response = read_until_close(&mut in_crypt, &mut client_stream, 1, &stop).await?;
+    log::info!("Received response: {}", response);
+    assert!(response.contains("HTTP/1.1 200 OK"));
+
+    // And open channel 2
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            Command::OpenChannel { channel_id: 2 }.to_bytes().as_slice(),
+        )
         .await?;
-    assert_eq!(channel, 1, "Channel mismatch in response");
-    let response_str = String::from_utf8_lossy(data);
-    log::info!("Received response: {}", response_str);
-    assert!(response_str.contains("HTTP/1.1 200 OK"));
 
     // Send and get from second channel
     let get_request = format!(
@@ -469,18 +517,16 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     out_crypt.write(&mut client_stream, 2, get_request).await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 2");
-    let (data, channel) = in_crypt
-        .read(&stop, &mut client_stream, &mut buffer)
-        .await?;
-    assert_eq!(channel, 2, "Channel mismatch in response");
-    let response_str = String::from_utf8_lossy(data);
-    log::info!("Received response on channel 2: {}", response_str);
-    assert!(response_str.contains("HTTP/1.1 200 OK"));
+    let response = read_until_close(&mut in_crypt, &mut client_stream, 2, &stop).await?;
+    log::info!("Received response on channel 2: {}", response);
+    assert!(response.contains("HTTP/1.1 200 OK"));
 
-    // Slice some time to tokio tasks to complete
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    // Should not have any session on session manager
-    assert_eq!(session_manager.count(), 0);
+    let session_manager = crate::session::SessionManager::get_instance();
+    // The session should still be there, as we have not closed server side
+    assert_eq!(session_manager.count(), 1);
+    // Close the server side
+    client_stream.shutdown().await?;
+    wait_for_session_manager_empty().await;
     Ok(())
 }
 

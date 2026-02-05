@@ -150,7 +150,7 @@ async fn test_inbound_read_error() -> Result<()> {
     // Should receive error channel error
     let result = rx.try_recv()?;
     assert_eq!(result.channel_id, 0);
-    let command = protocol::Command::from_bytes(result.payload.as_ref());
+    let command = protocol::Command::from_slice(result.payload.as_ref());
     assert!(matches!(command, Ok(protocol::Command::ChannelError { channel_id: 1, .. })));
 
     stop.trigger();

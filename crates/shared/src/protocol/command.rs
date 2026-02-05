@@ -88,7 +88,7 @@ pub enum Command {
 // Channel is already stripped when calling this function, so data contains only:
 //   command_type:u8 | command_dependent_payload
 impl Command {
-    pub fn from_bytes(data: &[u8]) -> Result<Command> {
+    pub fn from_slice(data: &[u8]) -> Result<Command> {
         if data.is_empty() {
             anyhow::bail!("command data too short");
         }
@@ -186,31 +186,31 @@ mod tests {
     fn roundtrip_open_channel() {
         let cmd = Command::OpenChannel { channel_id: 42 };
         let bytes = cmd.to_bytes();
-        let parsed = Command::from_bytes(&bytes).unwrap();
+        let parsed = Command::from_slice(&bytes).unwrap();
         assert_eq!(parsed, cmd);
     }
 
     #[test]
     fn open_channel_too_short() {
         let data = [CommandType::OpenChannel as u8, 0x01]; // just 2 bytes
-        assert!(Command::from_bytes(&data).is_err());
+        assert!(Command::from_slice(&data).is_err());
     }
 
     #[test]
     fn channel_error_too_short() {
         let data = [CommandType::ChannelError as u8, 0x00];
-        assert!(Command::from_bytes(&data).is_err());
+        assert!(Command::from_slice(&data).is_err());
     }
 
     #[test]
     fn empty_data_fails() {
-        assert!(Command::from_bytes(&[]).is_err());
+        assert!(Command::from_slice(&[]).is_err());
     }
 
     #[test]
     fn unknown_command_fails() {
         let data = [255u8];
-        assert!(Command::from_bytes(&data).is_err());
+        assert!(Command::from_slice(&data).is_err());
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
             0xFE,
             0xFD,
         ];
-        let cmd = Command::from_bytes(&data).unwrap();
+        let cmd = Command::from_slice(&data).unwrap();
         if let Command::ChannelError { message, .. } = cmd {
             assert!(message.contains("�")); // replacement char
         } else {
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn connection_error_empty_message() {
         let data = [CommandType::ConnectionError as u8];
-        let cmd = Command::from_bytes(&data).unwrap();
+        let cmd = Command::from_slice(&data).unwrap();
         assert_eq!(cmd, Command::ConnectionError { message: "".into() });
     }
 
@@ -253,7 +253,7 @@ mod tests {
             message: msg.clone(),
         };
         let bytes = cmd.to_bytes();
-        let parsed = Command::from_bytes(&bytes).unwrap();
+        let parsed = Command::from_slice(&bytes).unwrap();
 
         if let Command::ChannelError { message, .. } = parsed {
             assert_eq!(message, msg);

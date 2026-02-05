@@ -375,7 +375,7 @@ impl Proxy {
     ) -> Result<bool> {
         // Errors parsing commands, mean intentional error or misbehavior (or big bug :P), so we will always
         // close the session on command errors
-        let cmd = protocol::Command::from_bytes(data)?;
+        let cmd = protocol::Command::from_slice(data)?;
         log::debug!("Processing command in proxy: {:?}", cmd);
         match cmd {
             protocol::Command::Close => {
