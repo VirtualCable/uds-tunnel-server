@@ -33,9 +33,8 @@ use std::sync::Arc;
 use shared::{
     consts,
     crypt::{build_header, consts::HEADER_LENGTH, types::SharedSecret},
-    protocol::{self, Command},
+    protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
-    ticket::Ticket,
 };
 
 use crate::session::{Session, SessionManager};
@@ -56,79 +55,36 @@ fn make_test_crypts() -> (Crypt, Crypt) {
     (inbound, outbound)
 }
 
-// async fn create_test_server_stream() -> (Arc<Session>, tokio::io::DuplexStream) {
-//     log::setup_logging("debug", log::LogType::Test);
-
-//     let ticket = Ticket::new([0x40u8; consts::TICKET_LENGTH]);
-//     let shared_secret = SharedSecret::new([3u8; 32]);
-
-//     // Create the session
-//     let session = Session::new(
-//         shared_secret,
-//         ticket,
-//         Trigger::new(),
-//         "127.0.0.1:0".parse().unwrap(),
-//         vec!["127.0.0.1:22".to_string()]
-//     );
-
-//     // Add session to manager
-//     let session = SessionManager::get_instance().add_session(session).unwrap();
-
-//     let (client_side, tunnel_side) = tokio::io::duplex(1024);
-//     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
-
-//     let tss = TunnelServerStream::new(*session.id(), tunnel_reader, tunnel_writer);
-
-//     tokio::spawn(async move {
-//         tss.run().await.unwrap();
-//     });
-
-//     (session, client_side)
-// }
-
-// async fn get_server_stream_components(
-//     session_id: &SessionId,
-// ) -> Result<(Trigger, ClientEndpoints, Crypt, Crypt)> {
-//     let (stop, channels, inbound_crypt, outbound_crypt) =
-//         if let Some(session) = SessionManager::get_instance().get_session(session_id) {
-//             let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
-//             (
-//                 session.stop_trigger(),
-//                 session.client_sender_receiver(TEST_CHANNEL_ID).await?,
-//                 inbound_crypt,
-//                 outbound_crypt,
-//             )
-//         } else {
-//             log::warn!("Session {:?} not found, aborting stream", session_id);
-//             anyhow::bail!("Session not found");
-//         };
-//     Ok((stop, channels, inbound_crypt, outbound_crypt))
-// }
-
-// async fn init_server_test() -> (
-//     SessionId,
-//     tokio::io::DuplexStream,
-//     Trigger,
-//     ClientEndpoints,
-//     Crypt,
-//     Crypt,
-// ) {
-//     log::setup_logging("debug", log::LogType::Test);
-
-//     let (session, client) = create_test_server_stream().await;
-
-//     let (stop, endpoints, inbound_crypt, outbound_crypt) =
-//         get_server_stream_components(session.id()).await.unwrap();
-
-//     (
-//         *session.id(),
-//         client,
-//         stop,
-//         endpoints,
-//         inbound_crypt,
-//         outbound_crypt,
-//     )
-// }
+async fn read_until_close(
+    in_crypt: &mut Crypt,
+    mut client_stream: &mut (impl tokio::io::AsyncRead + Unpin),
+    channel_id: u16,
+    stop: &Trigger,
+) -> anyhow::Result<String> {
+    let mut received = Vec::new();
+    let mut buffer = PacketBuffer::new();
+    loop {
+        // Read response (also encrypted)
+        log::debug!("Waiting for GET response from server");
+        let (data, channel) = in_crypt.read(stop, &mut client_stream, &mut buffer).await?;
+        if channel == channel_id {
+            log::debug!("Received data on channel {}", channel_id);
+            received.extend_from_slice(data);
+        } else {
+            log::debug!("Received data on channel {}: {:?}", channel, data);
+            assert_eq!(
+                channel, 0,
+                "Channel mismatch in response: {} - {:?}",
+                channel, data
+            );
+            let command = Command::from_slice(data)?;
+            assert!(matches!(command, Command::CloseChannel { .. }));
+            break;
+        }
+    }
+    let response_str = String::from_utf8_lossy(&received);
+    Ok(response_str.into_owned())
+}
 
 #[serial_test::serial(manager)]
 #[tokio::test]
@@ -311,8 +267,6 @@ async fn test_tunnel_inbound() -> Result<()> {
     let (mut client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
 
-    let (client_sender, our_receiver) = protocol::payload_with_channel_pair();
-
     let tunnel = TunnelServerStream::new(*session.id(), tunnel_reader, tunnel_writer);
 
     // Run the tunnel stream in the background
@@ -331,14 +285,13 @@ async fn test_tunnel_inbound() -> Result<()> {
         .write(
             &mut client_side,
             TEST_CHANNEL_ID,
-            b"GET /echo HTTP/1.1\r\nHost: echo.free.beeceptor.com\r\n\r\n",
+            b"GET /echo HTTP/1.0\r\nConnection: Close\r\nHost: echo.free.beeceptor.com\r\n\r\n",
         )
         .await?;
-    let mut packet_buffer = PacketBuffer::new();
-    in_crypt
-        .read(&stop, &mut client_side, &mut packet_buffer)
-        .await?;
-    log::debug!("Received response: {:?}", &packet_buffer);
+
+    let data = read_until_close(&mut in_crypt, &mut client_side, 1, &stop).await?;
+    log::debug!("Received response: {:?}", data);
+    assert!(data.contains("HTTP/1.0 200 OK"));
 
     // Stop the tunnel after some time to avoid hanging the test
     stop.trigger();

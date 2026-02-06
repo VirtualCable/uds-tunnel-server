@@ -30,7 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use std::net::SocketAddr;
 
-use shared::ticket::Ticket;
+use shared::protocol::ticket::Ticket;
 
 #[derive(serde::Serialize)]
 pub(super) struct TicketRequest {

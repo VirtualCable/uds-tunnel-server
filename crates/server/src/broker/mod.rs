@@ -41,7 +41,7 @@ use shared::{
         ticket::EncryptedTicketResponse,
     },
     log,
-    ticket::Ticket,
+    protocol::ticket::Ticket,
 };
 
 mod request;

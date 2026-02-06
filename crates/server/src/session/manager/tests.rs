@@ -30,7 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use super::*;
 
-use shared::{crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
+use shared::{crypt::types::SharedSecret, log, system::trigger::Trigger, protocol::ticket};
 
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {

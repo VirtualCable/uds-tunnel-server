@@ -1,4 +1,4 @@
-use shared::{consts::TICKET_LENGTH, ticket::Ticket};
+use shared::protocol::{consts::TICKET_LENGTH, ticket::Ticket};
 
 const RESERVED_LENGTH: usize = 6;
 

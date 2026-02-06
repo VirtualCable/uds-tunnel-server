@@ -1,7 +1,7 @@
 use super::*;
 
 use mockito::Server;
-use shared::{consts::TICKET_LENGTH, crypt::kem::debug::get_debug_kem_keypair_768};
+use shared::{protocol::consts::TICKET_LENGTH, crypt::kem::debug::get_debug_kem_keypair_768};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub const TICKET_ID: &str = "c6s9FAa5fhb854BVMckqUBJ4hOXg2iE5i1FYPCuktks4eNZD";

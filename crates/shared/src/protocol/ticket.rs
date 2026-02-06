@@ -32,7 +32,7 @@
 use anyhow::Result;
 use rand::{Rng, distr::Alphanumeric};
 
-use crate::consts::TICKET_LENGTH;
+use super::consts::TICKET_LENGTH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket([u8; TICKET_LENGTH]);

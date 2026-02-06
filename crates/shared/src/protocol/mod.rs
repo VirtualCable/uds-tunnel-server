@@ -4,6 +4,7 @@ mod command;
 pub mod consts;
 pub mod handshake;
 pub mod proxy_v2;
+pub mod ticket;
 
 pub use command::Command;
 

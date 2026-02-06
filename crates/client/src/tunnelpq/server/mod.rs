@@ -45,10 +45,12 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, Context};
 use tokio::net::TcpListener;
 
-use shared::{log, system::trigger::Trigger, ticket::Ticket};
+use shared::{log, system::trigger::Trigger};
+
+use super::protocol::{ticket::Ticket, handshake::Handshake};
 
 pub struct TunnelListener {
     ticket: Ticket,
@@ -75,16 +77,26 @@ impl TunnelListener {
         }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> Result<()> {
+        // Try to connect to tunnel server and authenticate using the ticket and shared secret
+        let stream = tokio::net::TcpStream::connect(&self.tunnel_server)
+            .await
+            .context("Failed to connect to tunnel server")?;
+        // Try to disable Nagle's algorithm for better performance in our case
+        stream.set_nodelay(true).ok();
+        // Send open tunnel command with the ticket and shared secret
+        // let handshake = Handshake::new(self.ticket, self.shared_secret);
+
         tokio::spawn(async move {
             if let Err(e) = self.run_task().await {
                 log::error!("TunnelListener task ended with error: {}", e);
             }
+            self.stop.trigger();
         });
         Ok(())
     }
 
-    async fn run_task(self) -> anyhow::Result<()> {
+    async fn run_task(&self) -> anyhow::Result<()> {
         Ok(())
     }
 }

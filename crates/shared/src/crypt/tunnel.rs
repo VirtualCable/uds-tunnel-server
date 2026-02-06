@@ -33,7 +33,7 @@ use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::{log, ticket};
+use crate::{log, protocol::ticket};
 
 use super::{Crypt, types::SharedSecret};
 

@@ -7,6 +7,8 @@ edition = "2024"
 shared = { path = "../shared" }
 
 anyhow = { workspace = true }
+rand = { workspace = true }
+num_enum = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }

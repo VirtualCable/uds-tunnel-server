@@ -37,7 +37,6 @@ use mockito::{Matcher, Server};
 use tokio::io::{AsyncWriteExt, DuplexStream};
 
 use shared::{
-    consts::TICKET_LENGTH,
     crypt::{
         Crypt,
         kem::{debug::get_debug_kem_keypair_768, set_comms_keypair},
@@ -45,9 +44,11 @@ use shared::{
         types::{PacketBuffer, SharedSecret},
     },
     log,
-    protocol::{Command, consts::HANDSHAKE_V2_SIGNATURE, handshake::HandshakeCommand},
+    protocol::{
+        Command, consts::HANDSHAKE_V2_SIGNATURE, consts::TICKET_LENGTH,
+        handshake::HandshakeCommand, ticket::Ticket,
+    },
     system::trigger::Trigger,
-    ticket::Ticket,
 };
 
 use crate::{config, connection::types::OpenResponse, session::SessionManager};
@@ -302,7 +303,13 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
         .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
         .await?;
     // Read response (also encrypted)
-    let response = read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID, &stop).await?;
+    let response = read_until_close(
+        &mut in_crypt,
+        &mut client_stream,
+        TEST_STREAM_CHANNEL_ID,
+        &stop,
+    )
+    .await?;
 
     log::info!("Received response: {}", response);
     assert!(response.contains("HTTP/1.1 200 OK"));

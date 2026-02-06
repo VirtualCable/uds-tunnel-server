@@ -186,6 +186,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "futures",
+ "num_enum",
+ "rand",
  "shared",
  "tokio",
 ]

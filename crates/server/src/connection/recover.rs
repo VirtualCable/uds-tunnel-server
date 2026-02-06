@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, system::trigger::Trigger, ticket::Ticket};
+use shared::{crypt::types::PacketBuffer, log, system::trigger::Trigger, protocol::ticket::Ticket};
 
 use crate::{session::SessionManager, stream::server::TunnelServerStream};
 

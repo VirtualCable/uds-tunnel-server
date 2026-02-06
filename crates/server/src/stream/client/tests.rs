@@ -33,11 +33,9 @@ use super::*;
 use anyhow::Result;
 
 use shared::{
-    consts::TICKET_LENGTH,
     crypt::types::SharedSecret,
-    protocol::{self, Payload, PayloadWithChannel},
+    protocol::{self, Payload, PayloadWithChannel, consts::TICKET_LENGTH, ticket::Ticket},
     system::trigger::Trigger,
-    ticket::Ticket,
 };
 
 use crate::session::{ClientEndpoints, Session, SessionManager};
@@ -151,7 +149,10 @@ async fn test_inbound_read_error() -> Result<()> {
     let result = rx.try_recv()?;
     assert_eq!(result.channel_id, 0);
     let command = protocol::Command::from_slice(result.payload.as_ref());
-    assert!(matches!(command, Ok(protocol::Command::ChannelError { channel_id: 1, .. })));
+    assert!(matches!(
+        command,
+        Ok(protocol::Command::ChannelError { channel_id: 1, .. })
+    ));
 
     stop.trigger();
     Ok(())
@@ -167,7 +168,7 @@ async fn test_outbound_channel_closed() {
 
     let mut outbound = TunnelClientOutboundStream::new(client, err_tx, rx, stop.clone());
 
-    drop(tx);  // Close the sending side to simulate channel closed
+    drop(tx); // Close the sending side to simulate channel closed
 
     let res = outbound.run().await;
     assert!(res.is_err());

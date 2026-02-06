@@ -36,7 +36,7 @@ use std::{
 
 use anyhow::Result;
 
-use shared::{crypt, crypt::types::SharedSecret, log, system::trigger::Trigger, ticket};
+use shared::{crypt, crypt::types::SharedSecret, log, protocol::ticket, system::trigger::Trigger};
 
 mod manager;
 mod proxy;

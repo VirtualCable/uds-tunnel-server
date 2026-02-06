@@ -11,7 +11,7 @@ use crate::{
         kem::{CIPHERTEXT_SIZE, CipherText, PRIVATE_KEY_SIZE, PrivateKey, decapsulate},
         tunnel::derive_tunnel_material,
     },
-    ticket::Ticket,
+    protocol::ticket::Ticket,
 };
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]

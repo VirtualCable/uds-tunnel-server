@@ -100,6 +100,8 @@ async fn main() {
                     Ok((socket, addr)) => {
                         log::info!("Accepted connection from {}", addr);
                         tokio::spawn({
+                            // Try to disable Nagle's algorithm for better performance in our case
+                            socket.set_nodelay(true).ok();
                             let (reader, writer) = socket.into_split();
                             async move {
                                 if let Err(e) =

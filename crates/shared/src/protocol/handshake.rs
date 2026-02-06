@@ -35,11 +35,9 @@ use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use tokio::io::AsyncReadExt;
 
-use crate::{consts::TICKET_LENGTH, errors::ErrorWithAddres, log, ticket::Ticket};
+use crate::{errors::ErrorWithAddres, log, protocol::ticket::Ticket};
 
-use super::proxy_v2::ProxyInfo;
-
-use super::consts::HANDSHAKE_V2_SIGNATURE;
+use super::{proxy_v2::ProxyInfo, consts};
 
 // Handshake commands, starting from 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -90,7 +88,7 @@ impl Handshake {
         } else {
             None
         };
-        let mut signature_buf = [0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
+        let mut signature_buf = [0u8; consts::HANDSHAKE_V2_SIGNATURE.len() + 1];
         reader
             .read_exact(&mut signature_buf)
             .await
@@ -98,20 +96,14 @@ impl Handshake {
                 src_ip: ip,
                 message: format!("failed to read handshake signature and command: {}", e),
             })?;
-        if signature_buf.len() != HANDSHAKE_V2_SIGNATURE.len() + 1 {
-            return Err(ErrorWithAddres {
-                src_ip: ip,
-                message: "incomplete handshake signature and command".to_string(),
-            });
-        }
-        let cmd: HandshakeCommand = signature_buf[HANDSHAKE_V2_SIGNATURE.len()].into();
+        let cmd: HandshakeCommand = signature_buf[consts::HANDSHAKE_V2_SIGNATURE.len()].into();
         match cmd {
             HandshakeCommand::Test => Ok(Handshake {
                 src_ip: ip,
                 action: HandshakeAction::Test,
             }),
             HandshakeCommand::Open | HandshakeCommand::Recover => {
-                let mut ticket_buf = [0u8; TICKET_LENGTH];
+                let mut ticket_buf = [0u8; consts::TICKET_LENGTH];
                 reader.read_exact(&mut ticket_buf).await.map_err(|e| {
                     ErrorWithAddres::new(
                         ip,
@@ -141,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_parse_no_proxy_test() {
         let mut data = Vec::new();
-        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
         data.push(HandshakeCommand::Test.into());
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let handshake = Handshake::parse(&mut reader, false).await.unwrap();
@@ -155,9 +147,9 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_parse_no_proxy_open() {
         let mut data = Vec::new();
-        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
         data.push(HandshakeCommand::Open.into());
-        let ticket = [0x42u8; TICKET_LENGTH];
+        let ticket = [0x42u8; consts::TICKET_LENGTH];
         data.extend_from_slice(&ticket);
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let handshake = Handshake::parse(&mut reader, false).await.unwrap();
@@ -173,9 +165,9 @@ mod tests {
     #[tokio::test]
     async fn test_handshake_parse_no_proxy_recover() {
         let mut data = Vec::new();
-        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
         data.push(HandshakeCommand::Recover.into());
-        let ticket = [0x43u8; TICKET_LENGTH];
+        let ticket = [0x43u8; consts::TICKET_LENGTH];
         data.extend_from_slice(&ticket);
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let handshake = Handshake::parse(&mut reader, false).await.unwrap();
@@ -220,7 +212,7 @@ mod tests {
         ];
 
         data.extend_from_slice(&buf);
-        data.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
         data.push(HandshakeCommand::Test.into());
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let handshake = Handshake::parse(&mut reader, true).await.unwrap();

@@ -35,7 +35,7 @@ use tokio::{
     net::TcpListener,
 };
 
-use shared::{crypt::types::SharedSecret, ticket::Ticket};
+use shared::{crypt::types::SharedSecret, protocol::ticket::Ticket};
 
 const TEST_CHANNEL_ID: u16 = 1;
 
@@ -312,7 +312,10 @@ async fn reattach_server_works() -> Result<()> {
     let server2 = handle.start_server().await?;
     server2
         .tx
-        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"second"))
+        .send_async(protocol::PayloadWithChannel::new(
+            TEST_CHANNEL_ID,
+            b"second",
+        ))
         .await?;
     let msg = server_rx.recv_async().await?;
     assert_eq!(msg, b"second");
