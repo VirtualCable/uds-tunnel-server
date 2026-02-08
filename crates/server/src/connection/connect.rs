@@ -68,41 +68,6 @@ where
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
 
-            // Now the recv/send seq should be set to 1 for next crypt managers
-            // (we already spent seq 0 for ticket exchange)
-            // In fact, we spent seq 1, because the crypt is pre-incrementing before use
-            // So next expected seq is 2 on both sides.
-            session.set_inbound_seq(1);
-            session.set_outbound_seq(1);
-
-            // for remote_index in 0..ticket_info.get_remotes_count() {
-            //     let target_addr = ticket_info.target_addr(remote_index as u16).await?;
-            //     log::info!(
-            //         "Established connection to remote target {} for session {:?}",
-            //         target_addr,
-            //         session.id()
-            //     );
-            //     // Open a connection to the target server using the ticket info
-            //     let target_stream =
-            //         TcpStream::connect(ticket_info.target_addr(remote_index as u16).await?).await?;
-
-            //     // Split the target stream into reader and writer
-            //     let (target_reader, target_writer) = target_stream.into_split();
-
-            //     let client_stream = TunnelClientStream::new(
-            //         *session.id(),
-            //         (remote_index + 1) as u16,
-            //         target_reader,
-            //         target_writer,
-            //     );
-            //     // Run the streams concurrently
-            //     tokio::spawn(async move {
-            //         if let Err(e) = client_stream.run().await {
-            //             log::error!("Client stream error: {:?}", e);
-            //         }
-            //     });
-            // }
-
             // Use an equivalent session id for future recovery, avoid exposing the internal session id
             let equiv_id = session_manager.create_equiv_session(session.id())?;
             let response = OpenResponse::new(equiv_id, ticket_info.remotes_count() as u16);
@@ -111,6 +76,15 @@ where
             crypt_writer
                 .write(&mut writer, ticket_channel_id, &response_data)
                 .await?;
+
+            // Now the recv/send seq should be set to 1 for next crypt managers
+            // (we already spent seq 0 for ticket exchange)
+            // In fact, we spent seq 1, because the crypt is pre-incrementing before use
+            // So next expected seq is 2 on both sides.
+            // Note: This is because we "spent" seq 0 just on the sent of the equiv session id
+            //       on response
+            session.set_inbound_seq(1);
+            session.set_outbound_seq(1);
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(*session.id(), reader, writer);

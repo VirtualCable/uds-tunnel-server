@@ -28,6 +28,44 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use shared::system::trigger::Trigger;
+
+use super::{
+    crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
+    protocol::{handshake::Handshake, ticket::Ticket},
+};
+
+pub struct TunnelClient<R, W>
+where
+    R: AsyncReadExt + Unpin + 'static,
+    W: AsyncWriteExt + Unpin + 'static,{
+    reader: R,
+    writer: W,
+}
+
+impl<R, W> TunnelClient<R, W>
+where
+    R: AsyncReadExt + Unpin + 'static,
+    W: AsyncWriteExt + Unpin + 'static,
+{
+    pub fn new(reader: R, writer: W) -> Self {
+        Self {
+            reader,
+            writer,
+        }
+    }
+
+    pub async fn run(self) -> Result<()> {
+        // TODO: Create tasks with sides, watchdog, etc, and run the main loop for the tunnel client
+
+        Ok(())
+    }
+}
 
 // Tests module
 #[cfg(test)]

@@ -33,9 +33,7 @@ use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 use tokio::io::AsyncWriteExt;
 
-use super::ticket::Ticket;
-
-use super::consts::HANDSHAKE_V2_SIGNATURE;
+use super::{consts::HANDSHAKE_V2_SIGNATURE, ticket::Ticket};
 
 // Handshake commands, starting from 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -134,12 +132,12 @@ mod tests {
         assert_eq!(
             bytes[HANDSHAKE_V2_SIGNATURE.len()],
             u8::from(HandshakeCommand::Recover)
-        );  
+        );
 
         assert_eq!(
-                bytes.len(),
-                HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH
-            );
+            bytes.len(),
+            HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH
+        );
         assert_eq!(&bytes[HANDSHAKE_V2_SIGNATURE.len() + 1..], ticket.as_ref());
     }
 

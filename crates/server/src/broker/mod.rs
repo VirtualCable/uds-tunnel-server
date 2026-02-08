@@ -36,16 +36,16 @@ use reqwest::Client;
 
 use crate::config;
 use shared::{
-    crypt::{
-        kem::{PRIVATE_KEY_SIZE, PUBLIC_KEY_SIZE, comms_keypair},
-        ticket::EncryptedTicketResponse,
-    },
+    crypt::kem::{PRIVATE_KEY_SIZE, PUBLIC_KEY_SIZE, comms_keypair},
     log,
     protocol::ticket::Ticket,
 };
 
 mod request;
 mod response;
+
+// For converting from encrypted tycket response to normal response
+use response::EncryptedTicketResponse;
 
 #[async_trait::async_trait]
 pub trait BrokerApi {

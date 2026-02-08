@@ -29,23 +29,17 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use aes_gcm::{
-    AeadInPlace, Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
-};
 use anyhow::Result;
-use sha2::digest::typenum;
 
-use crate::log;
+use aes_gcm::{AeadInPlace, Aes256Gcm, Nonce, aead::KeyInit};
+
+use shared::log;
 
 // Comms related
 pub mod consts;
 pub mod stream;
 pub mod tunnel;
 pub mod types;
-
-// PQC related
-pub mod kem;
 
 pub struct Crypt {
     cipher: Aes256Gcm,
@@ -155,19 +149,6 @@ impl Crypt {
         })?);
         Ok((&buffer[2..len], channel))
     }
-
-    /// Used to decrypt data that was encrypted with a key derived from the shared secret and the ticket id, without using the internal seq/nonce mechanism.
-    pub fn simple_decrypt(
-        key: &types::SharedSecret,
-        nonce: &[u8; 12],
-        data: &[u8],
-    ) -> Result<Vec<u8>> {
-        let nonce: &Nonce<typenum::U12> = Nonce::from_slice(nonce.as_ref());
-        let cipher = Aes256Gcm::new(key.as_ref().into());
-        cipher
-            .decrypt(nonce, data)
-            .map_err(|_| anyhow::format_err!("AES-256-GCM decryption failed"))
-    }
 }
 
 pub fn parse_header(buffer: &[u8]) -> Result<(u64, u16)> {
@@ -193,7 +174,7 @@ pub fn build_header(seq: u64, length: u16, buffer: &mut [u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use crate::crypt::types::SharedSecret;
+    use super::types::SharedSecret;
 
     use super::*;
     fn assert_send<T: Send>() {}

@@ -29,6 +29,9 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+// Version of server
+pub const VERSION: &str = "v5.0.0";
+
 // HTTP related constants
 pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
 
@@ -39,3 +42,9 @@ pub const SERVER_RECOVERY_GRACE_SECS: u64 = 2; // Time given to recover server c
 pub const CONFIGFILE_PATH: &str = "udstunnel.conf";
 #[cfg(not(debug_assertions))]
 pub const CONFIGFILE_PATH: &str = "/etc/udstunnel.conf";
+
+#[cfg(debug_assertions)]
+pub const DEFAULT_LOG_LEVEL: &str = "debug";
+
+#[cfg(not(debug_assertions))]
+pub const DEFAULT_LOG_LEVEL: &str = "info";

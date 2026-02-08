@@ -1,0 +1,186 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its contributors
+//    may be used to endorse or promote products derived from this software
+//    without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+use std::time::Duration;
+
+use anyhow::{Context, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use shared::system::trigger::Trigger;
+
+use super::{
+    crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
+    protocol::{handshake::Handshake, ticket::Ticket},
+};
+
+pub enum TunnelCommand {
+    Open { channel_id: u16 },
+    Close { channel_id: u16 },
+    ServerClose { channel_id: u16 },
+    ServerError { channel_id: u16, message: String },
+}
+
+pub struct TunnelHandler {
+    ctrl_tx: flume::Sender<TunnelCommand>,
+}
+
+impl TunnelHandler {
+    pub fn new(ctrl_tx: flume::Sender<TunnelCommand>) -> Self {
+        Self { ctrl_tx }
+    }
+
+    pub async fn open_channel(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(TunnelCommand::Open { channel_id })
+            .await
+            .context("Failed to send open channel command")
+    }
+
+    pub async fn close_channel(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(TunnelCommand::Close { channel_id })
+            .await
+            .context("Failed to send close channel command")
+    }
+
+    pub async fn server_close_channel(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(TunnelCommand::ServerClose { channel_id })
+            .await
+            .context("Failed to send server close channel command")
+    }
+
+    pub async fn server_error_channel(&self, channel_id: u16, message: String) -> Result<()> {
+        self.ctrl_tx
+            .send_async(TunnelCommand::ServerError { channel_id, message })
+            .await
+            .context("Failed to send server error channel command")
+    }
+}
+
+pub struct Proxy {
+    tunnel_server: String, // Host:port of tunnel server to connect to
+    ticket: Ticket,
+    shared_secret: [u8; 32],
+    stop: Trigger,
+    initial_timeout: std::time::Duration,
+
+    recover_connection: bool,
+}
+
+impl Proxy {
+    pub fn new(
+        tunnel_server: &str,
+        ticket: Ticket,
+        shared_secret: [u8; 32],
+        initial_timeout: Duration,
+    ) -> Self {
+        Self {
+            tunnel_server: tunnel_server.to_string(),
+            ticket,
+            shared_secret,
+            stop: Trigger::new(),
+            initial_timeout,
+            recover_connection: false,
+        }
+    }
+
+    async fn connect(&mut self) -> Result<(impl AsyncReadExt + Unpin, impl AsyncWriteExt + Unpin)> {
+        // Try to connect to tunnel server and authenticate using the ticket and shared secret
+        let stream = tokio::net::TcpStream::connect(&self.tunnel_server)
+            .await
+            .context("Failed to connect to tunnel server")?;
+
+        // Try to disable Nagle's algorithm for better performance in our case
+        stream.set_nodelay(true).ok();
+
+        // Create the crypt pair
+        let (mut inbound_crypt, mut outbound_crypt) =
+            get_tunnel_crypts(&self.shared_secret.into(), &self.ticket, (0, 0))?;
+
+        // Send open tunnel command with the ticket and shared secret
+        let handshake = if self.recover_connection {
+            Handshake::Recover {
+                ticket: self.ticket,
+            }
+        } else {
+            self.recover_connection = true; // Next time we will try to recover the connection
+            Handshake::Open {
+                ticket: self.ticket,
+            }
+        };
+        // Split the stream into reader and writer for easier handling on the next steps
+        let (mut reader, mut writer) = stream.into_split();
+
+        handshake.write(&mut writer).await?;
+
+        // Send the encrypted ticket now to channel 0
+        outbound_crypt
+            .write(&mut writer, 0, self.ticket.as_ref())
+            .await?;
+
+        // Read the response, should be the "reconnect" ticket, just in case some connection error
+        let mut buffer = PacketBuffer::new();
+        let (reconnect_ticket, channel_id) = inbound_crypt
+            .read(&self.stop, &mut reader, &mut buffer)
+            .await?;
+
+        // Channel id should be 0 for handshake response, if not, something went wrong
+        if channel_id != 0 {
+            return Err(anyhow::anyhow!(
+                "Expected handshake response on channel 0, got channel {}",
+                channel_id
+            ));
+        }
+
+        // Store reconnect ticket for future use.
+        // This is different from original, and different for every conection
+        self.ticket = Ticket::new(
+            reconnect_ticket
+                .try_into()
+                .context("Invalid ticket format in handshake response")?,
+        );
+
+        Ok((reader, writer))
+    }
+
+    pub async fn run(self) -> Result<TunnelHandler> {
+        let (mut reader, mut writer) = self.connect().await?;
+
+        // TODO: Create tasks with sides, watchdog, etc, and run the main loop for the tunnel client
+        let (ctrl_tx, ctrl_rx) = flume::bounded(8);  // Not too much buffering, we want backpressure on commands
+
+        Ok(TunnelHandler::new(ctrl_tx))
+    }
+}
+
+// Tests module
+#[cfg(test)]
+mod tests;

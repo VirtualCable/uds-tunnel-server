@@ -184,10 +184,14 @@ dependencies = [
 name = "client"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
+ "flume",
  "futures",
+ "hkdf",
  "num_enum",
  "rand",
+ "sha2",
  "shared",
  "tokio",
 ]

@@ -30,5 +30,11 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 pub mod client;
-pub mod server;
+pub mod consts;
+pub mod crypt;
 pub mod protocol;
+pub mod server;
+pub mod tunnel;
+pub mod proxy;
+
+mod utils;

@@ -4,7 +4,7 @@ pub mod tunnelpq;
 
 #[tokio::main]
 async fn main() {
-    let tunnel = tunnelpq::server::TunnelListener::new(
+    let tunnel = tunnelpq::tunnel::Tunnel::new(
         tunnelpq::protocol::ticket::Ticket::new_random(), // Testing ticket while building
         [0u8; 32],
         Duration::from_secs(10),

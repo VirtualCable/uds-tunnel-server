@@ -1,4 +1,3 @@
-pub mod consts;
 pub mod crypt;
 pub mod errors;
 pub mod log;

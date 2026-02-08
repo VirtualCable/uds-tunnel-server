@@ -31,8 +31,7 @@
 use std::sync::Arc;
 
 use shared::{
-    consts,
-    crypt::{build_header, consts::HEADER_LENGTH, types::SharedSecret},
+    crypt::{build_header, consts::{CRYPT_PACKET_TIMEOUT_SECS, HEADER_LENGTH}, types::SharedSecret},
     protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
 };
@@ -234,7 +233,7 @@ async fn test_server_stream_with_invalid_packet() {
     // Stop shuild be triggered due to error
     assert!(
         stop.wait_timeout_async(std::time::Duration::from_secs(
-            consts::CRYPT_PACKET_TIMEOUT_SECS + 1
+            CRYPT_PACKET_TIMEOUT_SECS + 1
         ))
         .await
         .is_ok()

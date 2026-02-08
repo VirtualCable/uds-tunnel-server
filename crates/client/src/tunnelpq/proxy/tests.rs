@@ -28,15 +28,4 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-
-pub const VERSION: &str = "v5.0.0";
-
-#[cfg(debug_assertions)]
-pub const DEFAULT_LOG_LEVEL: &str = "debug";
-
-#[cfg(not(debug_assertions))]
-pub const DEFAULT_LOG_LEVEL: &str = "info";
-
-// Max time once a crypt packet is started before receive it completely, to avoid hanging connections
-// Its long enough to allow for slow connections, but short enough to avoid a malformed packet to keep the connection hanging indefinitely
-pub const CRYPT_PACKET_TIMEOUT_SECS: u64 = 5;
+// use super::*;
