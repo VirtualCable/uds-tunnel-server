@@ -79,7 +79,10 @@ impl TunnelHandler {
 
     pub async fn server_error_channel(&self, channel_id: u16, message: String) -> Result<()> {
         self.ctrl_tx
-            .send_async(TunnelCommand::ServerError { channel_id, message })
+            .send_async(TunnelCommand::ServerError {
+                channel_id,
+                message,
+            })
             .await
             .context("Failed to send server error channel command")
     }
@@ -174,8 +177,46 @@ impl Proxy {
     pub async fn run(self) -> Result<TunnelHandler> {
         let (mut reader, mut writer) = self.connect().await?;
 
-        // TODO: Create tasks with sides, watchdog, etc, and run the main loop for the tunnel client
-        let (ctrl_tx, ctrl_rx) = flume::bounded(8);  // Not too much buffering, we want backpressure on commands
+        let (ctrl_tx, ctrl_rx) = flume::bounded(8); // Not too much buffering, we want backpressure on commands
+
+        tokio::spawn(async move {
+            // Main loop to handle tunnel communication, moves self into the async task
+            let mut buffer = PacketBuffer::new();
+            loop {
+                tokio::select! {
+                    // Check for stop signal
+                    _ = self.stop.wait() => {
+                        break;
+                    }
+
+                    // Handle incoming packets from the tunnel server
+                    result = self.handle_incoming(&mut reader, &mut buffer) => {
+                        if let Err(e) = result {
+                            eprintln!("Error handling incoming packet: {:?}", e);
+                            break;
+                        }
+                    }
+                    // Handle control commands from the TunnelHandler
+                    cmd = ctrl_rx.recv_async() => {
+                        match cmd {
+                            Ok(cmd) => {
+                                if let Err(e) = self.handle_command(cmd, &mut writer).await {
+                                    eprintln!("Error handling command: {:?}", e);
+                                    break;
+                                }
+                            }
+                            Err(_) => {
+                                // Control channel closed, we should stop
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clean up resources, close connections, etc.
+            let _ = writer.shutdown().await;
+        });
 
         Ok(TunnelHandler::new(ctrl_tx))
     }

@@ -37,6 +37,8 @@ use tokio::{
 
 use shared::{crypt::types::SharedSecret, protocol::ticket::Ticket};
 
+use crate::session::Session;
+
 const TEST_CHANNEL_ID: u16 = 1;
 
 // Create an "remote server" for testing, and return the host:port, a stop trigger,

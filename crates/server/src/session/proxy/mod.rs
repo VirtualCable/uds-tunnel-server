@@ -28,210 +28,27 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-use std::sync::Arc;
-
 use anyhow::Result;
-use flume::{Receiver, Sender, bounded};
+use flume::{Receiver, bounded};
 use futures::future::{Either, pending};
-use tokio::net::TcpStream;
 
-use crate::{
-    session::{Session, SessionId, SessionManager},
-    stream::client::TunnelClientStream,
-};
+use crate::session::{SessionId, SessionManager};
 use shared::{log, protocol, system::trigger::Trigger};
 
-enum ProxyCommand {
-    AttachServer { reply: Sender<ServerEndpoints> },
-    ServerFailed,  // Will not close the proxy, to allow recovery
-    ServerStopped, // Will close the proxy, as the server is done
-    // Client is attached by us, so no need for an attach command
-    ClientStopped(u16), // stream_channel_id, no need to know if it failed or stopped normally
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerEndpoints {
-    pub tx: protocol::PayloadWithChannelSender,
-    pub rx: protocol::PayloadWithChannelReceiver,
-}
-
-#[derive(Debug, Clone)]
-pub struct ClientEndpoints {
-    pub tx: protocol::PayloadWithChannelSender,
-    pub rx: protocol::PayloadReceiver,
-}
-
-#[derive(Debug)]
-pub(super) struct SessionProxyHandle {
-    ctrl_tx: Sender<ProxyCommand>,
-}
-
-impl SessionProxyHandle {
-    pub async fn start_server(&self) -> Result<ServerEndpoints> {
-        log::debug!("Starting server in session proxy");
-        let (reply_tx, reply_rx) = flume::bounded(1);
-        let cmd = ProxyCommand::AttachServer { reply: reply_tx };
-        self.ctrl_tx.send_async(cmd).await?;
-        let endpoints = reply_rx.recv_async().await?;
-        Ok(endpoints)
-    }
-
-    pub async fn stop_server(&self) {
-        if let Err(e) = self.ctrl_tx.send_async(ProxyCommand::ServerStopped).await {
-            log::error!(
-                "Failed to send stop server command to session proxy: {:?}",
-                e
-            );
-        }
-    }
-
-    pub async fn fail_server(&self) {
-        if let Err(e) = self.ctrl_tx.send_async(ProxyCommand::ServerFailed).await {
-            log::error!(
-                "Failed to send fail server command to session proxy: {:?}",
-                e
-            );
-        }
-    }
-
-    pub async fn stop_client(&self, stream_channel_id: u16) {
-        if let Err(e) = self
-            .ctrl_tx
-            .send_async(ProxyCommand::ClientStopped(stream_channel_id))
-            .await
-        {
-            log::error!(
-                "Failed to send stop client command to session proxy: {:?}",
-                e
-            );
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct ClientInfo {
-    sender: protocol::PayloadSender,
-    stop: Trigger,
-}
-
-struct ClientFanIn {
-    clients_senders: Vec<Option<ClientInfo>>,
-    sender: protocol::PayloadWithChannelSender,
-    receiver: protocol::PayloadWithChannelReceiver,
-}
-
-impl ClientFanIn {
-    pub fn new() -> Self {
-        let (sender, receiver) = protocol::payload_with_channel_pair();
-        Self {
-            clients_senders: Vec::new(),
-            sender,
-            receiver,
-        }
-    }
-
-    async fn create_client(&mut self, stream_channel_id: u16, session: Arc<Session>) -> Result<()> {
-        // Ensure vector is large enough
-        if self.clients_senders.len() < stream_channel_id as usize {
-            self.clients_senders
-                .resize(stream_channel_id as usize, None);
-        }
-
-        // If current client is Some, we are replacing it, so ensure old one receives the stop signal
-        if let Some(old_client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
-            // Ensure notify old client to stop before replacing
-            old_client.stop.trigger();
-        }
-
-        let (sender, receiver) = protocol::payload_pair();
-        // (self.sender.clone(), receiver)
-
-        // If outside remotes, will fail and return error
-        let target_stream =
-            TcpStream::connect(&session.remotes[stream_channel_id as usize - 1]).await?;
-
-        // Split the target stream into reader and writer
-        let (target_reader, target_writer) = target_stream.into_split();
-
-        let stop = Trigger::new();
-
-        // Note: The TunnelClientStream will not receive the global stop, but its own stop trigger
-        // managed by the ClientFanIn
-        let client_stream = TunnelClientStream::new(
-            *session.id(),
-            stop.clone(),
-            stream_channel_id,
-            target_reader,
-            target_writer,
-            ClientEndpoints {
-                tx: self.sender.clone(),
-                rx: receiver,
-            },
-        );
-
-        // Spawn a task to run the client stream
-        tokio::spawn(async move {
-            if let Err(e) = client_stream.run().await {
-                log::error!("Client stream error: {:?}", e);
-            }
-        });
-
-        self.clients_senders[(stream_channel_id - 1) as usize] = Some(ClientInfo { sender, stop });
-        Ok(())
-    }
-
-    pub async fn send_to_channel(&self, msg: protocol::PayloadWithChannel) -> Result<()> {
-        if msg.channel_id == 0 || msg.channel_id as usize > self.clients_senders.len() {
-            return Err(anyhow::anyhow!(
-                "Invalid stream_channel_id: {}",
-                msg.channel_id
-            ));
-        }
-        if let Some(client) = &self.clients_senders[(msg.channel_id - 1) as usize] {
-            client.sender.send_async(msg.payload).await?;
-        }
-        // If no client, just drop the message
-        Ok(())
-    }
-
-    pub async fn stop_client(&self, stream_channel_id: u16) {
-        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
-            return;
-        }
-        if let Some(client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
-            client.stop.trigger();
-        }
-    }
-
-    pub fn stop_all_clients(&self) {
-        for client in self.clients_senders.iter().flatten() {
-            client.stop.trigger();
-        }
-    }
-
-    pub async fn recv(&self) -> Result<protocol::PayloadWithChannel> {
-        let msg = self.receiver.recv_async().await?;
-        Ok(msg)
-    }
-
-    /// Closes the client for the given stream_channel_id
-    pub fn close_client(&mut self, stream_channel_id: u16) {
-        if self.clients_senders.len() >= stream_channel_id as usize {
-            self.clients_senders[(stream_channel_id - 1) as usize] = None;
-        }
-    }
-}
+mod clients;
+pub mod handler;
+pub mod types;
 
 pub(super) struct Proxy {
-    ctrl_rx: Receiver<ProxyCommand>,
+    ctrl_rx: Receiver<handler::Command>,
     stop: Trigger,
 }
 
 impl Proxy {
-    pub fn new(stop: Trigger) -> (Self, SessionProxyHandle) {
+    pub fn new(stop: Trigger) -> (Self, handler::Handler) {
         let (ctrl_tx, ctrl_rx) = bounded(4); // Control channel, small buffer
         let proxy = Proxy { ctrl_rx, stop };
-        let handle = SessionProxyHandle { ctrl_tx };
+        let handle = handler::Handler::new(ctrl_tx);
         (proxy, handle)
     }
 
@@ -258,10 +75,10 @@ impl Proxy {
     async fn run_session_proxy(self, parent: SessionId) -> Result<()> {
         let Self { ctrl_rx, stop } = self;
 
-        let mut clients: ClientFanIn = ClientFanIn::new();
+        let mut clients = clients::ClientFanIn::new();
 
         // Now we need the other sides for both sides (our sides)
-        let mut our_server_channels: Option<ServerEndpoints> = None;
+        let mut our_server_channels: Option<types::ServerEndpoints> = None;
 
         log::debug!("Session proxy started");
 
@@ -287,23 +104,23 @@ impl Proxy {
 
                 cmd = ctrl_rx.recv_async() => {
                     match cmd {
-                        Ok(ProxyCommand::AttachServer { reply }) => {
+                        Ok(handler::Command::AttachServer { reply }) => {
                             log::debug!("Attaching server to session proxy");
                             let (server_tx, our_rx) = protocol::payload_with_channel_pair();
                             let (our_tx, server_rx) = protocol::payload_with_channel_pair();
-                            our_server_channels = Some(ServerEndpoints { tx: our_tx, rx: our_rx });
-                            let endpoints = ServerEndpoints { tx: server_tx, rx: server_rx };
+                            our_server_channels = Some(types::ServerEndpoints { tx: our_tx, rx: our_rx });
+                            let endpoints = types::ServerEndpoints { tx: server_tx, rx: server_rx };
                             let _ = reply.send(endpoints);
                         }
-                        Ok(ProxyCommand::ServerFailed) => {
+                        Ok(handler::Command::ServerFailed) => {
                             log::debug!("Detaching server from session proxy");
                             our_server_channels = None;
                         }
-                        Ok(ProxyCommand::ServerStopped) => {
+                        Ok(handler::Command::ServerStopped) => {
                             log::debug!("Server stopped, closing session proxy");
                             break;  // exit loop on server stopped
                         }
-                        Ok(ProxyCommand::ClientStopped(stream_channel_id)) => {
+                        Ok(handler::Command::ClientStopped(stream_channel_id)) => {
                             log::debug!("Client {} stopped, removing from session proxy", stream_channel_id);
                             clients.stop_client(stream_channel_id).await;
                             clients.close_client(stream_channel_id);
@@ -371,7 +188,7 @@ impl Proxy {
     async fn handle_incoming_command(
         data: &[u8],
         parent: &SessionId,
-        clients: &mut ClientFanIn,
+        clients: &mut clients::ClientFanIn,
     ) -> Result<bool> {
         // Errors parsing commands, mean intentional error or misbehavior (or big bug :P), so we will always
         // close the session on command errors

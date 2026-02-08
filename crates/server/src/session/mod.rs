@@ -43,7 +43,7 @@ mod proxy;
 
 pub use {
     manager::SessionManager,
-    proxy::{ClientEndpoints, ServerEndpoints},
+    proxy::types::{ClientEndpoints, ServerEndpoints},
 };
 
 // Alias, internal SessionId is a Ticket
@@ -56,7 +56,7 @@ pub struct Session {
     shared_secret: SharedSecret,
     stop: Trigger,
     // Channels for server <-> client communication
-    session_proxy: proxy::SessionProxyHandle,
+    session_proxy: proxy::handler::Handler,
 
     // proxy async task handle
     proxy_task: tokio::task::JoinHandle<()>,
