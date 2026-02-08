@@ -28,7 +28,6 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -38,8 +37,8 @@ use shared::system::trigger::Trigger;
 use super::proxy::Handler;
 
 use super::{
-    crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
-    protocol::{handshake::Handshake, ticket::Ticket},
+    crypt::{Crypt, types::PacketBuffer},
+    protocol::{PayloadWithChannelReceiver, PayloadWithChannelSender},
 };
 
 pub struct TunnelClient<R, W>
@@ -49,9 +48,15 @@ where
 {
     reader: R,
     writer: W,
+
+    tx: PayloadWithChannelSender,
+    rx: PayloadWithChannelReceiver,
+
+    crypt_inbound: Crypt,
+    crypt_outbound: Crypt,
+
     stop: Trigger,
     proxy: Handler,
-
 }
 
 impl<R, W> TunnelClient<R, W>
@@ -59,18 +64,45 @@ where
     R: AsyncReadExt + Unpin + 'static,
     W: AsyncWriteExt + Unpin + 'static,
 {
-    pub fn new(reader: R, writer: W, stop: Trigger, proxy: Handler) -> Self {
+    pub fn new(
+        reader: R,
+        writer: W,
+        tx: PayloadWithChannelSender,
+        rx: PayloadWithChannelReceiver,
+        crypt_inbound: Crypt,
+        crypt_outbound: Crypt,
+        stop: Trigger,
+        proxy: Handler,
+    ) -> Self {
         Self {
             reader,
             writer,
+            tx,
+            rx,
+            crypt_inbound,
+            crypt_outbound,
             stop,
             proxy,
         }
     }
 
-    pub async fn run(self) -> Result<()> {
-        // TODO: Create tasks with sides, watchdog, etc, and run the main loop for the tunnel client
-        // On error, use the proxy handler to signal and keep the packet
+    pub async fn run(mut self) -> Result<()> {
+        let mut buffer = PacketBuffer::new();
+        loop {
+            tokio::select! {
+                    _ = self.stop.wait_async() => {
+                        break;
+                    }
+                    result = self.rx.recv_async() => {
+                        let msg = result.context("Failed to receive message from proxy")?;
+                        // Process message and write to tunnel server
+                    }
+                    data = self.crypt_inbound.read(&self.stop, &mut self.reader, &mut buffer) => {
+                        let data = data.context("Failed to read packet from tunnel server")?;
+                        // Process packet and send to proxy
+                    }
+            }
+        }
 
         Ok(())
     }

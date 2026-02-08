@@ -35,11 +35,14 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use shared::{log, system::trigger::Trigger};
 
-use crate::tunnelpq::{client::TunnelClient, protocol::PayloadWithChannel};
-
 use super::{
+    client::TunnelClient,
+    crypt::types::SharedSecret,
     crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
-    protocol::{handshake::Handshake, ticket::Ticket},
+    protocol::{
+        PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender,
+        handshake::Handshake, payload_with_channel_pair, ticket::Ticket,
+    },
 };
 
 mod handler;
@@ -50,9 +53,23 @@ pub use handler::Handler;
 pub struct Proxy {
     tunnel_server: String, // Host:port of tunnel server to connect to
     ticket: Ticket,
-    shared_secret: [u8; 32],
+    shared_secret: SharedSecret,
     stop: Trigger,
     initial_timeout: std::time::Duration,
+
+    // We need to keep track of the seqs for crypt
+    // for conneciton recovery
+    seqs: (u64, u64),
+
+    // Channels for comms with the client side (the one that will connect to the tunnel server)
+    tx: PayloadWithChannelSender, // For sending messages to the client side
+    tx_receiver: PayloadWithChannelReceiver, // For receiving messages from the client side
+    rx: PayloadWithChannelReceiver, // For receiving messages from the client side
+    rx_sender: PayloadWithChannelSender, // For sending messages to the client side
+
+    // Control channel
+    ctrl_tx: flume::Sender<handler::Command>,
+    ctrl_rx: flume::Receiver<handler::Command>,
 
     recover_connection: bool,
     recovery_packet: Option<PayloadWithChannel>,
@@ -62,21 +79,32 @@ impl Proxy {
     pub fn new(
         tunnel_server: &str,
         ticket: Ticket,
-        shared_secret: [u8; 32],
+        shared_secret: SharedSecret,
         initial_timeout: Duration,
     ) -> Self {
+        let (tx, tx_receiver) = payload_with_channel_pair();
+        let (rx_sender, rx) = payload_with_channel_pair();
+        // Not too much buffering, we want backpressure on commands
+        let (ctrl_tx, ctrl_rx) = flume::bounded(8); 
         Self {
             tunnel_server: tunnel_server.to_string(),
             ticket,
             shared_secret,
             stop: Trigger::new(),
             initial_timeout,
+            seqs: (0, 0),
+            tx,
+            tx_receiver,
+            rx,
+            rx_sender,
+            ctrl_tx,
+            ctrl_rx,
             recover_connection: false,
             recovery_packet: None,
         }
     }
 
-    async fn connect(&mut self) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
+    async fn connect(&mut self) -> Result<TunnelClient<OwnedReadHalf, OwnedWriteHalf>> {
         // Try to connect to tunnel server and authenticate using the ticket and shared secret
         let stream = tokio::time::timeout(
             self.initial_timeout,
@@ -90,7 +118,7 @@ impl Proxy {
 
         // Create the crypt pair
         let (mut inbound_crypt, mut outbound_crypt) =
-            get_tunnel_crypts(&self.shared_secret.into(), &self.ticket, (0, 0))?;
+            get_tunnel_crypts(&self.shared_secret.into(), &self.ticket, self.seqs)?;
 
         // Send open tunnel command with the ticket and shared secret
         let handshake = if self.recover_connection {
@@ -135,21 +163,22 @@ impl Proxy {
                 .context("Invalid ticket format in handshake response")?,
         );
 
-        Ok((reader, writer))
+        // Create the server and run it in a separate task
+        Ok(TunnelClient::new(
+            reader,
+            writer,
+            self.rx_sender.clone(),
+            self.tx_receiver.clone(),
+            inbound_crypt,
+            outbound_crypt,
+            self.stop.clone(),
+            handler::Handler::new(self.ctrl_tx.clone()),
+        ))
     }
 
     // Launchs (or relaunchs) the tunnel server, returns a handler to send commands to the server
     async fn launch_server(&mut self, ctrl_tx: flume::Sender<handler::Command>) -> Result<()> {
-        // TODO: Retry 3 times with some small delay (total must not exceed 2 seconds, that is the grace time for the tunnel server)
-        let (reader, writer) = self.connect().await?;
-
-        // Create the server and run it in a separate task
-        let server = TunnelClient::new(
-            reader,
-            writer,
-            self.stop.clone(),
-            handler::Handler::new(ctrl_tx.clone()),
-        );
+        let server = self.connect().await?;
         tokio::spawn(async move {
             if let Err(e) = server.run().await {
                 log::warn!("Tunnel server error: {:?}", e);
@@ -226,6 +255,9 @@ impl Proxy {
             handler::Command::ClientClose => {}
             handler::Command::ClientError { message } => {
                 eprintln!("Client error: {}", message);
+            }
+            handler::Command::UpdateSeq(inbound, outbound) => {
+                self.seqs = (inbound, outbound);
             }
         }
         Ok(())

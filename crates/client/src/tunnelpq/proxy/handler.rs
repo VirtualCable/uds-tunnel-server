@@ -54,6 +54,9 @@ pub enum Command {
     ClientError {
         message: String,
     },
+
+    // Crypt related
+    UpdateSeq(u64, u64),
 }
 
 pub struct Handler {
@@ -95,5 +98,12 @@ impl Handler {
             .send_async(Command::ChannelError { packet, message })
             .await
             .context("Failed to send channel error command")
+    }
+
+    pub async fn update_seq(&self, inbound: u64, outbound: u64) -> Result<()> {
+        self.ctrl_tx
+            .send_async(Command::UpdateSeq(inbound, outbound))
+            .await
+            .context("Failed to send update seq command")
     }
 }

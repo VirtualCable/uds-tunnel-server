@@ -49,11 +49,13 @@ use anyhow::Result;
 
 use shared::{log, system::trigger::Trigger};
 
+use crate::tunnelpq::crypt::types::SharedSecret;
+
 use super::{protocol::ticket::Ticket, proxy::Proxy};
 
 pub struct Tunnel {
     ticket: Ticket,
-    shared_secret: [u8; 32],
+    shared_secret: SharedSecret,
     initial_timeout: Duration,
     tunnel_server: String, // Host:port of tunnel server to connect to
     stop: Trigger,
@@ -62,7 +64,7 @@ pub struct Tunnel {
 impl Tunnel {
     pub fn new(
         ticket: Ticket,
-        shared_secret: [u8; 32],
+        shared_secret: SharedSecret,
         initial_timeout: Duration,
         tunnel_server: String,
         stop: Trigger,

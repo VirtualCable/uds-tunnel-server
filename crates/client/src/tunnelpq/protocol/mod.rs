@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 
 use anyhow::Result;
 
@@ -9,7 +9,7 @@ pub mod ticket;
 
 pub use command::Command;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Payload(pub Vec<u8>);
 
 impl From<Vec<u8>> for Payload {
@@ -36,7 +36,7 @@ impl AsRef<[u8]> for Payload {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PayloadWithChannel {
     pub channel_id: u16,
     pub payload: Payload,
@@ -70,17 +70,17 @@ impl PayloadWithChannel {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RetryableReceiver<T> {
     receiver: flume::Receiver<T>,
-    pending: Mutex<Option<T>>,
+    pending: Arc<Mutex<Option<T>>>,
 }
 
 impl<T> RetryableReceiver<T> {
     pub fn new(receiver: flume::Receiver<T>) -> Self {
         Self {
             receiver,
-            pending: Mutex::new(None),
+            pending: Arc::new(Mutex::new(None)),
         }
     }
 
