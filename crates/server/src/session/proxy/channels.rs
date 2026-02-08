@@ -143,7 +143,7 @@ impl ClientChannels {
         }
     }
 
-    pub async fn recv(&self) -> Result<protocol::PayloadWithChannel> {
+    pub async fn recv(&mut self) -> Result<protocol::PayloadWithChannel> {
         let msg = self.receiver.recv_async().await?;
         Ok(msg)
     }

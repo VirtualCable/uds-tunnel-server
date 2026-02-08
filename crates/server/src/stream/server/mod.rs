@@ -95,13 +95,28 @@ struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
 }
 
 impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
-    pub fn new(writer: W, crypt: Crypt, receiver: PayloadWithChannelReceiver, stop: Trigger) -> Self {
+    pub fn new(
+        writer: W,
+        crypt: Crypt,
+        receiver: PayloadWithChannelReceiver,
+        stop: Trigger,
+    ) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,
             crypt,
             writer,
         }
+    }
+
+    async fn send_packet(&mut self, packet: PayloadWithChannel) -> Result<()> {
+        if let Err(e) = self.send_data(&packet).await {
+            log::error!("Error sending data in server outbound stream: {:?}", e);
+            // Store in session so it can be resent if the stream is restarted due to a recoverable error
+            self.receiver.retry(packet);
+            return Err(e);
+        }
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
@@ -113,7 +128,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(channel_data) => {
-                            self.send_data(channel_data).await?
+                            self.send_packet(channel_data).await?;
                         }
                         Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
@@ -130,7 +145,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         Ok(())
     }
 
-    async fn send_data(&mut self, data: PayloadWithChannel) -> Result<()> {
+    async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
         let mut offset = 0;
 
         let payload = data.payload.as_ref();
@@ -138,7 +153,9 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         while offset < payload.len() {
             let end = (offset + CRYPT_PACKET_SIZE).min(payload.len());
             let chunk = &payload[offset..end];
-            self.crypt.write(&mut self.writer, data.channel_id, chunk).await?;
+            self.crypt
+                .write(&mut self.writer, data.channel_id, chunk)
+                .await?;
             offset = end;
         }
 
@@ -189,20 +206,22 @@ where
         } = self;
 
         let session_manager = SessionManager::get_instance();
+        let session = if let Some(session) = session_manager.get_session(&session_id) {
+            session
+        } else {
+            log::warn!("Session {:?} not found, aborting stream", session_id);
+            return Ok(());
+        };
 
-        let (stop, channels, inbound_crypt, outbound_crypt) =
-            if let Some(session) = session_manager.get_session(&session_id) {
-                let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
-                (
-                    session.stop_trigger(),
-                    session.start_server().await?,
-                    inbound_crypt,
-                    outbound_crypt,
-                )
-            } else {
-                log::warn!("Session {:?} not found, aborting stream", session_id);
-                return Ok(());
-            };
+        let (stop, channels, inbound_crypt, outbound_crypt) = {
+            let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
+            (
+                session.stop_trigger(),
+                session.start_server().await?,
+                inbound_crypt,
+                outbound_crypt,
+            )
+        };
 
         let local_stop = Trigger::new();
 

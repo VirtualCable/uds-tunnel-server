@@ -33,7 +33,7 @@
 use anyhow::Result;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
-use crate::protocol::PayloadWithChannel;
+use super::PayloadWithChannel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
 #[repr(u8)]

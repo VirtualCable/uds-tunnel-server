@@ -82,7 +82,7 @@ impl SessionManager {
         };
         // Also, insert an idempotent entry in equivs
         {
-            let mut equivs = self.equivs.write().unwrap();
+            let mut equivs: std::sync::RwLockWriteGuard<'_, HashMap<shared::protocol::ticket::Ticket, (shared::protocol::ticket::Ticket, Instant)>> = self.equivs.write().unwrap();
             equivs.insert(session.id, (session.id, Instant::now()));
         }
         Ok(session)
@@ -95,7 +95,10 @@ impl SessionManager {
 
     pub fn remove_session(&self, id: &SessionId) {
         let mut sessions = self.sessions.write().unwrap();
-        sessions.remove(id);
+        if let Some(session) = sessions.get(id) {
+            session.stop.trigger();
+            sessions.remove(id);
+        }
     }
 
     pub async fn finish_all_sessions(&self) {

@@ -30,13 +30,13 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use shared::protocol;
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServerEndpoints {
     pub tx: protocol::PayloadWithChannelSender,
     pub rx: protocol::PayloadWithChannelReceiver,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientEndpoints {
     pub tx: protocol::PayloadWithChannelSender,
     pub rx: protocol::PayloadReceiver,

@@ -87,7 +87,7 @@ impl Proxy {
             // Because we can disconnect before unataching the server.
             // The clients (the parts that connect to the remote server)
             // Have a common channel, that persists until end of proxy
-            let server_recv = if let Some(chs) = &our_server_channels
+            let server_recv = if let Some(chs) = &mut our_server_channels
                 && !chs.rx.is_disconnected()
                 && !chs.tx.is_disconnected()
             {

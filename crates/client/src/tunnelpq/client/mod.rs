@@ -35,6 +35,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use shared::system::trigger::Trigger;
 
+use super::proxy::Handler;
+
 use super::{
     crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
     protocol::{handshake::Handshake, ticket::Ticket},
@@ -43,9 +45,13 @@ use super::{
 pub struct TunnelClient<R, W>
 where
     R: AsyncReadExt + Unpin + 'static,
-    W: AsyncWriteExt + Unpin + 'static,{
+    W: AsyncWriteExt + Unpin + 'static,
+{
     reader: R,
     writer: W,
+    stop: Trigger,
+    proxy: Handler,
+
 }
 
 impl<R, W> TunnelClient<R, W>
@@ -53,15 +59,18 @@ where
     R: AsyncReadExt + Unpin + 'static,
     W: AsyncWriteExt + Unpin + 'static,
 {
-    pub fn new(reader: R, writer: W) -> Self {
+    pub fn new(reader: R, writer: W, stop: Trigger, proxy: Handler) -> Self {
         Self {
             reader,
             writer,
+            stop,
+            proxy,
         }
     }
 
     pub async fn run(self) -> Result<()> {
         // TODO: Create tasks with sides, watchdog, etc, and run the main loop for the tunnel client
+        // On error, use the proxy handler to signal and keep the packet
 
         Ok(())
     }

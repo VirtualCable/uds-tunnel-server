@@ -36,7 +36,7 @@ use aes_gcm::{
 use anyhow::Result;
 use sha2::digest::typenum;
 
-use crate::log;
+use crate::{log, protocol::Command};
 
 // Comms related
 pub mod consts;
@@ -118,11 +118,18 @@ impl Crypt {
         buffer: &'a mut types::PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
         if seq < self.seq {
-            return Err(anyhow::anyhow!(
-                "decryption failure: replay attack detected, seq {} < current {}",
+            // Note: Due to recovery feature, we may ignore
+            //       this error and return an empty payload, but log it as warning,
+            log::warn!(
+                "Out of order packet received: seq {} < current {}",
                 seq,
                 self.seq
-            ));
+            );
+            // Mark as NOP, so it will be ignored by upper layers
+            let cmd = Command::Nop.to_bytes();
+            let buffer = &mut buffer.stream_slice()[..cmd.len()];
+            buffer.copy_from_slice(cmd.as_slice());
+            return Ok((buffer, 0)); // Empty vector indicates
         }
         self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
         if length < (consts::TAG_LENGTH + 2) as u16 {
@@ -251,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_rejected() {
+    fn test_replay_returns_nop() {
         let key = SharedSecret::new([2u8; 32]);
         let mut crypt = Crypt::new(&key, 0);
 
@@ -270,11 +277,11 @@ mod tests {
 
         // Second decrypt with the same seq should fail
         let mut buf3 = types::PacketBuffer::from(ciphertext);
-        let err = crypt
+        let result = crypt
             .decrypt(seq, ciphertext.len() as u16, &mut buf3)
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.to_string().contains("replay attack"));
+        assert_eq!(result.0, Command::Nop.to_bytes()); // Should return NOP command
     }
 
     #[test]

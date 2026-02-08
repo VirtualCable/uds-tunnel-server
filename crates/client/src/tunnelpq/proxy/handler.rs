@@ -30,14 +30,30 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use anyhow::{Context, Result};
 
+use super::super::protocol::PayloadWithChannel;
+
 pub enum Command {
-    Request { channel_id: u16 },
-    Release { channel_id: u16 },
-    ChannelClosed { channel_id: u16 },
-    ChannelError { channel_id: u16, message: String },
+    Request {
+        channel_id: u16,
+    },
+    Release {
+        channel_id: u16,
+    },
+    // From client to proxy, signals that channel is closed (either by client or server)
+    ChannelClosed {
+        channel_id: u16,
+    },
+    // From client to proxy, signals that an error occurred on the channel, so it can be closed and cleaned up by proxy
+    // Sends the packet that could not be sent, so we can resent it if the error is recoverable (e.g. temporary network issue)
+    ChannelError {
+        packet: Option<PayloadWithChannel>,
+        message: String,
+    },
     // Used internally by proxy to signal server close or error, not sent by handler
-    ServerClose,
-    ServerError { message: String },
+    ClientClose,
+    ClientError {
+        message: String,
+    },
 }
 
 pub struct Handler {
@@ -70,14 +86,14 @@ impl Handler {
             .context("Failed to send channel closed command")
     }
 
-    pub async fn channel_error(&self, channel_id: u16, message: String) -> Result<()> {
+    pub async fn channel_error(
+        &self,
+        packet: Option<PayloadWithChannel>,
+        message: String,
+    ) -> Result<()> {
         self.ctrl_tx
-            .send_async(Command::ChannelError {
-                channel_id,
-                message,
-            })
+            .send_async(Command::ChannelError { packet, message })
             .await
             .context("Failed to send channel error command")
     }
-
 }

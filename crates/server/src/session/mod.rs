@@ -36,7 +36,12 @@ use std::{
 
 use anyhow::Result;
 
-use shared::{crypt, crypt::types::SharedSecret, log, protocol::ticket, system::trigger::Trigger};
+use shared::{
+    crypt::{self, types::SharedSecret},
+    log,
+    protocol::{PayloadWithChannel, ticket},
+    system::trigger::Trigger,
+};
 
 mod manager;
 mod proxy;
@@ -68,6 +73,10 @@ pub struct Session {
     //   - client sends a Close command
     //   - client does not reconnect on recovery window
     remotes: Vec<String>, // List of remote addresses that can be used on this session
+
+    // If there is an unsent message on server side
+    // (eg: client sent a message but an error ocurrend, and it's alreade consumed from channel)
+    unsent_message: RwLock<Option<PayloadWithChannel>>,
 
     // seq numbers for crypto part
     // only updated on server side killed. (the one receives/sends data from client)
@@ -101,11 +110,26 @@ impl Session {
             seq: RwLock::new((0, 0)),
             src_ip: RwLock::new(src_ip),
             remotes,
+            unsent_message: RwLock::new(None),
         }
     }
 
     pub fn id(&self) -> &SessionId {
         &self.id
+    }
+
+    pub fn take_unsent_message(&self) -> Option<PayloadWithChannel> {
+        if let Ok(mut unsent_lock) = self.unsent_message.write() {
+            unsent_lock.take()
+        } else {
+            None
+        }
+    }
+
+    pub fn set_unsent_message(&self, message: PayloadWithChannel) {
+        if let Ok(mut unsent_lock) = self.unsent_message.write() {
+            *unsent_lock = Some(message);
+        }
     }
 
     pub fn set_ip(&self, ip: SocketAddr) {

@@ -31,17 +31,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::{
-    io::AsyncWriteExt,
-    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
-};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
 use shared::{log, system::trigger::Trigger};
+
+use crate::tunnelpq::{client::TunnelClient, protocol::PayloadWithChannel};
 
 use super::{
     crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
     protocol::{handshake::Handshake, ticket::Ticket},
-    server::TunnelServer,
 };
 
 mod handler;
@@ -57,6 +55,7 @@ pub struct Proxy {
     initial_timeout: std::time::Duration,
 
     recover_connection: bool,
+    recovery_packet: Option<PayloadWithChannel>,
 }
 
 impl Proxy {
@@ -73,14 +72,18 @@ impl Proxy {
             stop: Trigger::new(),
             initial_timeout,
             recover_connection: false,
+            recovery_packet: None,
         }
     }
 
     async fn connect(&mut self) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
         // Try to connect to tunnel server and authenticate using the ticket and shared secret
-        let stream = tokio::net::TcpStream::connect(&self.tunnel_server)
-            .await
-            .context("Failed to connect to tunnel server")?;
+        let stream = tokio::time::timeout(
+            self.initial_timeout,
+            tokio::net::TcpStream::connect(&self.tunnel_server),
+        )
+        .await?
+        .context("Failed to connect to tunnel server")?;
 
         // Try to disable Nagle's algorithm for better performance in our case
         stream.set_nodelay(true).ok();
@@ -141,7 +144,7 @@ impl Proxy {
         let (reader, writer) = self.connect().await?;
 
         // Create the server and run it in a separate task
-        let server = TunnelServer::new(
+        let server = TunnelClient::new(
             reader,
             writer,
             self.stop.clone(),
@@ -151,13 +154,13 @@ impl Proxy {
             if let Err(e) = server.run().await {
                 log::warn!("Tunnel server error: {:?}", e);
                 ctrl_tx
-                    .send_async(handler::Command::ServerError {
+                    .send_async(handler::Command::ClientError {
                         message: format!("{:?}", e),
                     })
                     .await
                     .ok();
             } else {
-                ctrl_tx.send_async(handler::Command::ServerClose).await.ok();
+                ctrl_tx.send_async(handler::Command::ClientClose).await.ok();
             }
         });
         Ok(())
@@ -202,9 +205,29 @@ impl Proxy {
         Ok(handler::Handler::new(ctrl_tx))
     }
 
-    async fn handle_command(&self, cmd: handler::Command) -> Result<()>
-    {
-        // TODO: implement command handling, for now just log the command
+    async fn handle_command(&mut self, cmd: handler::Command) -> Result<()> {
+        match cmd {
+            handler::Command::Request { channel_id } => {
+                // TODO: implement
+                unimplemented!();
+            }
+            handler::Command::Release { channel_id } => {
+                // TODO: implement
+                unimplemented!();
+            }
+            handler::Command::ChannelClosed { channel_id } => {
+                // TODO: implement
+                unimplemented!();
+            }
+            handler::Command::ChannelError { packet, message } => {
+                // TODO: implement
+                unimplemented!();
+            }
+            handler::Command::ClientClose => {}
+            handler::Command::ClientError { message } => {
+                eprintln!("Client error: {}", message);
+            }
+        }
         Ok(())
     }
 }
