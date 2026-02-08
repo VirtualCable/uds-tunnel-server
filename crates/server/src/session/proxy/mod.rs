@@ -35,7 +35,7 @@ use futures::future::{Either, pending};
 use crate::session::{SessionId, SessionManager};
 use shared::{log, protocol, system::trigger::Trigger};
 
-mod clients;
+mod channels;
 pub mod handler;
 pub mod types;
 
@@ -75,7 +75,7 @@ impl Proxy {
     async fn run_session_proxy(self, parent: SessionId) -> Result<()> {
         let Self { ctrl_rx, stop } = self;
 
-        let mut clients = clients::ClientFanIn::new();
+        let mut clients = channels::ClientChannels::new();
 
         // Now we need the other sides for both sides (our sides)
         let mut our_server_channels: Option<types::ServerEndpoints> = None;
@@ -188,7 +188,7 @@ impl Proxy {
     async fn handle_incoming_command(
         data: &[u8],
         parent: &SessionId,
-        clients: &mut clients::ClientFanIn,
+        clients: &mut channels::ClientChannels,
     ) -> Result<bool> {
         // Errors parsing commands, mean intentional error or misbehavior (or big bug :P), so we will always
         // close the session on command errors

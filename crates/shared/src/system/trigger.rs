@@ -38,6 +38,9 @@ pub struct Trigger {
     state: Arc<(Mutex<bool>, Condvar, Notify)>,
 }
 
+// unsafe impl Send for Trigger {}
+// unsafe impl Sync for Trigger {}
+
 impl Trigger {
     pub fn new() -> Self {
         Trigger {

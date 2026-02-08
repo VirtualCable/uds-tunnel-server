@@ -31,62 +31,23 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::AsyncWriteExt,
+    net::tcp::{OwnedReadHalf, OwnedWriteHalf},
+};
 
-use shared::system::trigger::Trigger;
+use shared::{log, system::trigger::Trigger};
 
 use super::{
     crypt::{tunnel::get_tunnel_crypts, types::PacketBuffer},
     protocol::{handshake::Handshake, ticket::Ticket},
+    server::TunnelServer,
 };
 
-pub enum TunnelCommand {
-    Open { channel_id: u16 },
-    Close { channel_id: u16 },
-    ServerClose { channel_id: u16 },
-    ServerError { channel_id: u16, message: String },
-}
+mod handler;
+mod servers;
 
-pub struct TunnelHandler {
-    ctrl_tx: flume::Sender<TunnelCommand>,
-}
-
-impl TunnelHandler {
-    pub fn new(ctrl_tx: flume::Sender<TunnelCommand>) -> Self {
-        Self { ctrl_tx }
-    }
-
-    pub async fn open_channel(&self, channel_id: u16) -> Result<()> {
-        self.ctrl_tx
-            .send_async(TunnelCommand::Open { channel_id })
-            .await
-            .context("Failed to send open channel command")
-    }
-
-    pub async fn close_channel(&self, channel_id: u16) -> Result<()> {
-        self.ctrl_tx
-            .send_async(TunnelCommand::Close { channel_id })
-            .await
-            .context("Failed to send close channel command")
-    }
-
-    pub async fn server_close_channel(&self, channel_id: u16) -> Result<()> {
-        self.ctrl_tx
-            .send_async(TunnelCommand::ServerClose { channel_id })
-            .await
-            .context("Failed to send server close channel command")
-    }
-
-    pub async fn server_error_channel(&self, channel_id: u16, message: String) -> Result<()> {
-        self.ctrl_tx
-            .send_async(TunnelCommand::ServerError {
-                channel_id,
-                message,
-            })
-            .await
-            .context("Failed to send server error channel command")
-    }
-}
+pub use handler::Handler;
 
 pub struct Proxy {
     tunnel_server: String, // Host:port of tunnel server to connect to
@@ -115,7 +76,7 @@ impl Proxy {
         }
     }
 
-    async fn connect(&mut self) -> Result<(impl AsyncReadExt + Unpin, impl AsyncWriteExt + Unpin)> {
+    async fn connect(&mut self) -> Result<(OwnedReadHalf, OwnedWriteHalf)> {
         // Try to connect to tunnel server and authenticate using the ticket and shared secret
         let stream = tokio::net::TcpStream::connect(&self.tunnel_server)
             .await
@@ -174,33 +135,56 @@ impl Proxy {
         Ok((reader, writer))
     }
 
-    pub async fn run(self) -> Result<TunnelHandler> {
-        let (mut reader, mut writer) = self.connect().await?;
+    // Launchs (or relaunchs) the tunnel server, returns a handler to send commands to the server
+    async fn launch_server(&mut self, ctrl_tx: flume::Sender<handler::Command>) -> Result<()> {
+        // TODO: Retry 3 times with some small delay (total must not exceed 2 seconds, that is the grace time for the tunnel server)
+        let (reader, writer) = self.connect().await?;
 
+        // Create the server and run it in a separate task
+        let server = TunnelServer::new(
+            reader,
+            writer,
+            self.stop.clone(),
+            handler::Handler::new(ctrl_tx.clone()),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = server.run().await {
+                log::warn!("Tunnel server error: {:?}", e);
+                ctrl_tx
+                    .send_async(handler::Command::ServerError {
+                        message: format!("{:?}", e),
+                    })
+                    .await
+                    .ok();
+            } else {
+                ctrl_tx.send_async(handler::Command::ServerClose).await.ok();
+            }
+        });
+        Ok(())
+    }
+
+    pub async fn run(mut self) -> Result<Handler> {
         let (ctrl_tx, ctrl_rx) = flume::bounded(8); // Not too much buffering, we want backpressure on commands
 
+        // Launch server or return an error
+        self.launch_server(ctrl_tx.clone()).await?;
+
+        // Execute the proxy task
         tokio::spawn(async move {
             // Main loop to handle tunnel communication, moves self into the async task
             let mut buffer = PacketBuffer::new();
             loop {
                 tokio::select! {
                     // Check for stop signal
-                    _ = self.stop.wait() => {
+                    _ = self.stop.wait_async() => {
                         break;
                     }
 
-                    // Handle incoming packets from the tunnel server
-                    result = self.handle_incoming(&mut reader, &mut buffer) => {
-                        if let Err(e) = result {
-                            eprintln!("Error handling incoming packet: {:?}", e);
-                            break;
-                        }
-                    }
                     // Handle control commands from the TunnelHandler
                     cmd = ctrl_rx.recv_async() => {
                         match cmd {
                             Ok(cmd) => {
-                                if let Err(e) = self.handle_command(cmd, &mut writer).await {
+                                if let Err(e) = self.handle_command(cmd).await {
                                     eprintln!("Error handling command: {:?}", e);
                                     break;
                                 }
@@ -213,12 +197,15 @@ impl Proxy {
                     }
                 }
             }
-
-            // Clean up resources, close connections, etc.
-            let _ = writer.shutdown().await;
         });
 
-        Ok(TunnelHandler::new(ctrl_tx))
+        Ok(handler::Handler::new(ctrl_tx))
+    }
+
+    async fn handle_command(&self, cmd: handler::Command) -> Result<()>
+    {
+        // TODO: implement command handling, for now just log the command
+        Ok(())
     }
 }
 

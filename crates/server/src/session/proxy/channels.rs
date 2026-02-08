@@ -39,18 +39,18 @@ use crate::{session::Session, stream::client::TunnelClientStream};
 use shared::{log, protocol, system::trigger::Trigger};
 
 #[derive(Debug, Clone)]
-struct ClientInfo {
+struct ClientChannel {
     sender: protocol::PayloadSender,
     stop: Trigger,
 }
 
-pub(super) struct ClientFanIn {
-    clients_senders: Vec<Option<ClientInfo>>,
+pub(super) struct ClientChannels {
+    clients_senders: Vec<Option<ClientChannel>>,
     sender: protocol::PayloadWithChannelSender,
     receiver: protocol::PayloadWithChannelReceiver,
 }
 
-impl ClientFanIn {
+impl ClientChannels {
     pub fn new() -> Self {
         let (sender, receiver) = protocol::payload_with_channel_pair();
         Self {
@@ -110,7 +110,7 @@ impl ClientFanIn {
             }
         });
 
-        self.clients_senders[(stream_channel_id - 1) as usize] = Some(ClientInfo { sender, stop });
+        self.clients_senders[(stream_channel_id - 1) as usize] = Some(ClientChannel { sender, stop });
         Ok(())
     }
 

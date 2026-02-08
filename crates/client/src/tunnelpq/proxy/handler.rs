@@ -28,39 +28,56 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-use anyhow::Result;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::{Context, Result};
 
-use shared::system::trigger::Trigger;
-
-use super::proxy::Handler;
-
-pub struct TunnelServer<R, W>
-where
-    R: AsyncReadExt + Unpin + Send + 'static,
-    W: AsyncWriteExt + Unpin + Send + 'static,
-{
-    reader: R,
-    writer: W,
-    stop: Trigger,
-    proxy: Handler,
+pub enum Command {
+    Request { channel_id: u16 },
+    Release { channel_id: u16 },
+    ChannelClosed { channel_id: u16 },
+    ChannelError { channel_id: u16, message: String },
+    // Used internally by proxy to signal server close or error, not sent by handler
+    ServerClose,
+    ServerError { message: String },
 }
 
-impl<R, W> TunnelServer<R, W>
-where
-    R: AsyncReadExt + Unpin + Send + 'static,
-    W: AsyncWriteExt + Unpin + Send + 'static,
-{
-    pub fn new(reader: R, writer: W, stop: Trigger, handler: Handler) -> Self {
-        Self { reader, writer, stop, proxy: handler }
-    }
-
-    pub async fn run(self) -> Result<()> {
-        // TODO: implement
-        Ok(())
-    }
+pub struct Handler {
+    ctrl_tx: flume::Sender<Command>,
 }
 
-// Tests module
-#[cfg(test)]
-mod tests;
+impl Handler {
+    pub fn new(ctrl_tx: flume::Sender<Command>) -> Self {
+        Self { ctrl_tx }
+    }
+
+    pub async fn request_channel(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(Command::Request { channel_id })
+            .await
+            .context("Failed to send request channel command")
+    }
+
+    pub async fn release_channel(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(Command::Release { channel_id })
+            .await
+            .context("Failed to send release channel command")
+    }
+
+    pub async fn channel_closed(&self, channel_id: u16) -> Result<()> {
+        self.ctrl_tx
+            .send_async(Command::ChannelClosed { channel_id })
+            .await
+            .context("Failed to send channel closed command")
+    }
+
+    pub async fn channel_error(&self, channel_id: u16, message: String) -> Result<()> {
+        self.ctrl_tx
+            .send_async(Command::ChannelError {
+                channel_id,
+                message,
+            })
+            .await
+            .context("Failed to send channel error command")
+    }
+
+}

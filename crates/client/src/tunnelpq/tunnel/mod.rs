@@ -45,16 +45,11 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::Result;
 
 use shared::{log, system::trigger::Trigger};
 
-use super::{
-    client::TunnelClient,
-    crypt::{Crypt, tunnel::get_tunnel_crypts, types::PacketBuffer},
-    protocol::{handshake::Handshake, ticket::Ticket},
-};
+use super::{protocol::ticket::Ticket, proxy::Proxy};
 
 pub struct Tunnel {
     ticket: Ticket,
@@ -82,17 +77,17 @@ impl Tunnel {
     }
 
     pub async fn run(self) -> Result<()> {
-        let tunnel_client = TunnelClient::new(
-            self.tunnel_server,
+        log::info!("Starting tunnel");
+        // Create the proxy and run it
+        let proxy = Proxy::new(
+            &self.tunnel_server,
             self.ticket,
             self.shared_secret,
             self.initial_timeout,
         );
-        // If run fails to connect, will return an error
-        // otherwise, it will run a tokio task processing
-        // whatever is needed
-        // Note that self is moved into the task, so we don't need to worry about it anymore
-        tunnel_client.run().await?;
+
+        // If fails to connect, wil return error
+        proxy.run().await?;
         Ok(())
     }
 }
