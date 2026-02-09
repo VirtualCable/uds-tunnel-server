@@ -138,14 +138,26 @@ async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -
     Ok(())
 }
 
+fn new_session_for_test(remote: &str) -> Session {
+    Session::new(
+        SharedSecret::new([0u8; 32]),
+        Ticket::new_random(),
+        Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![remote.to_string()],
+    )
+}
+
 #[serial_test::serial(manager)]
 #[tokio::test]
 async fn attach_detach_basic() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
     let stop = Trigger::new();
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session)?;
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run(SessionId::new_random());
+    let _task = proxy.run(*session.id());
 
     let server = handle.start_server().await?;
 
@@ -231,13 +243,17 @@ async fn messages_preserve_order() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn buffer_size_works() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
 
     let stop = Trigger::new();
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session)?;
+
     let (proxy, handle) = Proxy::new(stop.clone());
-    let _task = proxy.run(SessionId::new_random());
+    let _task = proxy.run(*session.id());
 
     let server = handle.start_server().await?;
     // No client, will cause buffer to fill up

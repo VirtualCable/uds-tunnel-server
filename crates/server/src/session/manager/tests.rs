@@ -74,14 +74,17 @@ async fn test_session_manager_add_and_get() {
     assert_eq!(manager.count(), 1);
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
-async fn test_session_running() {
+async fn test_session_running() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
-
+    // Session needs to be in global manager to be able to start server
     let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session)?;
     session.start_server().await.unwrap();
     assert!(session.is_running());
     assert!(session.is_server_running());
+    Ok(())
 }
 
 #[tokio::test]

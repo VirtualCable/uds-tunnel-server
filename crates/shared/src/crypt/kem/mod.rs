@@ -7,6 +7,7 @@ pub use libcrux_ml_kem::mlkem768::{
     MlKem768Ciphertext as CipherText, MlKem768PrivateKey as PrivateKey, decapsulate,
     generate_key_pair,
 };
+use rand::Rng;
 
 // Note, changes to kem size (1024, 768 or 512) will need to update also PRIVATE_KEY_SIZE and CIPHERTEXT_SIZE
 pub const PRIVATE_KEY_SIZE: usize = 2400;
@@ -56,12 +57,12 @@ pub fn set_comms_keypair(private_key: [u8; PRIVATE_KEY_SIZE], public_key: [u8; P
 
 /// Generate a new KEM keypair (private key and public key)
 fn gen_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
-    use rand::{TryRngCore, rngs::OsRng};
+    use rand::{rngs::StdRng};
 
-    let mut rng = OsRng;
+    let mut rng: StdRng = rand::make_rng();
+
     let mut randomness = [0u8; 64];
-    rng.try_fill_bytes(&mut randomness)
-        .map_err(|e| anyhow::format_err!("Failed to generate randomness: {}", e))?;
+    rng.fill_bytes(&mut randomness);
     let keypair = generate_key_pair(randomness);
     Ok((
         keypair.private_key().as_slice().to_vec(),

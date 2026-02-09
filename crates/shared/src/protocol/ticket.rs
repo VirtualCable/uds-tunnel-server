@@ -30,7 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use anyhow::Result;
-use rand::{Rng, distr::Alphanumeric};
+use rand::{prelude::*, distr::Alphanumeric};
 
 use super::consts::TICKET_LENGTH;
 
