@@ -138,7 +138,7 @@ async fn test_inbound_read_error() -> Result<()> {
         }
     }
 
-    let (tx, mut rx) = protocol::payload_with_channel_pair();
+    let (tx, rx) = protocol::payload_with_channel_pair();
     let stop = Trigger::new();
 
     let mut inbound = TunnelClientInboundStream::new(1, FailingReader, tx, stop.clone());

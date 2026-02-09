@@ -99,58 +99,16 @@ impl PayloadWithChannel {
     }
 }
 
-#[derive(Debug)]
-pub struct RetryableReceiver<T> {
-    receiver: flume::Receiver<T>,
-    pending: Option<T>,
-}
-
-impl<T> RetryableReceiver<T> {
-    pub fn new(receiver: flume::Receiver<T>) -> Self {
-        Self {
-            receiver,
-            pending: None,
-        }
-    }
-
-    // recv_async to keep flume signature
-    pub async fn recv_async(&mut self) -> Result<T> {
-        if let Some(pending) = self.pending.take() {
-            Ok(pending)
-        } else {
-            let msg = self.receiver.recv_async().await?;
-            Ok(msg)
-        }
-    }
-
-    pub fn try_recv(&mut self) -> Result<T, flume::TryRecvError> {
-        if let Some(pending) = self.pending.take() {
-            Ok(pending)
-        } else {
-            self.receiver.try_recv()
-        }
-    }
-
-    pub fn retry(&mut self, msg: T) {
-        self.pending = Some(msg);
-    }
-
-    pub fn is_disconnected(&self) -> bool {
-        self.receiver.is_disconnected()
-    }
-}
-
 // Channel types
 pub type PayloadSender = flume::Sender<Payload>;
 pub type PayloadReceiver = flume::Receiver<Payload>;
 pub type PayloadWithChannelSender = flume::Sender<PayloadWithChannel>;
-pub type PayloadWithChannelReceiver = RetryableReceiver<PayloadWithChannel>;
+pub type PayloadWithChannelReceiver = flume::Receiver<PayloadWithChannel>;
 
 pub fn payload_pair() -> (PayloadSender, PayloadReceiver) {
     flume::bounded(consts::CHANNEL_SIZE)
 }
 
 pub fn payload_with_channel_pair() -> (PayloadWithChannelSender, PayloadWithChannelReceiver) {
-    let (tx, rx) = flume::bounded(consts::CHANNEL_SIZE);
-    (tx, RetryableReceiver::new(rx))
+    flume::bounded(consts::CHANNEL_SIZE)
 }

@@ -282,7 +282,7 @@ async fn reattach_server_works() -> Result<()> {
     ))?;
     let _task = proxy.run(*session.id());
 
-    let mut server1 = handle.start_server().await?;
+    let server1 = handle.start_server().await?;
 
     // Send open channel command
     server1
@@ -311,7 +311,7 @@ async fn reattach_server_works() -> Result<()> {
     // Fail server will allow us to reattach
     handle.fail_server().await;
 
-    let mut server2 = handle.start_server().await?;
+    let server2 = handle.start_server().await?;
     server2
         .tx
         .send_async(protocol::PayloadWithChannel::new(

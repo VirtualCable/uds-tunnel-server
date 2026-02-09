@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/client", "crates/server", "crates/shared"]
+members = ["crates/server", "crates/shared"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -10,7 +10,7 @@ chrono = { version = "0.4.42" }
 num_enum = "0.7.5"
 
 # randomness
-rand = "0.9.2"
+rand = "0.10.0"
 
 # SSL/TLS
 rustls = "0.23.36"
@@ -63,7 +63,7 @@ sha2 = "0.10.9"
 libcrux-ml-kem = "0.0.6"
 
 # regex
-regex = "1.12.2"
+regex = "1.12"
 
 # Logging
 tracing = "0.1.44"

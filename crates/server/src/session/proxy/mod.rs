@@ -73,6 +73,8 @@ impl Proxy {
     }
 
     async fn run_session_proxy(self, parent: SessionId) -> Result<()> {
+        let manager = SessionManager::get_instance();
+
         let Self { ctrl_rx, stop } = self;
 
         let mut clients = channels::ClientChannels::new();
@@ -106,8 +108,8 @@ impl Proxy {
                     match cmd {
                         Ok(handler::Command::AttachServer { reply }) => {
                             log::debug!("Attaching server to session proxy");
-                            let (server_tx, our_rx) = protocol::payload_with_channel_pair();
-                            let (our_tx, server_rx) = protocol::payload_with_channel_pair();
+                            let (server_tx, server_rx) = manager.get_server_channels(&parent)?;
+                            let (our_tx, our_rx) = manager.get_proxy_channels(&parent)?;
                             our_server_channels = Some(types::ServerEndpoints { tx: our_tx, rx: our_rx });
                             let endpoints = types::ServerEndpoints { tx: server_tx, rx: server_rx };
                             let _ = reply.send(endpoints);

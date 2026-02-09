@@ -90,6 +90,7 @@ struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     stop: Trigger,
     receiver: PayloadWithChannelReceiver,
     crypt: Crypt,
+    session_id: SessionId,
 
     writer: W,
 }
@@ -100,11 +101,13 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         crypt: Crypt,
         receiver: PayloadWithChannelReceiver,
         stop: Trigger,
+        session_id: SessionId,
     ) -> Self {
         TunnelServerOutboundStream {
             stop,
             receiver,
             crypt,
+            session_id,
             writer,
         }
     }
@@ -113,13 +116,19 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         if let Err(e) = self.send_data(&packet).await {
             log::error!("Error sending data in server outbound stream: {:?}", e);
             // Store in session so it can be resent if the stream is restarted due to a recoverable error
-            self.receiver.retry(packet);
+            SessionManager::get_instance().set_unsent_packets(&self.session_id, packet);
             return Err(e);
         }
         Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
+        // If there are unset packets, sent them now
+        if let Some(unsent_packet) = SessionManager::get_instance().get_unsent_packets(&self.session_id) {
+            log::debug!("Resending unsent packet for session {:?} in server outbound stream", self.session_id);
+            self.send_packet(unsent_packet).await?;
+        }
+
         loop {
             tokio::select! {
                 _ = self.stop.wait_async() => {
@@ -233,6 +242,7 @@ where
             outbound_crypt,
             channels.rx,
             local_stop.clone(),
+            session_id,
         );
 
         let tunnel_error = Arc::new(AtomicBool::new(false));

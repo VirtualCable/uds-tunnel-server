@@ -35,6 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use shared::protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender};
 
 use super::{Session, SessionId};
 
@@ -82,7 +83,13 @@ impl SessionManager {
         };
         // Also, insert an idempotent entry in equivs
         {
-            let mut equivs: std::sync::RwLockWriteGuard<'_, HashMap<shared::protocol::ticket::Ticket, (shared::protocol::ticket::Ticket, Instant)>> = self.equivs.write().unwrap();
+            let mut equivs: std::sync::RwLockWriteGuard<
+                '_,
+                HashMap<
+                    shared::protocol::ticket::Ticket,
+                    (shared::protocol::ticket::Ticket, Instant),
+                >,
+            > = self.equivs.write().unwrap();
             equivs.insert(session.id, (session.id, Instant::now()));
         }
         Ok(session)
@@ -169,12 +176,50 @@ impl SessionManager {
         equivs.remove(from);
     }
 
-    pub fn cleanup_equiv_sessions(&self, max_age: std::time::Duration) {
+    pub fn set_unsent_packets(&self, id: &SessionId, packet: PayloadWithChannel) {
+        if let Some(session) = self.get_session(id) {
+            session.set_unsent_packet(packet);
+        }
+    }
+
+    pub fn get_unsent_packets(&self, id: &SessionId) -> Option<PayloadWithChannel> {
+        if let Some(session) = self.get_session(id) {
+            session.take_unsent_packet()
+        } else {
+            None
+        }
+    }
+
+    pub fn get_server_channels(
+        &self,
+        id: &SessionId,
+    ) -> Result<(PayloadWithChannelSender, PayloadWithChannelReceiver)> {
+        if let Some(session) = self.get_session(id) {
+            Ok(session.get_server_channels())
+        } else {
+            Err(anyhow::anyhow!("Session not found"))
+        }
+    }
+
+    pub fn get_proxy_channels(
+        &self,
+        id: &SessionId,
+    ) -> Result<(PayloadWithChannelSender, PayloadWithChannelReceiver)> {
+        if let Some(session) = self.get_session(id) {
+            Ok(session.get_proxy_channels())
+        } else {
+            Err(anyhow::anyhow!("Session not found"))
+        }
+    }
+
+    fn cleanup_equiv_sessions(&self, max_age: std::time::Duration) {
         let mut equivs = self.equivs.write().unwrap();
         let now = Instant::now();
         equivs.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < max_age);
     }
 
+    // Lazy cleanup of equiv sessions on each access, to avoid needing a background task
+    // This allows to easyly keep memory in limits.
     fn maybe_cleanup_equivs(&self) {
         let now = Instant::now();
         let mut last = self.last_cleanup.write().unwrap();

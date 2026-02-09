@@ -39,7 +39,10 @@ use anyhow::Result;
 use shared::{
     crypt::{self, types::SharedSecret},
     log,
-    protocol::{PayloadWithChannel, ticket},
+    protocol::{
+        PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender,
+        payload_with_channel_pair, ticket,
+    },
     system::trigger::Trigger,
 };
 
@@ -78,6 +81,12 @@ pub struct Session {
     // (eg: client sent a message but an error ocurrend, and it's alreade consumed from channel)
     unsent_message: RwLock<Option<PayloadWithChannel>>,
 
+    // The channels for server side must be kept in the session, as they can contain unprocessed messages
+    tx: PayloadWithChannelSender,
+    rx_server: PayloadWithChannelReceiver,
+    tx_server: PayloadWithChannelSender,
+    rx: PayloadWithChannelReceiver,
+
     // seq numbers for crypto part
     // only updated on server side killed. (the one receives/sends data from client)
     seq: RwLock<(u64, u64)>,
@@ -99,6 +108,9 @@ impl Session {
 
         let proxy_task = proxy.run(id); // Start proxy task
 
+        let (tx, rx_server) = payload_with_channel_pair();
+        let (tx_server, rx) = payload_with_channel_pair();
+
         Session {
             id,
             ticket,
@@ -107,10 +119,14 @@ impl Session {
             session_proxy,
             proxy_task,
             server_running: AtomicBool::new(false),
+            unsent_message: RwLock::new(None),
+            tx,
+            rx_server,
+            tx_server,
+            rx,
             seq: RwLock::new((0, 0)),
             src_ip: RwLock::new(src_ip),
             remotes,
-            unsent_message: RwLock::new(None),
         }
     }
 
@@ -118,7 +134,7 @@ impl Session {
         &self.id
     }
 
-    pub fn take_unsent_message(&self) -> Option<PayloadWithChannel> {
+    pub fn take_unsent_packet(&self) -> Option<PayloadWithChannel> {
         if let Ok(mut unsent_lock) = self.unsent_message.write() {
             unsent_lock.take()
         } else {
@@ -126,10 +142,19 @@ impl Session {
         }
     }
 
-    pub fn set_unsent_message(&self, message: PayloadWithChannel) {
+    pub fn set_unsent_packet(&self, message: PayloadWithChannel) {
         if let Ok(mut unsent_lock) = self.unsent_message.write() {
             *unsent_lock = Some(message);
         }
+    }
+
+    // Note: Even cloned, ther will be only one server side per session, so this is all fine.
+    pub fn get_server_channels(&self) -> (PayloadWithChannelSender, PayloadWithChannelReceiver) {
+        (self.tx_server.clone(), self.rx_server.clone())
+    }
+
+    pub fn get_proxy_channels(&self) -> (PayloadWithChannelSender, PayloadWithChannelReceiver) {
+        (self.tx.clone(), self.rx.clone())
     }
 
     pub fn set_ip(&self, ip: SocketAddr) {
