@@ -31,7 +31,11 @@
 use std::sync::Arc;
 
 use shared::{
-    crypt::{build_header, consts::{CRYPT_PACKET_TIMEOUT_SECS, HEADER_LENGTH}, types::SharedSecret},
+    crypt::{
+        build_header,
+        consts::{CRYPT_PACKET_TIMEOUT_SECS, HEADER_LENGTH},
+        types::SharedSecret,
+    },
     protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
 };
@@ -42,16 +46,63 @@ use super::*;
 
 const TEST_CHANNEL_ID: u16 = 1; // Currently only supports channel 1
 
+const KEY1: [u8; 32] = [7; 32];
+const KEY2: [u8; 32] = [8; 32];
+
 fn make_test_crypts() -> (Crypt, Crypt) {
     // Fixed key for testing
     // Why 2? to ensure each crypt is used where expected
-    let key1 = SharedSecret::new([7; 32]);
-    let key2 = SharedSecret::new([8; 32]);
+    let key1 = SharedSecret::new(KEY1);
+    let key2 = SharedSecret::new(KEY2);
 
     let inbound = Crypt::new(&key1, 0);
     let outbound = Crypt::new(&key2, 0);
 
     (inbound, outbound)
+}
+
+fn new_session_for_test(remote: &str) -> Session {
+    Session::new(
+        SharedSecret::new([0u8; 32]),
+        Ticket::new_random(),
+        Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![remote.to_string()],
+    )
+}
+
+struct FailingStream;
+
+impl tokio::io::AsyncRead for FailingStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Err(std::io::Error::other("fail")))
+    }
+}
+
+impl tokio::io::AsyncWrite for FailingStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Err(std::io::Error::other("fail")))
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 async fn read_until_close(
@@ -151,25 +202,13 @@ async fn test_server_inbound_remote_close_before_header() {
 #[serial_test::serial(manager)]
 #[tokio::test]
 async fn test_server_inbound_read_error() {
-    struct FailingReader;
-
-    impl tokio::io::AsyncRead for FailingReader {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-            _buf: &mut tokio::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::task::Poll::Ready(Err(std::io::Error::other("fail")))
-        }
-    }
-
     log::setup_logging("debug", log::LogType::Test);
 
     let (crypt, _) = make_test_crypts();
     let (tx, _rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(FailingReader, crypt, tx, stop.clone());
+    let mut inbound = TunnelServerInboundStream::new(FailingStream, crypt, tx, stop.clone());
 
     let res = inbound.run().await;
     assert!(res.is_err());
@@ -194,6 +233,85 @@ async fn test_server_inbound_stop_before_read() {
     inbound.run().await.unwrap();
 
     assert!(rx.try_recv().is_err());
+}
+
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn test_outbound_server_stores_recover_packet() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, crypt) = make_test_crypts();
+    let stop = Trigger::new();
+    let (tx, rx) = flume::bounded(10);
+
+    let mut outbound =
+        TunnelServerOutboundStream::new(FailingStream, crypt, rx, stop.clone(), *session.id());
+
+    // Send a message to the outbound stream, which will cause it to attempt to write and fail
+
+    tx.send_async(PayloadWithChannel {
+        channel_id: 0,
+        payload: b"test".into(),
+    })
+    .await
+    .unwrap();
+
+    // Must fail with an error
+    outbound.run().await.unwrap_err();
+
+    // The session should contain the packet in the pending queue, and should be able to recover it
+    let packet = session.take_unsent_packet().unwrap(); // Must not be None
+    assert_eq!(packet.channel_id, 0);
+    assert_eq!(packet.payload.as_ref(), b"test");
+
+    Ok(())
+}
+
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn test_outbound_server_reads_recover_packet() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, out_crypt) = make_test_crypts();
+    let stop = Trigger::new();
+    let (_, rx) = flume::bounded(10);
+    let (mut client, server) = tokio::io::duplex(1024);
+
+    session.set_unsent_packet(PayloadWithChannel {
+        channel_id: 0,
+        payload: b"test".into(),
+    });
+
+    let mut outbound =
+        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+
+    // Must not fail, so run on ea task to allow check
+    let is_errrored = Arc::new(AtomicBool::new(false));
+    tokio::spawn({
+        let is_errrored = is_errrored.clone();
+        async move {
+            if let Err(e) = outbound.run().await {
+                log::error!("Outbound stream failed: {:?}", e);
+                is_errrored.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    });
+
+    let mut in_crypt = Crypt::new(&SharedSecret::new(KEY2), 0); // Must use the same key as outbound, as it is the one that encrypts to client
+
+    // Decripted packet should be the same
+    let mut buffer = PacketBuffer::new();
+    let (data, channel) = in_crypt.read(&stop, &mut client, &mut buffer).await?;
+    stop.trigger();
+    assert_eq!(channel, 0);
+    assert_eq!(data, b"test");
+    assert!(!is_errrored.load(std::sync::atomic::Ordering::Relaxed));
+
+    Ok(())
 }
 
 #[serial_test::serial(manager)]

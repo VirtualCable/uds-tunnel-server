@@ -142,9 +142,9 @@ impl Session {
         }
     }
 
-    pub fn set_unsent_packet(&self, message: PayloadWithChannel) {
+    pub fn set_unsent_packet(&self, packet: PayloadWithChannel) {
         if let Ok(mut unsent_lock) = self.unsent_message.write() {
-            *unsent_lock = Some(message);
+            *unsent_lock = Some(packet);
         }
     }
 

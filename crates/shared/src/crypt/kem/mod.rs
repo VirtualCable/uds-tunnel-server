@@ -3,10 +3,14 @@ use std::sync::RwLock;
 use anyhow::Result;
 
 // reexport Ciphertext, PrivateKey, decapsulate, generate_keypair
-pub use libcrux_ml_kem::mlkem768::{
-    MlKem768Ciphertext as CipherText, MlKem768PrivateKey as PrivateKey, decapsulate,
-    generate_key_pair,
+pub use libcrux_ml_kem::{
+    KEY_GENERATION_SEED_SIZE,
+    mlkem768::{
+        MlKem768Ciphertext as CipherText, MlKem768PrivateKey as PrivateKey, decapsulate,
+        generate_key_pair,
+    },
 };
+
 use rand::Rng;
 
 // Note, changes to kem size (1024, 768 or 512) will need to update also PRIVATE_KEY_SIZE and CIPHERTEXT_SIZE
@@ -57,11 +61,11 @@ pub fn set_comms_keypair(private_key: [u8; PRIVATE_KEY_SIZE], public_key: [u8; P
 
 /// Generate a new KEM keypair (private key and public key)
 fn gen_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
-    use rand::{rngs::StdRng};
+    use rand::rngs::StdRng;
 
     let mut rng: StdRng = rand::make_rng();
 
-    let mut randomness = [0u8; 64];
+    let mut randomness = [0u8; KEY_GENERATION_SEED_SIZE];
     rng.fill_bytes(&mut randomness);
     let keypair = generate_key_pair(randomness);
     Ok((
