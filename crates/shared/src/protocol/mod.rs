@@ -90,13 +90,6 @@ impl PayloadWithChannel {
             payload: payload.into(),
         })
     }
-
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&self.channel_id.to_be_bytes());
-        data.extend_from_slice(self.payload.as_ref());
-        data
-    }
 }
 
 // Channel types
