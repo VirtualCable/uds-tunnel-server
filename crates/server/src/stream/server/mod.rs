@@ -124,8 +124,13 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
 
     pub async fn run(&mut self) -> Result<()> {
         // If there are unset packets, sent them now
-        if let Some(unsent_packet) = SessionManager::get_instance().get_unsent_packets(&self.session_id) {
-            log::debug!("Resending unsent packet for session {:?} in server outbound stream", self.session_id);
+        if let Some(unsent_packet) =
+            SessionManager::get_instance().get_unsent_packets(&self.session_id)
+        {
+            log::debug!(
+                "Resending unsent packet for session {:?} in server outbound stream",
+                self.session_id
+            );
             self.send_packet(unsent_packet).await?;
         }
 
@@ -163,7 +168,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
             let end = (offset + CRYPT_PACKET_SIZE).min(payload.len());
             let chunk = &payload[offset..end];
             self.crypt
-                .write(&mut self.writer, data.channel_id, chunk)
+                .write(&self.stop, &mut self.writer, data.channel_id, chunk)
                 .await?;
             offset = end;
         }

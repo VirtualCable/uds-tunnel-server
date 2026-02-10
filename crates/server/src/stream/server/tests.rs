@@ -278,7 +278,8 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
 
     let (_, out_crypt) = make_test_crypts();
     let stop = Trigger::new();
-    let (_, rx) = flume::bounded(10);
+    // Ensure tx is alive until the end of the test, so we don't gat any error on task
+    let (_tx, rx) = flume::bounded(10);
     let (mut client, server) = tokio::io::duplex(1024);
 
     session.set_unsent_packet(PayloadWithChannel {
@@ -290,13 +291,20 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
         TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
 
     // Must not fail, so run on ea task to allow check
-    let is_errrored = Arc::new(AtomicBool::new(false));
+    let errored = Arc::new(AtomicBool::new(false));
     tokio::spawn({
-        let is_errrored = is_errrored.clone();
+        let stop = stop.clone();
+        let errored = errored.clone();
         async move {
-            if let Err(e) = outbound.run().await {
-                log::error!("Outbound stream failed: {:?}", e);
-                is_errrored.store(true, std::sync::atomic::Ordering::Relaxed);
+            tokio::select! {
+                _ = stop.wait_async() => {}
+                res = outbound.run() => {
+                    if let Err(e) = res {
+                        log::error!("Outbound stream failed: {:?}", e);
+                        errored.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+
             }
         }
     });
@@ -309,7 +317,7 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
     stop.trigger();
     assert_eq!(channel, 0);
     assert_eq!(data, b"test");
-    assert!(!is_errrored.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!errored.load(std::sync::atomic::Ordering::Relaxed));
 
     Ok(())
 }
@@ -392,6 +400,7 @@ async fn test_tunnel_inbound() -> Result<()> {
     });
     out_crypt
         .write(
+            &stop,
             &mut client_side,
             0, // Control channel
             Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
@@ -400,6 +409,7 @@ async fn test_tunnel_inbound() -> Result<()> {
 
     out_crypt
         .write(
+            &stop,
             &mut client_side,
             TEST_CHANNEL_ID,
             b"GET /echo HTTP/1.0\r\nConnection: Close\r\nHost: echo.free.beeceptor.com\r\n\r\n",

@@ -60,7 +60,7 @@ where
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer
-                .write(&mut writer, stream_channel_id, &response_data)
+                .write(&stop, &mut writer, stream_channel_id, &response_data)
                 .await?;
 
             // Now the recv/send seq should have been keept from previous session, increment them both by 1

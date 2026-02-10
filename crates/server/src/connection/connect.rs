@@ -74,7 +74,7 @@ where
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer
-                .write(&mut writer, ticket_channel_id, &response_data)
+                .write(&stop, &mut writer, ticket_channel_id, &response_data)
                 .await?;
 
             // Now the recv/send seq should be set to 1 for next crypt managers

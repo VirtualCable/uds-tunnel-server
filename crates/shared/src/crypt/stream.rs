@@ -127,6 +127,7 @@ impl Crypt {
     // Writes data from buffer, encrypting it inplace
     pub async fn write<W: AsyncWriteExt + Unpin>(
         &mut self,
+        stop: &Trigger,
         writer: &mut W,
         channel: u16,
         data: &[u8],
@@ -141,9 +142,19 @@ impl Crypt {
             encrypted_packet.len() as u16,
             &mut header_buffer,
         )?;
-        writer.write_all(&header_buffer).await?;
-        writer.write_all(encrypted_packet).await?;
-        Ok(())
+        tokio::select! {
+            _ = stop.wait_async() => {
+                log::debug!("Outbound stream stopped while writing");
+                Ok(())  // Indicate end of processing
+            }
+            result = async {
+                writer.write_all(&header_buffer).await?;
+                writer.write_all(encrypted_packet).await?;
+                Ok(())
+            } => {
+                result
+            }
+        }
     }
 }
 
@@ -157,6 +168,8 @@ mod tests {
     async fn test_read_write_roundtrip() {
         log::setup_logging("debug", log::LogType::Test);
 
+        let stop = Trigger::new();
+
         let key = SharedSecret::new([7u8; 32]);
         let mut crypt = Crypt::new(&key, 0);
         // Create a pair of in-memory streams
@@ -166,13 +179,13 @@ mod tests {
 
         // Write data from client to server
         crypt
-            .write(&mut client, 1, plaintext)
+            .write(&stop, &mut client, 1, plaintext)
             .await
             .expect("Failed to write data");
 
         // Read data from server to client
         let (decrypted_data, channel) = crypt
-            .read(&Trigger::new(), &mut server, &mut buffer)
+            .read(&stop, &mut server, &mut buffer)
             .await
             .expect("Failed to read data");
 
