@@ -34,7 +34,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::session::{ClientEndpoints, SessionId, SessionManager};
 
-use shared::{crypt::consts::CRYPT_PACKET_SIZE, log, protocol::{PayloadWithChannel, PayloadWithChannelSender, Command, PayloadReceiver}, system::trigger::Trigger};
+use shared::{
+    crypt::consts::CRYPT_PACKET_SIZE,
+    log,
+    protocol::{Command, PayloadReceiver, PayloadWithChannel, PayloadWithChannelSender},
+    system::trigger::Trigger,
+};
 
 struct TunnelClientInboundStream<R: AsyncReadExt + Unpin> {
     stream_channel_id: u16,
@@ -81,12 +86,11 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                             break;
                         }
                         Ok(count) => {
-                            // Send to channel, fail if full or disconnected
-                            // Does not wait for space in channel
-                            // This is an internal error, and there is no way to send error here.
-                            self.sender.try_send(PayloadWithChannel::new(self.stream_channel_id, &buffer[..count]))?;
+                            // Send to channel, fail if disconnected
+                            self.sender.send_async(PayloadWithChannel::new(self.stream_channel_id, &buffer[..count])).await?;
                         }
                         Err(e) => {
+                            // This is an internal error, and there is no way to send error here.
                             log::error!("Client inbound read error: {:?}", e);
                             self.sender.try_send(
                                 Command::ChannelError {
