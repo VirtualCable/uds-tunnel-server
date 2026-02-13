@@ -35,7 +35,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::session::{ClientEndpoints, SessionId, SessionManager};
 
 use shared::{
-    crypt::consts::CRYPT_PACKET_SIZE,
     log,
     protocol::{Command, PayloadReceiver, PayloadWithChannel, PayloadWithChannelSender},
     system::trigger::Trigger,
@@ -66,7 +65,8 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
     pub async fn run(&mut self) -> Result<()> {
         log::debug!("Starting client inbound stream");
         // Read from read_half, raw, decrypt and send to sender channel, raw
-        let mut buffer = [0u8; CRYPT_PACKET_SIZE];
+        // We can use a bigger buffer, because client will split data into CRYPT_PACKET_SIZE chunks
+        let mut buffer = [0u8; 16384];  
         loop {
             tokio::select! {
                 _ = self.stop.wait_async() => {
