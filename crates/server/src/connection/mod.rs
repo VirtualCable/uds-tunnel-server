@@ -94,8 +94,14 @@ where
                 })
         }
         handshake::HandshakeAction::Recover { ticket } => {
-            // TODO: implement
-            Ok(())
+            recover::recover(reader, writer, &ticket, src_ip)
+                .await
+                .map_err(|e| {
+                    ErrorWithAddres::new(
+                        Some(src_ip),
+                        format!("Recovery failed: {:?}", e).as_str(),
+                    )
+                })
         }
     }
 }
