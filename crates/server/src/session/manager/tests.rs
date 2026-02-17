@@ -48,6 +48,24 @@ async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -
     Ok(())
 }
 
+async fn wait_for_session_manager_empty() -> Result<()> {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let empty = SessionManager::get_instance()
+                .sessions
+                .read()
+                .unwrap()
+                .is_empty();
+            if empty {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 fn new_session_for_test(remote: &str) -> Session {
     Session::new(
         SharedSecret::new([0u8; 32]),
@@ -106,7 +124,7 @@ async fn test_get_session_manager() {
     log::setup_logging("debug", log::LogType::Test);
 
     let manager = SessionManager::get_instance();
-    assert!(manager.sessions.read().unwrap().is_empty());
+    wait_for_session_manager_empty().await.unwrap();
     // Clear the session manager for testing
     manager.sessions.write().unwrap().clear();
     let session = manager

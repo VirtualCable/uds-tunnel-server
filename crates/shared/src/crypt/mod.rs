@@ -36,7 +36,7 @@ use aes_gcm::{
 use anyhow::Result;
 use sha2::digest::typenum;
 
-use crate::{log, protocol::Command};
+use crate::log;
 
 // Comms related
 pub mod consts;
@@ -118,20 +118,12 @@ impl Crypt {
         buffer: &'a mut types::PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
         if seq < self.seq {
-            // Note: Due to recovery feature, we may ignore
-            //       this error and return an empty payload, but log it as warning,
-            log::warn!(
-                "Out of order packet received: seq {} < current {}",
+            return Err(anyhow::anyhow!(
+                "replay attack detected: seq {} is less than current seq {}",
                 seq,
                 self.seq
-            );
-            // Mark as NOP, so it will be ignored by upper layers
-            let cmd = Command::Nop.to_bytes();
-            let buffer = &mut buffer.stream_slice()[..cmd.len()];
-            buffer.copy_from_slice(cmd.as_slice());
-            return Ok((buffer, 0)); // Empty vector indicates
+            ));
         }
-        self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
         if length < (consts::TAG_LENGTH + 2) as u16 {
             return Err(anyhow::anyhow!(
                 "decryption failure: ciphertext too short: {} bytes",
@@ -153,6 +145,9 @@ impl Crypt {
         self.cipher
             .decrypt_in_place_detached(Nonce::from_slice(&nonce), aad, ciphertext, tag.into())
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
+
+        self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
+
         // First two bytes are channel
         let channel = u16::from_be_bytes(ciphertext[..2].try_into().map_err(|e| {
             anyhow::anyhow!(
@@ -258,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn test_replay_returns_nop() {
+    fn test_replay_fails() {
         let key = SharedSecret::new([2u8; 32]);
         let mut crypt = Crypt::new(&key, 0);
 
@@ -279,9 +274,9 @@ mod tests {
         let mut buf3 = types::PacketBuffer::from(ciphertext);
         let result = crypt
             .decrypt(seq, ciphertext.len() as u16, &mut buf3)
-            .unwrap();
+            .unwrap_err();
 
-        assert_eq!(result.0, Command::Nop.to_bytes()); // Should return NOP command
+        assert!(result.to_string().contains("replay attack detected"), "{}", result);
     }
 
     #[test]
