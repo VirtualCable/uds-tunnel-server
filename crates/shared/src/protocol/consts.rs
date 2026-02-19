@@ -44,3 +44,6 @@ pub const CHANNEL_SIZE: usize = 2048; // 2k messages as much on a channel buffer
 
 // Ticket related constants
 pub const TICKET_LENGTH: usize = 48;
+
+// Maximum length for error messages in the protocol
+pub const MAX_ERROR_MSG_LENGTH: usize = 512;
