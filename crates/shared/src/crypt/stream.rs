@@ -34,12 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{log, system::trigger::Trigger};
 
-use super::{
-    Crypt, build_header,
-    consts::{CRYPT_PACKET_TIMEOUT_SECS, HEADER_LENGTH},
-    parse_header,
-    types::PacketBuffer,
-};
+use super::{Crypt, build_header, consts::HEADER_LENGTH, parse_header, types::PacketBuffer};
 
 impl Crypt {
     async fn read_stream<R: AsyncReadExt + Unpin>(
@@ -49,8 +44,6 @@ impl Crypt {
         length: usize,
         disallow_eof: bool,
     ) -> Result<usize> {
-        let timeout = std::time::Duration::from_secs(CRYPT_PACKET_TIMEOUT_SECS);
-
         let mut read = 0;
 
         while read < length {
@@ -74,10 +67,6 @@ impl Crypt {
                         }
                     }
                 }
-                _ = tokio::time::sleep(timeout) => {
-                    return Err(anyhow::anyhow!("read timed out after {:?} seconds", timeout.as_secs()));
-                }
-
             };
             read += n;
         }

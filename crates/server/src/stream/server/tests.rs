@@ -31,11 +31,7 @@
 use std::sync::Arc;
 
 use shared::{
-    crypt::{
-        build_header,
-        consts::{CRYPT_PACKET_TIMEOUT_SECS, HEADER_LENGTH},
-        types::SharedSecret,
-    },
+    crypt::{build_header, consts::HEADER_LENGTH, types::SharedSecret},
     protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
 };
@@ -353,16 +349,14 @@ async fn test_server_stream_with_invalid_packet() {
     // Prepare invalid packet (too short, and random data)
     // Note: a shorter packet will cause to wait for more data, so we need to make it long enough to trigger the error immediately
     // This is the wrost case, as a larger packet will be parsed as a header, and then fail on payload read, which will trigger the error faster
-    let invalid_packet = b"invalid"; // not long enough to be a valid header + payload
+    let invalid_packet = b"invalidinvalidinvalidinvalid"; // not long enough to be a valid header + payload
     server_writer.write_all(invalid_packet).await.unwrap();
 
     // Stop shuild be triggered due to error
     assert!(
-        stop.wait_timeout_async(std::time::Duration::from_secs(
-            CRYPT_PACKET_TIMEOUT_SECS + 1
-        ))
-        .await
-        .is_ok()
+        stop.wait_timeout_async(std::time::Duration::from_secs(2))
+            .await
+            .is_ok()
     );
     // Errored should be true
     assert!(errored.load(std::sync::atomic::Ordering::SeqCst));

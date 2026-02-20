@@ -60,12 +60,14 @@ pub enum HandshakeCommand {
 //   - Any failed handhsake, closes without response (hide server presence as much as possible)
 //   - TODO: Make some kind of block by IP if too many failed handshakes in short time
 
+#[derive(Debug)]
 pub enum HandshakeAction {
     Test,
     Open { ticket: Ticket },
     Recover { ticket: Ticket },
 }
 
+#[derive(Debug)]
 pub struct Handshake {
     pub src_ip: Option<SocketAddr>,
     pub action: HandshakeAction,
@@ -88,6 +90,7 @@ impl Handshake {
         } else {
             None
         };
+        // Signature + command
         let mut signature_buf = [0u8; consts::HANDSHAKE_V2_SIGNATURE.len() + 1];
         reader
             .read_exact(&mut signature_buf)
@@ -96,6 +99,9 @@ impl Handshake {
                 src_ip: ip,
                 message: format!("failed to read handshake signature and command: {}", e),
             })?;
+        if &signature_buf[..consts::HANDSHAKE_V2_SIGNATURE.len()] != consts::HANDSHAKE_V2_SIGNATURE {
+            return Err(ErrorWithAddres::new(ip, "invalid handshake signature"));
+        }
         let cmd: HandshakeCommand = signature_buf[consts::HANDSHAKE_V2_SIGNATURE.len()].into();
         match cmd {
             HandshakeCommand::Test => Ok(Handshake {
@@ -182,12 +188,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_handshake_parse_invalid_signature() {
-        let mut data = Vec::new();
-        data.extend_from_slice(b"INVALID_SIGNATURE");
+        // Wrong signature bytes (correct length), should be rejected with specific error
+        let mut data = vec![0u8; consts::HANDSHAKE_V2_SIGNATURE.len()]; // all zeros ≠ signature
         data.push(HandshakeCommand::Test.into());
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let result = Handshake::parse(&mut reader, false).await;
         assert!(result.is_err());
+        assert!(
+            result.unwrap_err().message.contains("invalid handshake signature"),
+            "expected 'invalid handshake signature' error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_signature_one_bit_flipped() {
+        // Signature with a single bit flipped must also be rejected
+        let mut sig = *consts::HANDSHAKE_V2_SIGNATURE;
+        sig[3] ^= 0x01;
+        let mut data = Vec::new();
+        data.extend_from_slice(&sig);
+        data.push(HandshakeCommand::Test.into());
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let result = Handshake::parse(&mut reader, false).await;
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().message.contains("invalid handshake signature"),
+            "expected 'invalid handshake signature' error"
+        );
     }
 
     #[tokio::test]
