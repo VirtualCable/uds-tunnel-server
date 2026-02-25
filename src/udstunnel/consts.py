@@ -44,6 +44,7 @@ LOGFORMAT: typing.Final[str] = (
 BUFFER_SIZE: typing.Final[int] = 1024 * 16
 # Handshake for conversation start
 HANDSHAKE_V1: typing.Final[bytes] = b'\x5AMGB\xA5\x01\x00'
+HANDSHAKE_v2: typing.Final[bytes] = b'\x5AMGB\xA5\x02\x00'  # also has a \x00 at the end, but we only use this for testing and no trash log
 # Ticket length
 TICKET_LENGTH: typing.Final[int] = 48
 # Max Admin password length (stats basically right now)

@@ -192,6 +192,10 @@ def process_connection(client: socket.socket, addr: typing.Tuple[str, str], conn
         data = client.recv(len(consts.HANDSHAKE_V1))
 
         if data != consts.HANDSHAKE_V1:
+            if data == consts.HANDSHAKE_v2:
+                logger.info('V2 HANDSHAKE from %s, closing connection', addr[0])
+                client.close()
+                return
             raise Exception(f'Invalid data from {addr[0]}: {data.hex()}')  # Invalid handshake
         conn.send((client, addr))
         del client  # Ensure socket is controlled on child process
