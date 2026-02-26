@@ -35,7 +35,7 @@ use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use shared::{
-    crypt::{Crypt, consts::CRYPT_PACKET_SIZE, types::PacketBuffer},
+    crypt::{Crypt, types::PacketBuffer},
     log,
     protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender},
     system::trigger::Trigger,
@@ -160,20 +160,9 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
     }
 
     async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
-        let mut offset = 0;
-
-        let payload = data.payload.as_ref();
-        // Divide data into CRYPT_PACKET_SIZE chunks and send them
-        while offset < payload.len() {
-            let end = (offset + CRYPT_PACKET_SIZE).min(payload.len());
-            let chunk = &payload[offset..end];
-            self.crypt
-                .write(&self.stop, &mut self.writer, data.channel_id, chunk)
-                .await?;
-            offset = end;
-        }
-
-        Ok(())
+        self.crypt
+            .write(&self.stop, &mut self.writer, data.channel_id, data.payload.as_ref())
+            .await
     }
 }
 

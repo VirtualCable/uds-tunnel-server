@@ -35,6 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::session::{ClientEndpoints, SessionId, SessionManager};
 
 use shared::{
+    crypt::consts::CRYPT_PACKET_SIZE,
     log,
     protocol::{Command, PayloadReceiver, PayloadWithChannel, PayloadWithChannelSender},
     system::trigger::Trigger,
@@ -86,7 +87,7 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         }
                         Ok(count) => {
                             // Send to channel, fail if disconnected
-                            self.sender.send_async(PayloadWithChannel::new(self.stream_channel_id, &buffer[..count])).await?;
+                            self.send_data(&PayloadWithChannel::new(self.stream_channel_id, &buffer[..count])).await?;
                         }
                         Err(e) => {
                             // This is an internal error, and there is no way to send error here.
@@ -103,6 +104,23 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
+        let mut offset = 0;
+
+        let payload = data.payload.as_ref();
+        // Divide data into CRYPT_PACKET_SIZE chunks and send them
+        while offset < payload.len() {
+            let end = (offset + CRYPT_PACKET_SIZE).min(payload.len());
+            let chunk = &payload[offset..end];
+            self.sender
+                .send_async(PayloadWithChannel::new(data.channel_id, chunk))
+                .await?;
+            offset = end;
+        }
+
         Ok(())
     }
 }
