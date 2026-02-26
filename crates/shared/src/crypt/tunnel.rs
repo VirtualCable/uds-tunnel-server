@@ -49,7 +49,11 @@ pub fn derive_tunnel_material(
     shared_secret: &SharedSecret,
     ticket: &ticket::Ticket,
 ) -> Result<Material> {
-    // Ticket id is correct LENGTH always, as we use Ticket hard type
+    log::debug!(
+        "Deriving tunnel material with shared_secret: {:?} and ticket: {:?}",
+        shared_secret,
+        ticket
+    );
 
     // HKDF-Extract + Expand with SHA-256
     let hk = Hkdf::<Sha256>::new(Some(ticket.as_ref()), shared_secret.as_ref());

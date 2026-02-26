@@ -29,6 +29,7 @@ where
         // Note: On a future, the broker could return more than a single channel stream id
         // But currently, only one is supported, althout it's prepared to be extended later
         Ok(ticket_info) => {
+            log::debug!("Received ticket info from broker: {:?}", ticket_info);
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             let stop = Trigger::new();
@@ -67,6 +68,7 @@ where
                 log::error!("Invalid ticket from client");
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
+            log::info!("TICKET VALIDATED");
 
             // Use an equivalent session id for future recovery, avoid exposing the internal session id
             let equiv_id = session_manager.create_equiv_session(session.id())?;
@@ -76,6 +78,11 @@ where
             crypt_writer
                 .write(&stop, &mut writer, ticket_channel_id, &response_data)
                 .await?;
+
+            log::debug!(
+                "Sent OpenResponse to client with session_id: {:?}",
+                response
+            );
 
             // Now the recv/send seq should be set to 1 for next crypt managers
             // (we already spent seq 0 for ticket exchange)

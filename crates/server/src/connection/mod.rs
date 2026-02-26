@@ -38,7 +38,10 @@ use tokio::{
 };
 
 use shared::{
-    errors::ErrorWithAddres, log, protocol::consts::HANDSHAKE_TIMEOUT_MS, protocol::handshake,
+    errors::ErrorWithAddres,
+    log,
+    protocol::consts::{HANDSHAKE_TEST_RESPONSE, HANDSHAKE_TIMEOUT_MS},
+    protocol::handshake,
 };
 
 mod connect;
@@ -47,7 +50,7 @@ mod types;
 
 pub async fn handle_connection<R, W>(
     mut reader: R,
-    writer: W,
+    mut writer: W,
     connection_ip: std::net::SocketAddr,
     use_proxy_v2: bool,
 ) -> Result<(), ErrorWithAddres>
@@ -80,7 +83,20 @@ where
 
     match action {
         handshake::HandshakeAction::Test => {
-            // Just close the connection
+            // Write back a simple OK response to confirm the connection is working and then close it
+            log::debug!(
+                "Received test handshake from {}, sending OK response",
+                src_ip
+            );
+            writer
+                .write_all(HANDSHAKE_TEST_RESPONSE)
+                .await
+                .map_err(|e| {
+                    ErrorWithAddres::new(
+                        Some(src_ip),
+                        format!("Failed to send OK response: {:?}", e).as_str(),
+                    )
+                })?;
             Ok(())
         }
         handshake::HandshakeAction::Open { ticket } => {
@@ -97,10 +113,7 @@ where
             recover::recover(reader, writer, &ticket, src_ip)
                 .await
                 .map_err(|e| {
-                    ErrorWithAddres::new(
-                        Some(src_ip),
-                        format!("Recovery failed: {:?}", e).as_str(),
-                    )
+                    ErrorWithAddres::new(Some(src_ip), format!("Recovery failed: {:?}", e).as_str())
                 })
         }
     }

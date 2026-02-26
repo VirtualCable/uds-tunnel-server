@@ -119,6 +119,11 @@ impl BrokerApi for HttpBrokerApi {
         ticket: &Ticket,
         ip: SocketAddr,
     ) -> Result<response::TicketResponse> {
+        log::debug!(
+            "Starting connection with broker for ticket: {}, ip: {}",
+            ticket.as_str(),
+            ip
+        );
         let ticket_request = request::TicketRequest::new_start(
             ticket,
             &ip,
@@ -141,6 +146,7 @@ impl BrokerApi for HttpBrokerApi {
     }
 
     async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
+        log::debug!("Stopping connection with broker for ticket: {}", ticket.as_str());
         // No response body expected
         let ticket_request = request::TicketRequest::new_stop(ticket, &self.auth_token, 0, 0);
         self.client

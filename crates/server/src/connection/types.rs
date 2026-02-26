@@ -2,9 +2,10 @@ use shared::protocol::{consts::TICKET_LENGTH, ticket::Ticket};
 
 const RESERVED_LENGTH: usize = 6;
 
+#[derive(Debug)]
 pub struct OpenResponse {
     pub session_id: Ticket,
-    pub channel_count: u16,           // 1 right now
+    pub channel_count: u16,
     _reserved: [u8; RESERVED_LENGTH], // For future use, 0 right now
 }
 
