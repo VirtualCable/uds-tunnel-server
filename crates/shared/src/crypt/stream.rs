@@ -89,6 +89,7 @@ impl Crypt {
         }
         // Check valid header and get payload length
         let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
+        log::debug!("Received packet with seq: {}, length: {}", seq, length);
         // Read the encrypted payload + tag
         if Self::read_stream(stop, reader, buffer.stream_slice(), length as usize, true).await? == 0
         {
