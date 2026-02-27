@@ -34,7 +34,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{log, system::trigger::Trigger};
 
-use super::{Crypt, build_header, consts::HEADER_LENGTH, parse_header, types::PacketBuffer};
+use super::{Crypt, build_header, consts::HEADER_SIZE, parse_header, types::PacketBuffer};
 
 impl Crypt {
     async fn read_stream<R: AsyncReadExt + Unpin>(
@@ -81,14 +81,14 @@ impl Crypt {
         reader: &mut R,
         buffer: &'a mut PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
-        let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
-        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_LENGTH, false).await? == 0
+        let mut header_buffer: [u8; HEADER_SIZE] = [0; HEADER_SIZE];
+        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_SIZE, false).await? == 0
         {
             // Connection closed
             return Ok((&buffer.as_slice_mut()[..0], 0)); // Empty vector indicates closed connection, ensures has 'a lifetime
         }
         // Check valid header and get payload length
-        let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
+        let (seq, length) = parse_header(&header_buffer[..HEADER_SIZE])?;
         // Read the encrypted payload + tag
         if Self::read_stream(stop, reader, buffer.stream_slice(), length as usize, true).await? == 0
         {
@@ -109,9 +109,10 @@ impl Crypt {
         channel: u16,
         data: &[u8],
     ) -> Result<()> {
-        let mut header_buffer: [u8; HEADER_LENGTH] = [0; HEADER_LENGTH];
+        let mut header_buffer: [u8; HEADER_SIZE] = [0; HEADER_SIZE];
         let length = data.len();
         let mut buff = PacketBuffer::new();
+        // TODO: Use buff to avoid copying data on later write
         buff.store(data)?;
         let encrypted_packet = self.encrypt(channel, length, &mut buff)?;
         build_header(
@@ -125,9 +126,12 @@ impl Crypt {
                 log::debug!("Outbound stream stopped while writing");
                 Ok(())  // Indicate end of processing
             }
-            result = async {
-                writer.write_all(&header_buffer).await?;
-                writer.write_all(encrypted_packet).await?;
+            result = async {    
+                // Compose a single buffer to write header + encrypted data in one go
+                let mut write_buffer = Vec::with_capacity(header_buffer.len() + encrypted_packet.len());
+                write_buffer.extend_from_slice(&header_buffer);
+                write_buffer.extend_from_slice(encrypted_packet);
+                writer.write_all(&write_buffer).await?;
                 Ok(())
             } => {
                 result

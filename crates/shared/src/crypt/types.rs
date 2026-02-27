@@ -31,7 +31,7 @@
 
 use anyhow::Result;
 
-use crate::utils::hex_to_bytes;
+use crate::{crypt::consts::HEADER_SIZE, utils::hex_to_bytes};
 
 use super::consts;
 
@@ -64,16 +64,17 @@ impl From<[u8; 32]> for SharedSecret {
     }
 }
 
+const BUFFER_SIZE: usize = consts::MAX_PACKET_SIZE + 2 + HEADER_SIZE; // 2 bytes for channel id, rest for data and header
 // hard limited size buffer for packets
 #[derive(Debug)]
 pub struct PacketBuffer {
-    buffer: [u8; consts::MAX_PACKET_SIZE],
+    buffer: [u8; BUFFER_SIZE],
 }
 
 impl PacketBuffer {
     pub fn new() -> Self {
         PacketBuffer {
-            buffer: [0u8; consts::MAX_PACKET_SIZE],
+            buffer: [0u8; BUFFER_SIZE],
         }
     }
 
@@ -94,7 +95,7 @@ impl PacketBuffer {
     }
 
     // Returns a mutable slice of the buffer of given length
-    pub fn stream_slice(&mut self) -> &mut [u8; consts::MAX_PACKET_SIZE] {
+    pub fn stream_slice(&mut self) -> &mut [u8; BUFFER_SIZE] {
         &mut self.buffer
     }
 

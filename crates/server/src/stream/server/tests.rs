@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use shared::{
-    crypt::{build_header, consts::HEADER_LENGTH, types::SharedSecret},
+    crypt::{build_header, consts::HEADER_SIZE, types::SharedSecret},
     protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
 };
@@ -155,7 +155,7 @@ async fn test_server_inbound_basic() {
 
     let mut inbound = TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone());
 
-    let mut header = [0u8; HEADER_LENGTH];
+    let mut header = [0u8; HEADER_SIZE];
     build_header(counter, length, &mut header).unwrap();
 
     tokio::spawn(async move {
