@@ -78,11 +78,11 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         Ok(0) => {
                             log::debug!("Client inbound stream reached EOF");
                             // Connection closed, send message
-                            self.sender.try_send(
+                            self.sender.send_async(
                                 Command::CloseChannel {
                                     channel_id: self.stream_channel_id
                                 }.to_message()
-                            )?;
+                            ).await?;
                             break;
                         }
                         Ok(count) => {
@@ -92,12 +92,12 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                         Err(e) => {
                             // This is an internal error, and there is no way to send error here.
                             log::error!("Client inbound read error: {:?}", e);
-                            self.sender.try_send(
+                            self.sender.send_async(
                                 Command::ChannelError {
                                     channel_id: self.stream_channel_id,
                                     message: format!("Client read error: {:?}", e),
                                 }.to_message()
-                            )?;
+                            ).await?;
                             return Err(anyhow::anyhow!("Client inbound read error: {:?}", e));
                         }
                     }
@@ -162,12 +162,12 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                                 Ok(_) => {}
                                 Err(e) => {
                                     log::error!("Client outbound write error: {:?}", e);
-                                    self.err_sender.try_send(
+                                    self.err_sender.send_async(
                                         Command::ChannelError {
                                             channel_id: 0, // No channel id, this is a connection error
                                             message: format!("Client write error: {:?}", e),
                                         }.to_message()
-                                    )?;
+                                    ).await?;
                                     return Err(anyhow::anyhow!("Client outbound write error: {:?}", e));
                                 }
                             }

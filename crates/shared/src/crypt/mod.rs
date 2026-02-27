@@ -179,6 +179,7 @@ pub fn parse_header(buffer: &[u8]) -> Result<(u64, u16)> {
     let seq = u64::from_be_bytes(buffer[0..8].try_into().unwrap());
     let length = u16::from_be_bytes(buffer[8..10].try_into().unwrap());
     if length as usize > consts::MAX_PACKET_SIZE {
+        log::debug!("Invalid packet length: {}, buffer: {:?}", length, buffer);
         return Err(anyhow::anyhow!("invalid packet length: {}", length));
     }
     Ok((seq, length))

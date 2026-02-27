@@ -80,7 +80,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
             }
             // Channels are processed on the proxy side, so just forward data
             self.sender
-                .try_send(PayloadWithChannel::new(stream_channel_id, decrypted_data))?;
+                .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data)).await?;
         }
         Ok(())
     }
@@ -114,7 +114,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
 
     async fn send_packet(&mut self, packet: PayloadWithChannel) -> Result<()> {
         if let Err(e) = self.send_data(&packet).await {
-            log::error!("Error sending data in server outbound stream");
+            log::error!("Error sending data in server outbound stream: {:?}", e);
             // Store in session so it can be resent if the stream is restarted due to a recoverable error
             SessionManager::get_instance().set_unsent_packets(&self.session_id, packet);
             return Err(e);

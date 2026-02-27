@@ -89,7 +89,6 @@ impl Crypt {
         }
         // Check valid header and get payload length
         let (seq, length) = parse_header(&header_buffer[..HEADER_LENGTH])?;
-        log::debug!("Received packet with seq: {}, length: {}", seq, length);
         // Read the encrypted payload + tag
         if Self::read_stream(stop, reader, buffer.stream_slice(), length as usize, true).await? == 0
         {
@@ -120,6 +119,7 @@ impl Crypt {
             encrypted_packet.len() as u16,
             &mut header_buffer,
         )?;
+
         tokio::select! {
             _ = stop.wait_async() => {
                 log::debug!("Outbound stream stopped while writing");
@@ -166,8 +166,6 @@ mod tests {
             .read(&stop, &mut server, &mut buffer)
             .await
             .expect("Failed to read data");
-
-        log::debug!("Decrypted data: {:?}", decrypted_data);
 
         assert_eq!(channel, 1);
         assert_eq!(decrypted_data, plaintext);
