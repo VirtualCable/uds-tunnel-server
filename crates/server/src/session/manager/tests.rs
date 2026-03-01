@@ -125,13 +125,12 @@ async fn test_get_session_manager() {
 
     let manager = SessionManager::get_instance();
     wait_for_session_manager_empty().await.unwrap();
-    // Clear the session manager for testing
-    manager.sessions.write().unwrap().clear();
     let session = manager
         .add_session(new_session_for_test("127.0.0.1:1234"))
         .unwrap();
     assert_eq!(*session.shared_secret().as_ref(), [0u8; 32]);
     // Clean up after test for other tests
+    manager.sessions.write().unwrap().clear();
 }
 
 #[serial_test::serial(manager)]

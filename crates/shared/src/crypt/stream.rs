@@ -34,71 +34,34 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{log, system::trigger::Trigger};
 
-use super::{Crypt, build_header, consts::HEADER_SIZE, parse_header, types::PacketBuffer};
+use super::{Crypt, types::PacketBuffer};
 
 impl Crypt {
-    async fn read_stream<R: AsyncReadExt + Unpin>(
-        stop: &Trigger,
-        reader: &mut R,
-        buffer: &mut [u8],
-        length: usize,
-        disallow_eof: bool,
-    ) -> Result<usize> {
-        let mut read = 0;
-
-        while read < length {
-            let n = tokio::select! {
-                _ = stop.wait_async() => {
-                    log::debug!("Inbound stream stopped while reading");
-                    return Ok(0);  // Indicate end of processing
-                }
-                result = reader.read(&mut buffer[read..length]) => {
-                    match result {
-                        Ok(0) => {
-                            if disallow_eof || read != 0 {
-                                return Err(anyhow::anyhow!("connection closed unexpectedly"));
-                            } else {
-                                return Ok(0);  // Connection closed
-                            }
-                        }
-                        Ok(n) => n,
-                        Err(e) => {
-                            return Err(anyhow::format_err!("read error: {:?}", e));
-                        }
-                    }
-                }
-            };
-            read += n;
-        }
-        Ok(read)
-    }
-
     // Reads data into buffer, decrypting it inplace
     // First 2 bytes are channel, rest is encrypted data + tag
+    // Note: This is not cancel safe, some data may be already read on cancel.
+    //       We only can use it with "stop"
     pub async fn read<'a, R: AsyncReadExt + Unpin>(
         &mut self,
         stop: &Trigger,
         reader: &mut R,
         buffer: &'a mut PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
-        let mut header_buffer: [u8; HEADER_SIZE] = [0; HEADER_SIZE];
-        if Self::read_stream(stop, reader, header_buffer.as_mut(), HEADER_SIZE, false).await? == 0
-        {
-            // Connection closed
-            return Ok((&buffer.as_slice_mut()[..0], 0)); // Empty vector indicates closed connection, ensures has 'a lifetime
+        if tokio::select! {
+            _ = stop.wait_async() => {
+                log::debug!("Inbound stream stopped while reading");
+                return Ok((&buffer.data()[..0], 0));  // Indicate end of stream, no error
+            }
+            result = buffer.read(reader) => {
+                result
+            }
+        }? == 0 { // EOF, fine, return empty data (end of stream, no error)
+            return Ok((&buffer.data()[..0], 0));
         }
-        // Check valid header and get payload length
-        let (seq, length) = parse_header(&header_buffer[..HEADER_SIZE])?;
-        // Read the encrypted payload + tag
-        if Self::read_stream(stop, reader, buffer.stream_slice(), length as usize, true).await? == 0
-        {
-            // Connection closed
-            log::error!("Inbound stream closed while reading payload");
-            return Err(anyhow::anyhow!(
-                "connection closed unexpectedly while reading payload"
-            ));
-        }
-        self.decrypt(seq, length, buffer)
+        self.decrypt(buffer)?;
+        let channel = buffer.channel_id();
+        let data = buffer.data();
+        Ok((data, channel))
     }
 
     // Writes data from buffer, encrypting it inplace
@@ -109,32 +72,18 @@ impl Crypt {
         channel: u16,
         data: &[u8],
     ) -> Result<()> {
-        let mut header_buffer: [u8; HEADER_SIZE] = [0; HEADER_SIZE];
+        let mut buffer = PacketBuffer::from(data);
+
         let length = data.len();
-        let mut buff = PacketBuffer::new();
-        // TODO: Use buff to avoid copying data on later write
-        buff.store(data)?;
-        let encrypted_packet = self.encrypt(channel, length, &mut buff)?;
-        build_header(
-            self.current_seq(),
-            encrypted_packet.len() as u16,
-            &mut header_buffer,
-        )?;
+        self.encrypt(channel, length, &mut buffer)?;
 
         tokio::select! {
             _ = stop.wait_async() => {
                 log::debug!("Outbound stream stopped while writing");
                 Ok(())  // Indicate end of processing
             }
-            result = async {    
-                // Compose a single buffer to write header + encrypted data in one go
-                let mut write_buffer = Vec::with_capacity(header_buffer.len() + encrypted_packet.len());
-                write_buffer.extend_from_slice(&header_buffer);
-                write_buffer.extend_from_slice(encrypted_packet);
-                writer.write_all(&write_buffer).await?;
-                Ok(())
-            } => {
-                result
+            result = buffer.write(writer) => {
+                result.map(|_| ())  // Convert to Result<()>
             }
         }
     }

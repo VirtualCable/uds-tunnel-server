@@ -31,7 +31,7 @@
 use std::sync::Arc;
 
 use shared::{
-    crypt::{build_header, consts::HEADER_SIZE, types::SharedSecret},
+    crypt::types::SharedSecret,
     protocol::{Command, ticket::Ticket},
     system::trigger::Trigger,
 };
@@ -143,24 +143,21 @@ async fn test_server_inbound_basic() {
     // Prepare encrypted message
     let msg = b"16 length text!!";
     let encrypted = {
-        let mut msg_packet = PacketBuffer::from_slice(msg);
-        let encrypted = crypt_in.encrypt(1, msg.len(), &mut msg_packet).unwrap();
-        encrypted.to_vec()
+        let mut msg_packet = PacketBuffer::new();
+        msg_packet.set_data(msg).unwrap();
+        crypt_in.encrypt(1, msg.len(), &mut msg_packet).unwrap();
+        msg_packet
     };
-    let counter = crypt_in.current_seq();
-    let length = encrypted.len() as u16;
 
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
     let mut inbound = TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone());
 
-    let mut header = [0u8; HEADER_SIZE];
-    build_header(counter, length, &mut header).unwrap();
-
     tokio::spawn(async move {
-        client.write_all(&header).await.unwrap();
-        client.write_all(&encrypted).await.unwrap();
+        encrypted.write(&mut client).await.unwrap_or_else(|e| {
+            log::error!("Failed to write encrypted data to client: {:?}", e);
+        });
         // Client will be closed automatically right here
     });
 
