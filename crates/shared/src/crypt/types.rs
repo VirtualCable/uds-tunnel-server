@@ -32,7 +32,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{log, utils::hex_to_bytes};
+use crate::{utils::hex_to_bytes};
 
 use super::consts;
 
@@ -189,7 +189,6 @@ impl PacketBuffer {
 
     pub async fn write<W: AsyncWriteExt + Unpin>(&self, writer: &mut W) -> Result<()> {
         // len = header + channel id + data len (in header)
-        log::debug!("** WRITE ** {:?}", self);
         let total_len = consts::HEADER_SIZE + self.length()?;
         writer
             .write_all(&self.buffer[0..total_len])
@@ -239,7 +238,6 @@ impl PacketBuffer {
         )
         .await?;
         // Note: channel_id + is not decrypted here (handle it elsewhere if needed)
-        log::debug!("** READ ** {:?}", self);
         Ok(consts::HEADER_SIZE + length)
     }
 
