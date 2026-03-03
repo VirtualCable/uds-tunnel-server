@@ -73,8 +73,8 @@ pub fn derive_tunnel_material(
     key_receive.copy_from_slice(&okm[64..96]);
     nonce_payload.copy_from_slice(&okm[96..108]);
 
-    // Note: The key_send is the key used by sender, so we receive with key_receive
-    //       and send with key_send that the client will use to receive our data
+    // Note: The key_send is the key used by sender, so we use this key for decrypting recived data (inbound)
+    // and key_receive is the key used by receiver, so we use this key for encrypting data to send (outbound)
     Ok(Material {
         key_payload: key_payload.into(),
         key_receive: key_send.into(),
