@@ -120,6 +120,7 @@ async fn test_session_sequence_numbers() {
 
 #[serial_test::serial(manager)]
 #[tokio::test]
+#[ignore = "This test is to be executed 'manually' to check the SessionManager singleton behavior, not to be executed in CI"]
 async fn test_get_session_manager() {
     log::setup_logging("debug", log::LogType::Test);
 

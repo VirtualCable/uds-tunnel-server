@@ -190,6 +190,20 @@ impl SessionManager {
         }
     }
 
+    pub fn is_close_notified(&self, id: &SessionId) -> bool {
+        if let Some(session) = self.get_session(id) {
+            session.is_close_notified()
+        } else {
+            true   // If no session, session is close
+        }
+    } 
+
+    pub fn close_notified(&self, id: &SessionId) {
+        if let Some(session) = self.get_session(id) {
+            session.close_notified();
+        }
+    }
+
     pub fn get_server_channels(
         &self,
         id: &SessionId,

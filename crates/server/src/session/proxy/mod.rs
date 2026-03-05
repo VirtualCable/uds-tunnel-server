@@ -140,6 +140,10 @@ impl Proxy {
                             if msg.channel_id == 0 {
                                 // Failures on commands closes the proxy and consecuently, the session
                                 if Self::handle_incoming_command(msg.payload.as_ref(), &parent, &mut clients).await? {
+                                    // Send message, if server is still connected
+                                    if let Some(server) = &our_server_channels {
+                                        let _ = server.tx.send_async(protocol::Command::Close.into()).await;
+                                    }
                                     log::debug!("Control channel requested session close");
                                     break;  // exit loop on command request
                                 }
@@ -154,7 +158,7 @@ impl Proxy {
                                         protocol::Command::ChannelError {
                                             channel_id,
                                             message: format!("Failed to forward message to client: {:?}", e)
-                                        }.to_message()
+                                        }.into()
                                     ).await;
                                 }
                             }
@@ -187,6 +191,7 @@ impl Proxy {
         Ok(())
     }
 
+    // Handle incoming commands on control channel, return true if session should be closed
     async fn handle_incoming_command(
         data: &[u8],
         parent: &SessionId,
@@ -202,7 +207,10 @@ impl Proxy {
                     "Received Close command in session {:?}, closing session",
                     parent
                 );
-                // Just return an error to close the session
+                // Session has received close, so we do not have possible recovery
+                SessionManager::get_instance().close_notified(parent);
+                // Send close back to
+                // Just return true to close session
                 return Ok(true);
             }
             protocol::Command::OpenChannel { channel_id } => {

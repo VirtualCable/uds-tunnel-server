@@ -70,6 +70,8 @@ pub struct Session {
     proxy_task: tokio::task::JoinHandle<()>,
     // Server side status
     server_running: AtomicBool,
+    // If the server side has error on exit
+    close_notified: AtomicBool,
 
     // Session is closed when:
     //   - client (connetecto to ou server side) disconnects correctly
@@ -119,6 +121,7 @@ impl Session {
             session_proxy,
             proxy_task,
             server_running: AtomicBool::new(false),
+            close_notified: AtomicBool::new(false),
             unsent_message: RwLock::new(None),
             tx,
             rx_server,
@@ -146,6 +149,16 @@ impl Session {
         if let Ok(mut unsent_lock) = self.unsent_message.write() {
             *unsent_lock = Some(packet);
         }
+    }
+
+    pub fn is_close_notified(&self) -> bool {
+        self.close_notified
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn close_notified(&self) {
+        self.close_notified
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Note: Even cloned, ther will be only one server side per session, so this is all fine.

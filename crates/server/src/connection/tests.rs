@@ -329,6 +329,18 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     // The session should still be there, as we have not closed server side
     assert_eq!(session_manager.count(), 1);
     // Close the server side
+
+    // Send Close message. Without this, the session would wait to a possible recover
+    let close_msg = Command::Close.to_message();
+    out_crypt
+        .write(
+            &stop,
+            &mut client_stream,
+            0, // Control channel
+            close_msg.payload.as_ref(),
+        )
+        .await?;
+
     client_stream.shutdown().await?;
     wait_for_session_manager_empty().await;
     Ok(())
@@ -403,7 +415,12 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     let ticket = Ticket::new_random();
     let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
     let send_result = out_crypt
-        .write(&stop, &mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .write(
+            &stop,
+            &mut client_stream,
+            TEST_STREAM_CHANNEL_ID,
+            ticket.as_ref(),
+        )
         .await;
 
     // Expect close on response
@@ -472,7 +489,12 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         )
     };
     out_crypt
-        .write(&stop, &mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .write(
+            &stop,
+            &mut client_stream,
+            TEST_STREAM_CHANNEL_ID,
+            ticket.as_ref(),
+        )
         .await?;
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
@@ -511,7 +533,9 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt.write(&stop, &mut client_stream, 1, get_request).await?;
+    out_crypt
+        .write(&stop, &mut client_stream, 1, get_request)
+        .await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 1");
     let response = read_until_close(&mut in_crypt, &mut client_stream, 1, &stop).await?;
@@ -534,7 +558,9 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt.write(&stop, &mut client_stream, 2, get_request).await?;
+    out_crypt
+        .write(&stop, &mut client_stream, 2, get_request)
+        .await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 2");
     let response = read_until_close(&mut in_crypt, &mut client_stream, 2, &stop).await?;
@@ -545,7 +571,19 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     // The session should still be there, as we have not closed server side
     assert_eq!(session_manager.count(), 1);
     // Close the server side
+    // Send Close message. Without this, the session would wait to a possible recover
+    let close_msg = Command::Close.to_message();
+    out_crypt
+        .write(
+            &stop,
+            &mut client_stream,
+            0, // Control channel
+            close_msg.payload.as_ref(),
+        )
+        .await?;
+
     client_stream.shutdown().await?;
+
     wait_for_session_manager_empty().await;
     Ok(())
 }

@@ -28,7 +28,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
-use std::sync::Arc;
+use std::sync::{Arc, atomic::AtomicBool};
 
 use shared::{
     crypt::types::SharedSecret,
@@ -167,8 +167,8 @@ async fn test_server_inbound_basic() {
 
     assert_eq!(data.channel_id, TEST_CHANNEL_ID);
     assert_eq!(data.payload.as_ref(), msg);
-    // Stop is set on TunnelServerStream, so here must be unset
-    assert!(!stop.is_triggered());
+    // Stop is set on finish, to ensure other side also stops
+    assert!(stop.is_triggered());
 }
 
 #[serial_test::serial(manager)]
@@ -189,7 +189,7 @@ async fn test_server_inbound_remote_close_before_header() {
     inbound.run().await.unwrap();
 
     assert!(rx.try_recv().is_err());
-    assert!(!stop.is_triggered());
+    assert!(stop.is_triggered());
 }
 
 #[serial_test::serial(manager)]
@@ -338,7 +338,7 @@ async fn test_server_stream_with_invalid_packet() {
         async move {
             if inbound.run().await.is_err() {
                 errored.store(true, std::sync::atomic::Ordering::SeqCst);
-                inbound.stop.trigger(); // Ensure stop is triggered on error
+                inbound.server_stop.trigger(); // Ensure stop is triggered on error
             }
         }
     });

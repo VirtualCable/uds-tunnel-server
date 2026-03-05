@@ -29,8 +29,6 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use std::sync::{Arc, atomic::AtomicBool};
-
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -47,7 +45,7 @@ use crate::{
 };
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
-    stop: Trigger,
+    server_stop: Trigger,
     sender: PayloadWithChannelSender,
     buffer: PacketBuffer,
     crypt: Crypt,
@@ -58,7 +56,7 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
 impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
     pub fn new(reader: R, crypt: Crypt, sender: PayloadWithChannelSender, stop: Trigger) -> Self {
         TunnelServerInboundStream {
-            stop,
+            server_stop: stop,
             sender,
             crypt,
             buffer: PacketBuffer::new(),
@@ -71,7 +69,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
         loop {
             let (decrypted_data, stream_channel_id) = self
                 .crypt
-                .read(&self.stop, &mut self.reader, &mut self.buffer)
+                .read(&self.server_stop, &mut self.reader, &mut self.buffer)
                 .await?;
             if decrypted_data.is_empty() {
                 log::debug!("Server inbound stream reached EOF");
@@ -80,14 +78,17 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
             }
             // Channels are processed on the proxy side, so just forward data
             self.sender
-                .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data)).await?;
+                .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
+                .await?;
         }
+        // Ensure other side also stops
+        self.server_stop.trigger();
         Ok(())
     }
 }
 
 struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
-    stop: Trigger,
+    server_stop: Trigger,
     receiver: PayloadWithChannelReceiver,
     crypt: Crypt,
     session_id: SessionId,
@@ -104,7 +105,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         session_id: SessionId,
     ) -> Self {
         TunnelServerOutboundStream {
-            stop,
+            server_stop: stop,
             receiver,
             crypt,
             session_id,
@@ -136,7 +137,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
 
         loop {
             tokio::select! {
-                _ = self.stop.wait_async() => {
+                _ = self.server_stop.wait_async() => {
                     break;
                 }
                 result = self.receiver.recv_async() => {
@@ -146,7 +147,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                         }
                         Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
-                            if self.stop.is_triggered() {
+                            if self.server_stop.is_triggered() {
                                 break;
                             }
                             log::error!("Server outbound receiver channel closed: {:?}", e);
@@ -156,12 +157,18 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 }
             }
         }
+        self.server_stop.trigger();
         Ok(())
     }
 
     async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
         self.crypt
-            .write(&self.stop, &mut self.writer, data.channel_id, data.payload.as_ref())
+            .write(
+                &self.server_stop,
+                &mut self.writer,
+                data.channel_id,
+                data.payload.as_ref(),
+            )
             .await
     }
 }
@@ -226,85 +233,95 @@ where
             )
         };
 
-        let local_stop = Trigger::new();
+        let server_stop = Trigger::new();
 
-        let mut inbound =
-            TunnelServerInboundStream::new(reader, inbound_crypt, channels.tx, local_stop.clone());
+        let inbound =
+            TunnelServerInboundStream::new(reader, inbound_crypt, channels.tx, server_stop.clone());
 
-        let mut outbound = TunnelServerOutboundStream::new(
+        let outbound = TunnelServerOutboundStream::new(
             writer,
             outbound_crypt,
             channels.rx,
-            local_stop.clone(),
+            server_stop.clone(),
             session_id,
         );
 
-        let tunnel_error = Arc::new(AtomicBool::new(false));
         tokio::spawn({
-            let tunnel_error = tunnel_error.clone();
+            let server_stop = server_stop.clone();
             async move {
-                if let Err(e) = inbound.run().await {
-                    log::error!("Inbound stream error: {:?}", e);
-                    tunnel_error.store(true, std::sync::atomic::Ordering::Relaxed);
+                if let Err(e) = Self::run_streams(session_id, inbound, outbound, server_stop).await
+                {
+                    log::error!(
+                        "Error running tunnel server stream for session {:?}: {:?}",
+                        session_id,
+                        e
+                    );
                 }
-                // let's ensure the other side is also stopped
-                inbound.stop.trigger();
-            }
-        });
-
-        tokio::spawn({
-            let tunnel_error = tunnel_error.clone();
-            async move {
-                if let Err(e) = outbound.run().await {
-                    log::error!("Outbound stream error: {:?}", e);
-                    tunnel_error.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-                // let's ensure the other side is also stopped
-                outbound.stop.trigger();
             }
         });
 
         tokio::spawn(async move {
             tokio::select! {
                 _ = stop.wait_async() => {
-                    local_stop.trigger();
+                    server_stop.trigger();
                 }
-                _ = local_stop.wait_async() => {}
-            }
-
-            let ended_with_error = tunnel_error.load(std::sync::atomic::Ordering::Relaxed);
-            if ended_with_error {
-                log::debug!(
-                    "Server stream for session {:?} stopping due to error",
-                    session_id
-                );
-                // Notify failing server side
-                session_manager.fail_server(&session_id).await;
-
-                // Wait a bit for recovery grace period
-                tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS))
-                    .await;
-                if let Some(session) = session_manager.get_session(&session_id) {
-                    if session.is_server_running() {
-                        log::debug!(
-                            "Session {:?} is still running after error grace period, not stopping",
-                            session_id
-                        );
-                        return;
-                    }
-                    log::debug!("Stopping session {:?} after error grace period", session_id);
-                    // Notify stopping server side, will stop proxy and remove session
-                    session_manager.stop_server(&session_id).await;
-                }
-            } else {
-                log::debug!(
-                    "Server stream for session {:?} stopping normally",
-                    session_id
-                );
-                // Notify stopping server side
-                session_manager.stop_server(&session_id).await;
+                _ = server_stop.wait_async() => {}
             }
         });
+
+        Ok(())
+    }
+
+    async fn run_streams(
+        session_id: SessionId,
+        mut inbound: TunnelServerInboundStream<R>,
+        mut outbound: TunnelServerOutboundStream<W>,
+        server_stop: Trigger,
+    ) -> Result<()> {
+        let session_manager = SessionManager::get_instance();
+
+        match tokio::try_join!(inbound.run(), outbound.run()) {
+            Ok(_) => {
+                log::debug!(
+                    "Server tunnel streams ended normally for session {:?}",
+                    outbound.session_id
+                );
+            }
+            Err(e) => {
+                // On error, the other side could have not set the stop trigger
+                server_stop.trigger();
+
+                log::error!(
+                    "Error in server tunnel streams for session {:?}: {:?}",
+                    outbound.session_id,
+                    e
+                );
+            }
+        }
+
+        if session_manager.is_close_notified(&session_id) {
+            // Close correctly notified
+            session_manager.stop_server(&session_id).await;
+        } else {
+            // Notify failed to drop server side
+            session_manager.fail_server(&session_id).await;
+
+            // Give a chance to recover before stopping session, as some errors might be transient and recoverable by the client
+            tokio::time::sleep(std::time::Duration::from_secs(SERVER_RECOVERY_GRACE_SECS)).await;
+            if let Some(session) = session_manager.get_session(&session_id) {
+                if session.is_server_running() {
+                    log::debug!(
+                        "Session {:?} is still running after error grace period, not stopping",
+                        session_id
+                    );
+                    return Ok(());
+                }
+                log::debug!("Stopping session {:?} after error grace period", session_id);
+                // Notify stopping server side, will stop proxy and remove session
+                session_manager.stop_server(&session_id).await;
+            }
+        }
+
         Ok(())
     }
 }

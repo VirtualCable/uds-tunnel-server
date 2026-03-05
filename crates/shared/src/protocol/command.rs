@@ -164,11 +164,15 @@ impl Command {
             } => {
                 data.push(CommandType::ChannelError.into());
                 data.extend_from_slice(&channel_id.to_be_bytes());
-                data.extend_from_slice(message.as_bytes()[..MAX_ERROR_MSG_LENGTH.min(message.len())].as_ref());
+                data.extend_from_slice(
+                    message.as_bytes()[..MAX_ERROR_MSG_LENGTH.min(message.len())].as_ref(),
+                );
             }
             Command::ConnectionError { message } => {
                 data.push(CommandType::ConnectionError.into());
-                data.extend_from_slice(message.as_bytes()[..MAX_ERROR_MSG_LENGTH.min(message.len())].as_ref());
+                data.extend_from_slice(
+                    message.as_bytes()[..MAX_ERROR_MSG_LENGTH.min(message.len())].as_ref(),
+                );
             }
             Command::Nop => {
                 data.push(CommandType::Nop.into());
@@ -180,14 +184,11 @@ impl Command {
     pub fn to_message(&self) -> PayloadWithChannel {
         PayloadWithChannel::new(0, self.to_bytes().as_slice()) // channel 0 is reserved for commands
     }
+}
 
-    pub fn is_close_command(&self) -> bool {
-        matches!(
-            self,
-            Command::CloseChannel { .. }
-                | Command::ConnectionError { .. }
-                | Command::ChannelError { .. }
-        )
+impl From<Command> for PayloadWithChannel {
+    fn from(cmd: Command) -> Self {
+        cmd.to_message()
     }
 }
 
