@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handshake_parse_signature_one_bit_flipped() {
+    async fn test_handshake_parse_signature_with_single_bit_error() {
         // Signature with a single bit flipped must also be rejected
         let mut sig = *consts::HANDSHAKE_V2_SIGNATURE;
         sig[3] ^= 0x01;

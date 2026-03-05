@@ -36,7 +36,7 @@ pub const VERSION: &str = "v5.0.0";
 pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
 
 // Timeout constants
-pub const SERVER_RECOVERY_GRACE_SECS: u64 = 2; // Time given to recover server connection
+pub const SERVER_RECOVERY_GRACE_SECS: u64 = 5; // Time given to recover server connection
 
 #[cfg(debug_assertions)]
 pub const CONFIGFILE_PATH: &str = "udstunnel.conf";

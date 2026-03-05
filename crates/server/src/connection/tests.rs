@@ -196,15 +196,15 @@ fn create_out_int_crypts(ticket: &Ticket) -> anyhow::Result<(Crypt, Crypt)> {
     Ok((out_crypt, in_crypt))
 }
 
-async fn wait_for_session_manager_empty() {
+async fn wait_for_session_manager_empty() -> Result<()> {
     let session_manager = SessionManager::get_instance();
     for _ in 0..10 {
         if session_manager.count() == 0 {
-            return;
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("Session manager not empty after waiting");
+    anyhow::bail!("Session manager not empty after waiting");
 }
 
 async fn read_until_close(
@@ -340,9 +340,9 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
             close_msg.payload.as_ref(),
         )
         .await?;
-
+    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     client_stream.shutdown().await?;
-    wait_for_session_manager_empty().await;
+    wait_for_session_manager_empty().await?;
     Ok(())
 }
 
@@ -584,7 +584,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
 
     client_stream.shutdown().await?;
 
-    wait_for_session_manager_empty().await;
+    wait_for_session_manager_empty().await?;
     Ok(())
 }
 

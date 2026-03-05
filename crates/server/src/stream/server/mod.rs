@@ -299,6 +299,12 @@ where
             }
         }
 
+        // Store back seqs on session, so if client recovers, it can continue with correct seq numbers
+        if let Some(session) = session_manager.get_session(&session_id) {
+            session.set_inbound_seq(inbound.crypt.current_seq());
+            session.set_outbound_seq(outbound.crypt.current_seq());
+        }
+
         if session_manager.is_close_notified(&session_id) {
             // Close correctly notified
             session_manager.stop_server(&session_id).await;

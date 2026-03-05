@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, system::trigger::Trigger, protocol::ticket::Ticket};
+use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger};
 
 use crate::{session::SessionManager, stream::server::TunnelServerStream};
 
@@ -19,6 +19,13 @@ where
     R: AsyncReadExt + Send + Unpin + 'static,
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
+    log::debug!(
+        "Attempting to recover session {:?} from client {:?} with IP {:?}",
+        recover_session_id,
+        ip,
+        ip
+    );
+
     let session_manager = SessionManager::get_instance();
     match session_manager.get_equiv_session(recover_session_id) {
         // Note: On a future, the broker could return more than a single channel stream id
@@ -56,8 +63,15 @@ where
                 return Err(anyhow::anyhow!("Invalid recover session id from client"));
             }
             let equiv_id = session_manager.create_equiv_session(session_id)?;
-            let response = OpenResponse::new(equiv_id, 0); // On recover, no new streams are created
+            let (in_seq, out_seq) = session.seqs();
+            let response = OpenResponse::new(equiv_id, 0, in_seq, out_seq); // On recover, no new streams are created
             let response_data = response.as_vec();
+            log::debug!(
+                "Recovering session {:?} for client {:?}, sending OpenResponse {:?}",
+                session_id,
+                ip,
+                equiv_id,
+            );
             // Send the OpenResponse
             crypt_writer
                 .write(&stop, &mut writer, stream_channel_id, &response_data)
@@ -65,7 +79,6 @@ where
 
             // Now the recv/send seq should have been keept from previous session, increment them both by 1
             // because we just received and sent one packet each
-            let (in_seq, out_seq) = session.seqs();
             session.set_inbound_seq(in_seq + 1);
             session.set_outbound_seq(out_seq + 1);
             // Note: both tunnel sides will create a crypt based on these seq numbers

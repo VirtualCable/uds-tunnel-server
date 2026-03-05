@@ -72,7 +72,7 @@ where
 
             // Use an equivalent session id for future recovery, avoid exposing the internal session id
             let equiv_id = session_manager.create_equiv_session(session.id())?;
-            let response = OpenResponse::new(equiv_id, ticket_info.remotes_count() as u16);
+            let response = OpenResponse::new(equiv_id, ticket_info.remotes_count() as u16, 1, 1);
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer

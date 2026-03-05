@@ -35,6 +35,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use shared::log;
 use shared::protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender};
 
 use super::{Session, SessionId};
@@ -46,7 +47,7 @@ pub static SESSION_MANAGER: OnceLock<SessionManager> = OnceLock::new();
 pub struct SessionManager {
     sessions: RwLock<HashMap<SessionId, Arc<Session>>>,
     // For equivalent sessions mapping
-    equivs: RwLock<HashMap<SessionId, (SessionId, Instant)>>,
+    equivs: RwLock<HashMap<SessionId, SessionId>>,
     last_cleanup: RwLock<Instant>,
 }
 
@@ -83,14 +84,8 @@ impl SessionManager {
         };
         // Also, insert an idempotent entry in equivs
         {
-            let mut equivs: std::sync::RwLockWriteGuard<
-                '_,
-                HashMap<
-                    shared::protocol::ticket::Ticket,
-                    (shared::protocol::ticket::Ticket, Instant),
-                >,
-            > = self.equivs.write().unwrap();
-            equivs.insert(session.id, (session.id, Instant::now()));
+            let mut equivs = self.equivs.write().unwrap();
+            equivs.insert(session.id, session.id);
         }
         Ok(session)
     }
@@ -128,18 +123,21 @@ impl SessionManager {
 
     pub async fn stop_server(&self, id: &SessionId) {
         if let Some(session) = self.get_session(id) {
+            log::debug!("Stopping session {:?} server side", id);
             session.stop_server().await;
         }
     }
 
     pub async fn fail_server(&self, id: &SessionId) {
         if let Some(session) = self.get_session(id) {
+            log::debug!("Failing session {:?} server side", id);
             session.fail_server().await;
         }
     }
 
     pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) {
         if let Some(session) = self.get_session(id) {
+            log::debug!("Stopping session {:?} client side", id);
             session.stop_client(stream_channel_id).await;
         }
     }
@@ -151,7 +149,7 @@ impl SessionManager {
         // Ensure lock scope is limited
         let equivs = self.equivs.read().unwrap();
         if let Some(equiv_id) = equivs.get(id) {
-            self.get_session(&equiv_id.0)
+            self.get_session(equiv_id)
         } else {
             None
         }
@@ -167,11 +165,13 @@ impl SessionManager {
         }
         let from = SessionId::new_random();
         let mut equivs = self.equivs.write().unwrap();
-        equivs.insert(from, (*to, Instant::now()));
+        equivs.insert(from, *to);
+        log::debug!("Created equivalent session {:?} from {:?}", from, to);
         Ok(from)
     }
 
     pub fn remove_equiv_session(&self, from: &SessionId) {
+        log::debug!("Removing equivalent session {:?} from manager", from);
         let mut equivs = self.equivs.write().unwrap();
         equivs.remove(from);
     }
@@ -194,9 +194,9 @@ impl SessionManager {
         if let Some(session) = self.get_session(id) {
             session.is_close_notified()
         } else {
-            true   // If no session, session is close
+            true // If no session, session is close
         }
-    } 
+    }
 
     pub fn close_notified(&self, id: &SessionId) {
         if let Some(session) = self.get_session(id) {
@@ -226,10 +226,12 @@ impl SessionManager {
         }
     }
 
-    fn cleanup_equiv_sessions(&self, max_age: std::time::Duration) {
+    fn cleanup_equiv_sessions(&self) {
         let mut equivs = self.equivs.write().unwrap();
-        let now = Instant::now();
-        equivs.retain(|_, (_, timestamp)| now.duration_since(*timestamp) < max_age);
+        // Remove entries that are too old and original session does not exist anymore
+        equivs.retain(|_, orig| {
+            self.get_session(orig).is_some()
+        });
     }
 
     // Lazy cleanup of equiv sessions on each access, to avoid needing a background task
@@ -240,7 +242,7 @@ impl SessionManager {
         if now.duration_since(*last)
             > Duration::from_secs(consts::CLEANUP_EQUIV_SESSIONS_INTERVAL_SECS)
         {
-            self.cleanup_equiv_sessions(Duration::from_secs(consts::EQUIV_SESSION_MAX_AGE_SECS));
+            self.cleanup_equiv_sessions();
             *last = now;
         }
     }
@@ -250,6 +252,13 @@ impl SessionManager {
         let manager = SESSION_MANAGER.get_or_init(SessionManager::new);
         manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
         manager
+    }
+
+    pub fn log_debug_sessions(&self) {
+        let sessions = self.sessions.read().unwrap();
+        let equivs = self.equivs.read().unwrap();
+        log::debug!("Sessions: {:?}", sessions);
+        log::debug!("Equivs: {:?}", equivs);
     }
 }
 

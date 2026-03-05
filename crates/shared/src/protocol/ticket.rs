@@ -34,7 +34,7 @@ use rand::{prelude::*, distr::Alphanumeric};
 
 use super::consts::TICKET_LENGTH;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket([u8; TICKET_LENGTH]);
 
 impl Ticket {
@@ -61,7 +61,14 @@ impl Ticket {
     }
 
     pub fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.0).expect("Ticket is not valid UTF-8")
+        std::str::from_utf8(&self.0).unwrap_or("NOT_REPRESENTABLE_TICKET")
+    }
+}
+
+// Implement Debug for better logging
+impl std::fmt::Debug for Ticket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ticket({})", self.as_str())
     }
 }
 
