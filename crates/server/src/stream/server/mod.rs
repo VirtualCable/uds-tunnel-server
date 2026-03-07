@@ -75,30 +75,39 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
         log::debug!("Starting server inbound stream");
 
         loop {
-            let (decrypted_data, stream_channel_id) = self
-                .crypt
-                .read(&self.server_stop, &mut self.reader, &mut self.buffer)
-                .await?;
-            if decrypted_data.is_empty() {
-                log::debug!("Server inbound stream reached EOF");
-                // Connection closed
-                break;
-            }
-            if stream_channel_id == 0 {
-                // The CLOSE command is processed here, as we need to do it BEFORE the EOF
-                if let Ok(cmd) = protocol::Command::from_slice(decrypted_data)
-                    && cmd == protocol::Command::Close
-                {
-                    log::debug!("Received CLOSE command on server inbound stream");
-                    // Notify session manager that close was notified, so it can skip recovery grace period and close immediately
-                    SessionManager::get_instance().close_notified(&self.session_id);
+            tokio::select! {
+                biased;
+                _ = self.server_stop.wait_async() => {
+                    log::debug!("Server inbound stream stopping");
                     break;
                 }
+            result = self
+                .crypt
+                .read(&self.server_stop, &mut self.reader, &mut self.buffer)
+                => {
+                    let (decrypted_data, stream_channel_id) = result?;
+                    if decrypted_data.is_empty() {
+                        log::debug!("Server inbound stream reached EOF");
+                        // Connection closed
+                        break;
+                    }
+                    if stream_channel_id == 0 {
+                        // The CLOSE command is processed here, as we need to do it BEFORE the EOF
+                        if let Ok(cmd) = protocol::Command::from_slice(decrypted_data)
+                            && cmd == protocol::Command::Close
+                        {
+                            log::debug!("Received CLOSE command on server inbound stream");
+                            // Notify session manager that close was notified, so it can skip recovery grace period and close immediately
+                            SessionManager::get_instance().close_notified(&self.session_id);
+                            break;
+                        }
+                    }
+                    // Channels are processed on the proxy side, so just forward data
+                    self.sender
+                        .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
+                        .await?;
+                        }
             }
-            // Channels are processed on the proxy side, so just forward data
-            self.sender
-                .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
-                .await?;
         }
         // Ensure other side also stops
         self.server_stop.trigger();
@@ -132,37 +141,42 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         }
     }
 
-    async fn send_packet(&mut self, packet: PayloadWithChannel) -> Result<()> {
-        if let Err(e) = self.send_data(&packet).await {
-            log::error!("Error sending data in server outbound stream: {:?}", e);
-            // Store in session so it can be resent if the stream is restarted due to a recoverable error
-            SessionManager::get_instance().set_unsent_packets(&self.session_id, packet);
-            return Err(e);
+    pub async fn recover_buffer(&mut self) -> Result<()> {
+        let recovery_buffer =
+            SessionManager::get_instance().get_recovery_buffer(&self.session_id)?;
+
+        log::debug!(
+            "Resending unsent packet for session {:?} in server outbound stream",
+            self.session_id
+        );
+        // Send all unsent packets
+        while let Some(unsent_packet) = recovery_buffer.get().take_unsent_packet() {
+            // We can block here because we are already in the connection task, and we want to ensure the unsent packet is sent before processing new packets
+            // If we fail to send, we will retry on next connection, so it's not critical to send it on this connection
+            self.send_data(&unsent_packet).await?;
         }
         Ok(())
     }
 
     pub async fn run(&mut self) -> Result<()> {
-        // If there are unset packets, sent them now
-        if let Some(unsent_packet) =
-            SessionManager::get_instance().get_unsent_packets(&self.session_id)
-        {
-            log::debug!(
-                "Resending unsent packet for session {:?} in server outbound stream",
-                self.session_id
-            );
-            self.send_packet(unsent_packet).await?;
-        }
+        self.recover_buffer().await?;
+
+        let recovery_buffer =
+            SessionManager::get_instance().get_recovery_buffer(&self.session_id)?;
 
         loop {
             tokio::select! {
+                biased;  // No random, first stop and then receiver
                 _ = self.server_stop.wait_async() => {
                     break;
                 }
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(channel_data) => {
-                            self.send_packet(channel_data).await?;
+                            // Store on recovery buffer, so if we fail to send, we can retry on next connection
+                            // Returns a reference to the newly added item, so we can send it without cloning
+                            let data = recovery_buffer.get().push(self.crypt.current_seq() + 1, channel_data)?;
+                            self.send_data(data).await?;
                         }
                         Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine

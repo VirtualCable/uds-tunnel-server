@@ -30,8 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use std::{
-    net::SocketAddr,
-    sync::{RwLock, atomic::AtomicBool},
+    cell::UnsafeCell, net::SocketAddr, rc::Rc, sync::{RwLock, atomic::{AtomicBool, AtomicUsize}}
 };
 
 use anyhow::Result;
@@ -40,22 +39,48 @@ use shared::{
     crypt::{self, types::SharedSecret},
     log,
     protocol::{
-        PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender,
-        payload_with_channel_pair, ticket,
+        PayloadWithChannelReceiver, PayloadWithChannelSender, payload_with_channel_pair, ticket,
     },
     system::trigger::Trigger,
 };
 
+mod buffer;
 mod manager;
 mod proxy;
 
 pub use {
+    buffer::{BufferedPacket, RecoveryError, RecoverySendBuffer},
     manager::SessionManager,
     proxy::types::{ClientEndpoints, ServerEndpoints},
 };
 
 // Alias, internal SessionId is a Ticket
 pub type SessionId = ticket::Ticket;
+
+pub static RECOVERY_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(64 * 1024); // Default to 64 KB, can be configured at runtime
+
+#[derive(Debug, Clone)]
+pub struct SessionRecoveryBuffer(Rc<UnsafeCell<RecoverySendBuffer>>);
+
+unsafe impl Send for SessionRecoveryBuffer {}
+unsafe impl Sync for SessionRecoveryBuffer {}
+
+impl SessionRecoveryBuffer {
+    pub fn new(max_bytes: usize) -> Self {
+        Self(Rc::new(UnsafeCell::new(RecoverySendBuffer::new(
+            max_bytes,
+        ))))
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    pub fn get(&self) -> &mut RecoverySendBuffer {
+        unsafe { &mut *self.0.get() }
+    }
+
+    pub fn is_locked(&self) -> bool {
+        Rc::strong_count(&self.0) > 1
+    }
+}
 
 #[derive(Debug)]
 pub struct Session {
@@ -81,7 +106,7 @@ pub struct Session {
 
     // If there is an unsent message on server side
     // (eg: client sent a message but an error ocurrend, and it's alreade consumed from channel)
-    unsent_message: RwLock<Option<PayloadWithChannel>>,
+    recovery_buffer: SessionRecoveryBuffer,
 
     // The channels for server side must be kept in the session, as they can contain unprocessed messages
     tx: PayloadWithChannelSender,
@@ -122,7 +147,7 @@ impl Session {
             proxy_task,
             server_running: AtomicBool::new(false),
             close_notified: AtomicBool::new(false),
-            unsent_message: RwLock::new(None),
+            recovery_buffer: SessionRecoveryBuffer::new(RECOVERY_BUFFER_SIZE.load(std::sync::atomic::Ordering::Relaxed)),
             tx,
             rx_server,
             tx_server,
@@ -137,18 +162,8 @@ impl Session {
         &self.id
     }
 
-    pub fn take_unsent_packet(&self) -> Option<PayloadWithChannel> {
-        if let Ok(mut unsent_lock) = self.unsent_message.write() {
-            unsent_lock.take()
-        } else {
-            None
-        }
-    }
-
-    pub fn set_unsent_packet(&self, packet: PayloadWithChannel) {
-        if let Ok(mut unsent_lock) = self.unsent_message.write() {
-            *unsent_lock = Some(packet);
-        }
+    pub fn recovery_buffer(&self) -> SessionRecoveryBuffer {
+        self.recovery_buffer.clone()
     }
 
     pub fn is_close_notified(&self) -> bool {

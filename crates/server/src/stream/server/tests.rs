@@ -263,10 +263,13 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
     // Must fail with an error
     outbound.run().await.unwrap_err();
 
-    // The session should contain the packet in the pending queue, and should be able to recover it
-    let packet = session.take_unsent_packet().unwrap(); // Must not be None
-    assert_eq!(packet.channel_id, 0);
-    assert_eq!(packet.payload.as_ref(), b"test");
+    // The session should contain the packet in the recovery buffer
+    let ses_rec_buf = session.recovery_buffer();
+    let buffer = ses_rec_buf.get();
+    assert_eq!(buffer.len(), 1);
+    let item = buffer.take_unsent_packet().unwrap();
+    assert_eq!(item.channel_id, 0);
+    assert_eq!(item.payload.as_ref(), b"test");
 
     Ok(())
 }
@@ -284,10 +287,16 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
     let (_tx, rx) = flume::bounded(10);
     let (mut client, server) = tokio::io::duplex(1024);
 
-    session.set_unsent_packet(PayloadWithChannel {
-        channel_id: 0,
-        payload: b"test".into(),
-    });
+    // Insert a packet in the recovery buffer, simulating a previous failed send
+    let ses_rec_buf = session.recovery_buffer();
+    let buffer = ses_rec_buf.get();
+    buffer.push(
+        out_crypt.current_seq(),
+        PayloadWithChannel {
+            channel_id: 0,
+            payload: b"test".into(),
+        },
+    )?;
 
     let mut outbound =
         TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());

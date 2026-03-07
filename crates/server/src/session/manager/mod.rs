@@ -36,7 +36,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use shared::log;
-use shared::protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender};
+use shared::protocol::{PayloadWithChannelReceiver, PayloadWithChannelSender};
+
+use crate::session::SessionRecoveryBuffer;
 
 use super::{Session, SessionId};
 
@@ -176,17 +178,11 @@ impl SessionManager {
         equivs.remove(from);
     }
 
-    pub fn set_unsent_packets(&self, id: &SessionId, packet: PayloadWithChannel) {
+    pub fn get_recovery_buffer(&self, id: &SessionId) -> Result<SessionRecoveryBuffer> {
         if let Some(session) = self.get_session(id) {
-            session.set_unsent_packet(packet);
-        }
-    }
-
-    pub fn get_unsent_packets(&self, id: &SessionId) -> Option<PayloadWithChannel> {
-        if let Some(session) = self.get_session(id) {
-            session.take_unsent_packet()
+            Ok(session.recovery_buffer())
         } else {
-            None
+            Err(anyhow::anyhow!("Session not found for recovery buffer"))
         }
     }
 
@@ -229,9 +225,7 @@ impl SessionManager {
     fn cleanup_equiv_sessions(&self) {
         let mut equivs = self.equivs.write().unwrap();
         // Remove entries that are too old and original session does not exist anymore
-        equivs.retain(|_, orig| {
-            self.get_session(orig).is_some()
-        });
+        equivs.retain(|_, orig| self.get_session(orig).is_some());
     }
 
     // Lazy cleanup of equiv sessions on each access, to avoid needing a background task

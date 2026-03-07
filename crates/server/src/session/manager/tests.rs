@@ -26,11 +26,10 @@
 // CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use super::*;
 
-use shared::{crypt::types::SharedSecret, log, system::trigger::Trigger, protocol::ticket};
+use shared::{crypt::types::SharedSecret, log, protocol::ticket, system::trigger::Trigger};
 
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {

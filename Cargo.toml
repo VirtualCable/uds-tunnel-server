@@ -5,6 +5,7 @@ resolver = "3"
 [workspace.dependencies]
 # Utilities
 anyhow = "1.0"
+thiserror = "2.0"
 zeroize = { version = "1.8", features = ["derive"] }
 chrono = { version = "0.4.42" }
 num_enum = "0.7.5"
@@ -13,12 +14,12 @@ num_enum = "0.7.5"
 rand = "0.10.0"
 
 # SSL/TLS
-rustls = "0.23.36"
+rustls = "0.23.37"
 rustls-native-certs = "0.8.3"
 
 # async & async TLS
 tokio-rustls = "0.26.4"
-tokio = { version = "1.49.0", features = [
+tokio = { version = "1.50.0", features = [
     "net",
     "io-util",
     "rt-multi-thread",
@@ -28,7 +29,7 @@ tokio = { version = "1.49.0", features = [
     "process",
     "signal",
 ] }
-futures = "0.3.31"
+futures = "0.3.32"
 async-trait = "0.1.89"
 tokio-test = "0.4.5"
 
@@ -60,7 +61,7 @@ hkdf = "0.12"
 sha2 = "0.10.9"
 
 # Post-quantum cryptography
-libcrux-ml-kem = "0.0.6"
+libcrux-ml-kem = "0.0.7"
 
 # regex
 regex = "1.12"
@@ -74,5 +75,5 @@ tracing-subscriber = { version = "0.3.22", features = [
 tracing-log = "0.2.0"
 
 # Testing
-serial_test = "3.3"
+serial_test = "3.4.0"
 mockito = "1.7"

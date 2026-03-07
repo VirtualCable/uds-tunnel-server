@@ -8,6 +8,7 @@ shared = { path = "../shared" }
 
 # utilities
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # serialization
 serde = { workspace = true }

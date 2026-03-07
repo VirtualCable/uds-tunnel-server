@@ -32,6 +32,24 @@ where
         // Note: On a future, the broker could return more than a single channel stream id
         // But currently, only one is supported, althout it's prepared to be extended later
         Some(session) => {
+            // Skip packages in the recovery buffer until the requested seq is found, if not found, return error
+            {
+                let ses_rec_buf = session.recovery_buffer();
+                let buffer = ses_rec_buf.get();
+                log::debug!(
+                    "Found session {:?} for recovery, skipping packets until seq {:?} (buf: {:?})",
+                    session.id(),
+                    in_seqs.0,
+                    buffer
+                );
+                buffer.skip(in_seqs.0 - 1)?;
+                log::debug!(
+                    "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
+                    in_seqs.0 - 1,
+                    session.id(),
+                    buffer,
+                );
+            }
             let stop = Trigger::new();
             let session_id = session.id();
             // Check that the first crypted packet is the ticket again

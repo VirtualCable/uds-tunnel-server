@@ -45,6 +45,7 @@ use shared::{log, system::trigger::Trigger};
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     log::setup_logging("debug", log::LogType::Tunnel);
+    // Read config
     // Crate a listener with the configured address
     let (listen_sock_addr, use_proxy_protocol) = {
         let config = config::get();
@@ -54,6 +55,15 @@ async fn main() {
             config.use_proxy_protocol.unwrap_or(false),
         )
     };
+
+    session::RECOVERY_BUFFER_SIZE.store(
+        config::get()
+            .read()
+            .unwrap()
+            .recovery_buffer_size
+            .unwrap_or(64 * 1024 * 1024),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let listener = TcpListener::bind(listen_sock_addr).await.unwrap();
     log::info!("Listening on {}", listen_sock_addr);
 

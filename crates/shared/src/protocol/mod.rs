@@ -1,3 +1,5 @@
+use core::fmt;
+
 // BSD 3-Clause License
 // Copyright (c) 2026, Virtual Cable S.L.
 // All rights reserved.
@@ -65,10 +67,28 @@ impl AsRef<[u8]> for Payload {
     }
 }
 
-#[derive(Debug)]
+impl Payload {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 pub struct PayloadWithChannel {
     pub channel_id: u16,
     pub payload: Payload,
+}
+
+impl fmt::Debug for PayloadWithChannel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PayloadWithChannel")
+            .field("chan", &self.channel_id)
+            .field("len", &self.payload.len())
+            .finish()
+    }
 }
 
 impl PayloadWithChannel {
@@ -89,6 +109,14 @@ impl PayloadWithChannel {
             channel_id,
             payload: payload.into(),
         })
+    }
+
+    pub fn len(&self) -> usize {
+        self.payload.len() + 2 // Include channel_id bytes
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.payload.is_empty()
     }
 }
 
