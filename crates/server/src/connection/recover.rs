@@ -13,6 +13,7 @@ pub(super) async fn recover<R, W>(
     mut reader: R,
     mut writer: W,
     recover_session_id: &Ticket,
+    in_seqs: (u64, u64),
     ip: SocketAddr,
 ) -> Result<()>
 where
@@ -20,9 +21,9 @@ where
     W: AsyncWriteExt + Send + Unpin + 'static,
 {
     log::debug!(
-        "Attempting to recover session {:?} from client {:?} with IP {:?}",
+        "Attempting to recover session {:?}-{:?} from client {:?}",
         recover_session_id,
-        ip,
+        in_seqs,
         ip
     );
 
@@ -70,7 +71,7 @@ where
                 "Recovering session {:?} for client {:?}, sending OpenResponse {:?}",
                 session_id,
                 ip,
-                equiv_id,
+                response
             );
             // Send the OpenResponse
             crypt_writer

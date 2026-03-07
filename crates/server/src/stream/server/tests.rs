@@ -152,7 +152,8 @@ async fn test_server_inbound_basic() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone());
+    let mut inbound =
+        TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone(), SessionId::new_random());
 
     tokio::spawn(async move {
         encrypted.write(&mut client).await.unwrap_or_else(|e| {
@@ -176,13 +177,14 @@ async fn test_server_inbound_basic() {
 async fn test_server_inbound_remote_close_before_header() {
     log::setup_logging("debug", log::LogType::Test);
 
+    let session_id = SessionId::new_random();
     let (client, server) = tokio::io::duplex(1024);
     let (crypt, _) = make_test_crypts();
 
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone());
+    let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), session_id);
 
     drop(client);
 
@@ -201,7 +203,13 @@ async fn test_server_inbound_read_error() {
     let (tx, _rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(FailingStream, crypt, tx, stop.clone());
+    let mut inbound = TunnelServerInboundStream::new(
+        FailingStream,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+    );
 
     let res = inbound.run().await;
     assert!(res.is_err());
@@ -219,7 +227,8 @@ async fn test_server_inbound_stop_before_read() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone());
+    let mut inbound =
+        TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), SessionId::new_random());
 
     stop.trigger();
 
@@ -329,7 +338,13 @@ async fn test_server_stream_with_invalid_packet() {
     let (client_reader, _client_writer) = tokio::io::split(client);
     let (_server_reader, mut server_writer) = tokio::io::split(server);
 
-    let mut inbound = TunnelServerInboundStream::new(client_reader, crypt, tx, stop.clone());
+    let mut inbound = TunnelServerInboundStream::new(
+        client_reader,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+    );
 
     // Run the inbound stream in the background
     let errored = Arc::new(AtomicBool::new(false));

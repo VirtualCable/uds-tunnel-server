@@ -35,7 +35,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use shared::{
     crypt::{Crypt, types::PacketBuffer},
     log,
-    protocol::{PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender},
+    protocol::{self, PayloadWithChannel, PayloadWithChannelReceiver, PayloadWithChannelSender},
     system::trigger::Trigger,
 };
 
@@ -45,6 +45,7 @@ use crate::{
 };
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
+    session_id: SessionId,
     server_stop: Trigger,
     sender: PayloadWithChannelSender,
     buffer: PacketBuffer,
@@ -54,8 +55,15 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
 }
 
 impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
-    pub fn new(reader: R, crypt: Crypt, sender: PayloadWithChannelSender, stop: Trigger) -> Self {
+    pub fn new(
+        reader: R,
+        crypt: Crypt,
+        sender: PayloadWithChannelSender,
+        stop: Trigger,
+        session_id: SessionId,
+    ) -> Self {
         TunnelServerInboundStream {
+            session_id,
             server_stop: stop,
             sender,
             crypt,
@@ -75,6 +83,17 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 log::debug!("Server inbound stream reached EOF");
                 // Connection closed
                 break;
+            }
+            if stream_channel_id == 0 {
+                // The CLOSE command is processed here, as we need to do it BEFORE the EOF
+                if let Ok(cmd) = protocol::Command::from_slice(decrypted_data)
+                    && cmd == protocol::Command::Close
+                {
+                    log::debug!("Received CLOSE command on server inbound stream");
+                    // Notify session manager that close was notified, so it can skip recovery grace period and close immediately
+                    SessionManager::get_instance().close_notified(&self.session_id);
+                    break;
+                }
             }
             // Channels are processed on the proxy side, so just forward data
             self.sender
@@ -235,8 +254,13 @@ where
 
         let server_stop = Trigger::new();
 
-        let inbound =
-            TunnelServerInboundStream::new(reader, inbound_crypt, channels.tx, server_stop.clone());
+        let inbound = TunnelServerInboundStream::new(
+            reader,
+            inbound_crypt,
+            channels.tx,
+            server_stop.clone(),
+            session_id,
+        );
 
         let outbound = TunnelServerOutboundStream::new(
             writer,

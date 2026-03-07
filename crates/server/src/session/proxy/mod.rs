@@ -202,17 +202,8 @@ impl Proxy {
         let cmd = protocol::Command::from_slice(data)?;
         log::debug!("Processing command in proxy: {:?}", cmd);
         match cmd {
-            protocol::Command::Close => {
-                log::info!(
-                    "Received Close command in session {:?}, closing session",
-                    parent
-                );
-                // Session has received close, so we do not have possible recovery
-                SessionManager::get_instance().close_notified(parent);
-                // Send close back to
-                // Just return true to close session
-                return Ok(true);
-            }
+            // Note: Close is processed on server tunnel to avoid
+            // closing before processing the command, that is needed to send 
             protocol::Command::OpenChannel { channel_id } => {
                 let session = {
                     let session_manager = SessionManager::get_instance();

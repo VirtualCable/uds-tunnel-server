@@ -37,7 +37,7 @@ use tokio::io::AsyncReadExt;
 
 use crate::{errors::ErrorWithAddres, log, protocol::ticket::Ticket};
 
-use super::{proxy_v2::ProxyInfo, consts};
+use super::{consts, proxy_v2::ProxyInfo};
 
 // Handshake commands, starting from 0
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromPrimitive, IntoPrimitive)]
@@ -64,7 +64,7 @@ pub enum HandshakeCommand {
 pub enum HandshakeAction {
     Test,
     Open { ticket: Ticket },
-    Recover { ticket: Ticket },
+    Recover { ticket: Ticket, seqs: (u64, u64) },
 }
 
 #[derive(Debug)]
@@ -99,7 +99,8 @@ impl Handshake {
                 src_ip: ip,
                 message: format!("failed to read handshake signature and command: {}", e),
             })?;
-        if &signature_buf[..consts::HANDSHAKE_V2_SIGNATURE.len()] != consts::HANDSHAKE_V2_SIGNATURE {
+        if &signature_buf[..consts::HANDSHAKE_V2_SIGNATURE.len()] != consts::HANDSHAKE_V2_SIGNATURE
+        {
             return Err(ErrorWithAddres::new(ip, "invalid handshake signature"));
         }
         let cmd: HandshakeCommand = signature_buf[consts::HANDSHAKE_V2_SIGNATURE.len()].into();
@@ -120,9 +121,26 @@ impl Handshake {
                     HandshakeCommand::Open => HandshakeAction::Open {
                         ticket: ticket_buf.into(),
                     },
-                    HandshakeCommand::Recover => HandshakeAction::Recover {
-                        ticket: ticket_buf.into(),
-                    },
+                    HandshakeCommand::Recover => {
+                        // For recover, we also need to read the sequence numbers (2 u64)
+                        let mut seq_buf = [0u8; 16];
+                        reader.read_exact(&mut seq_buf).await.map_err(|e| {
+                            ErrorWithAddres::new(
+                                ip,
+                                format!("failed to read handshake recover sequence numbers: {}", e)
+                                    .as_str(),
+                            )
+                        })?;
+                        let in_seq = u64::from_be_bytes(seq_buf[..8].try_into().unwrap());
+                        let out_seq = u64::from_be_bytes(seq_buf[8..].try_into().unwrap());
+                        let seqs = (in_seq, out_seq);
+                        log::debug!("Received recover sequence numbers: {:?}", seqs);
+
+                        HandshakeAction::Recover {
+                            ticket: ticket_buf.into(),
+                            seqs, // Placeholder, update with actual sequence numbers if available
+                        }
+                    }
                     _ => unreachable!(),
                 };
                 Ok(Handshake { src_ip: ip, action })
@@ -175,12 +193,18 @@ mod tests {
         data.push(HandshakeCommand::Recover.into());
         let ticket = [0x43u8; consts::TICKET_LENGTH];
         data.extend_from_slice(&ticket);
+        let in_seq = 12345u64;
+        let out_seq = 67890u64;
+        data.extend_from_slice(&in_seq.to_be_bytes());
+        data.extend_from_slice(&out_seq.to_be_bytes());
         let mut reader = tokio::io::BufReader::new(&data[..]);
         let handshake = Handshake::parse(&mut reader, false).await.unwrap();
         assert!(handshake.src_ip.is_none());
+        let expected_seqs = (in_seq, out_seq);
         match handshake.action {
-            HandshakeAction::Recover { ticket: t } => {
+            HandshakeAction::Recover { ticket: t, seqs } => {
                 assert_eq!(t, ticket.into());
+                assert_eq!(seqs, expected_seqs);
             }
             _ => panic!("expected Recover action"),
         }
@@ -195,7 +219,10 @@ mod tests {
         let result = Handshake::parse(&mut reader, false).await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().message.contains("invalid handshake signature"),
+            result
+                .unwrap_err()
+                .message
+                .contains("invalid handshake signature"),
             "expected 'invalid handshake signature' error"
         );
     }
@@ -212,7 +239,10 @@ mod tests {
         let result = Handshake::parse(&mut reader, false).await;
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().message.contains("invalid handshake signature"),
+            result
+                .unwrap_err()
+                .message
+                .contains("invalid handshake signature"),
             "expected 'invalid handshake signature' error"
         );
     }

@@ -340,7 +340,7 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
             close_msg.payload.as_ref(),
         )
         .await?;
-    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    // tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     client_stream.shutdown().await?;
     wait_for_session_manager_empty().await?;
     Ok(())
