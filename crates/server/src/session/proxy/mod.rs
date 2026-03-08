@@ -89,16 +89,17 @@ impl Proxy {
             // Because we can disconnect before unataching the server.
             // The clients (the parts that connect to the remote server)
             // Have a common channel, that persists until end of proxy
-            let server_recv = if let Some(chs) = &mut our_server_channels
+            let (server_recv, allow_recv_from_clients) = if let Some(chs) = &mut our_server_channels
                 && !chs.rx.is_disconnected()
                 && !chs.tx.is_disconnected()
             {
-                Either::Left(chs.rx.recv_async())
+                (Either::Left(chs.rx.recv_async()), true)
             } else {
-                Either::Right(pending())
+                (Either::Right(pending()), false)
             };
 
             tokio::select! {
+                biased;  // No random, first stop, control, server and then clients
                 _ = stop.wait_async() => {
                     log::debug!("Session proxy stopping due to stop signal");
                     break;
@@ -169,12 +170,19 @@ impl Proxy {
                         }
                     }
                 }
-                msg = clients.recv() => {
+                // We can only receive from clients if we have a server connected, otherwise we will loose it
+                msg = clients.recv(), if allow_recv_from_clients => {
                     match msg {
                         Ok(msg) => {
-                            if let Some(server) = &our_server_channels && let Err(e) = server.tx.send_async(msg).await {
-                                log::warn!("Failed to forward message to server: {:?}", e);
-                                break;  // exit loop on error
+                            if let Some(server) = &our_server_channels {
+                                if let Err(e) = server.tx.send_async(msg).await {
+                                    log::warn!("Failed to forward message to server: {:?}", e);
+                                    break;  // exit loop on error
+                                }
+                            } else {
+                                log::error!("No server connected to session proxy, cannot forward message from client");
+                                break;
+                                // No server connected, we cannot loose it!!
                             }
                         }
                         Err(e) => {
@@ -203,7 +211,7 @@ impl Proxy {
         log::debug!("Processing command in proxy: {:?}", cmd);
         match cmd {
             // Note: Close is processed on server tunnel to avoid
-            // closing before processing the command, that is needed to send 
+            // closing before processing the command, that is needed to send
             protocol::Command::OpenChannel { channel_id } => {
                 let session = {
                     let session_manager = SessionManager::get_instance();

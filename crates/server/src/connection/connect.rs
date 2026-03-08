@@ -47,7 +47,7 @@ where
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let ticket_confirm = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                crypt_reader.read(&stop, &mut reader, &mut buffer),
+                crypt_reader.read(&mut reader, &mut buffer),
             )
             .await
             .map_err(|e| anyhow::anyhow!("Timeout waiting for ticket from client: {}", e))?;
@@ -76,7 +76,7 @@ where
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer
-                .write(&stop, &mut writer, ticket_channel_id, &response_data)
+                .write(&mut writer, ticket_channel_id, &response_data)
                 .await?;
 
             log::debug!(

@@ -105,14 +105,13 @@ async fn read_until_close(
     in_crypt: &mut Crypt,
     mut client_stream: &mut (impl tokio::io::AsyncRead + Unpin),
     channel_id: u16,
-    stop: &Trigger,
 ) -> anyhow::Result<String> {
     let mut received = Vec::new();
     let mut buffer = PacketBuffer::new();
     loop {
         // Read response (also encrypted)
         log::debug!("Waiting for GET response from server");
-        let (data, channel) = in_crypt.read(stop, &mut client_stream, &mut buffer).await?;
+        let (data, channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
         if channel == channel_id {
             log::debug!("Received data on channel {}", channel_id);
             received.extend_from_slice(data);
@@ -324,7 +323,7 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
 
     // Decripted packet should be the same
     let mut buffer = PacketBuffer::new();
-    let (data, channel) = in_crypt.read(&stop, &mut client, &mut buffer).await?;
+    let (data, channel) = in_crypt.read(&mut client, &mut buffer).await?;
     stop.trigger();
     assert_eq!(channel, 0);
     assert_eq!(data, b"test");
@@ -401,7 +400,7 @@ async fn test_tunnel_inbound() -> Result<()> {
 
     // Add session to manager
     let session = SessionManager::get_instance().add_session(session).unwrap();
-    let stop = session.stop_trigger();
+    let stop = session.stopper();
     let (mut out_crypt, mut in_crypt) = session.server_tunnel_crypts().unwrap();
 
     let (mut client_side, tunnel_side) = tokio::io::duplex(1024);
@@ -415,7 +414,6 @@ async fn test_tunnel_inbound() -> Result<()> {
     });
     out_crypt
         .write(
-            &stop,
             &mut client_side,
             0, // Control channel
             Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
@@ -424,14 +422,13 @@ async fn test_tunnel_inbound() -> Result<()> {
 
     out_crypt
         .write(
-            &stop,
             &mut client_side,
             TEST_CHANNEL_ID,
             b"GET /echo HTTP/1.0\r\nConnection: Close\r\nHost: echo.free.beeceptor.com\r\n\r\n",
         )
         .await?;
 
-    let data = read_until_close(&mut in_crypt, &mut client_side, 1, &stop).await?;
+    let data = read_until_close(&mut in_crypt, &mut client_side, 1).await?;
     log::debug!("Received response: {:?}", data);
     assert!(data.contains("HTTP/1.0 200 OK"));
 

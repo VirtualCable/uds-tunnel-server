@@ -29,8 +29,6 @@ where
 
     let session_manager = SessionManager::get_instance();
     match session_manager.get_equiv_session(recover_session_id) {
-        // Note: On a future, the broker could return more than a single channel stream id
-        // But currently, only one is supported, althout it's prepared to be extended later
         Some(session) => {
             // Skip packages in the recovery buffer until the requested seq is found, if not found, return error
             {
@@ -58,7 +56,7 @@ where
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let rec_sessid_confirm = tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                crypt_reader.read(&stop, &mut reader, &mut buffer),
+                crypt_reader.read(&mut reader, &mut buffer),
             )
             .await
             .map_err(|e| {
@@ -93,7 +91,7 @@ where
             );
             // Send the OpenResponse
             crypt_writer
-                .write(&stop, &mut writer, stream_channel_id, &response_data)
+                .write(&mut writer, stream_channel_id, &response_data)
                 .await?;
 
             // Now the recv/send seq should have been keept from previous session, increment them both by 1
@@ -102,7 +100,7 @@ where
             session.set_outbound_seq(out_seq + 1);
             // Note: both tunnel sides will create a crypt based on these seq numbers
 
-            // Client stream shoul already be there, just create the server stream
+            // Client stream should already be there, just create the server stream
             let server_stream = TunnelServerStream::new(*session_id, reader, writer);
 
             tokio::spawn(async move {

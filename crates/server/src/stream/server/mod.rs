@@ -83,7 +83,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                 }
             result = self
                 .crypt
-                .read(&self.server_stop, &mut self.reader, &mut self.buffer)
+                .read(&mut self.reader, &mut self.buffer)
                 => {
                     let (decrypted_data, stream_channel_id) = result?;
                     if decrypted_data.is_empty() {
@@ -189,13 +189,6 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                             // Store on recovery buffer, so if we fail to send, we can retry on next connection
                             // Returns a reference to the newly added item, so we can send it without cloning
                             let data = recovery_buffer.get().push(self.crypt.current_seq() + 1, channel_data)?;
-                            log::debug!(
-                                "Sending packet seq {}, len {}: {:?}..{:?}",
-                                self.crypt.current_seq() + 1,
-                                data.len(),
-                                data.payload.as_ref()[..std::cmp::min(8, data.payload.len())].to_vec(),
-                                data.payload.as_ref()[data.payload.len().saturating_sub(8)..].to_vec(),
-                            );
                             self.send_data(data).await?;
                         }
                         Err(e) => {
@@ -217,7 +210,6 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
     async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
         self.crypt
             .write(
-                &self.server_stop,
                 &mut self.writer,
                 data.channel_id,
                 data.payload.as_ref(),
@@ -279,7 +271,7 @@ where
         let (stop, channels, inbound_crypt, outbound_crypt) = {
             let (inbound_crypt, outbound_crypt) = session.server_tunnel_crypts()?;
             (
-                session.stop_trigger(),
+                session.stopper(),
                 session.start_server().await?,
                 inbound_crypt,
                 outbound_crypt,

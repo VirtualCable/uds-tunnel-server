@@ -41,39 +41,41 @@ pub mod ticket;
 pub use command::Command;
 
 #[derive(Debug, Clone)]
-pub struct Payload(pub Vec<u8>);
+pub struct Payload {
+    pub data: Vec<u8>,
+}
 
 impl From<Vec<u8>> for Payload {
     fn from(value: Vec<u8>) -> Self {
-        Payload(value)
+        Payload {data: value}
     }
 }
 
 impl<const N: usize> From<&[u8; N]> for Payload {
     fn from(value: &[u8; N]) -> Self {
-        Payload(value.to_vec())
+        Payload {data: value.to_vec()}
     }
 }
 
 impl From<&[u8]> for Payload {
     fn from(value: &[u8]) -> Self {
-        Payload(value.to_vec())
+        Payload {data: value.to_vec()}
     }
 }
 
 impl AsRef<[u8]> for Payload {
     fn as_ref(&self) -> &[u8] {
-        &self.0
+        &self.data
     }
 }
 
 impl Payload {
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.data.is_empty()
     }
 }
 

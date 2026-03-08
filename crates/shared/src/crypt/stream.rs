@@ -32,7 +32,7 @@
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::{log, system::trigger::Trigger};
+use crate::log;
 
 use super::{Crypt, types::PacketBuffer};
 
@@ -43,19 +43,11 @@ impl Crypt {
     //       We only can use it with "stop"
     pub async fn read<'a, R: AsyncReadExt + Unpin>(
         &mut self,
-        stop: &Trigger,
         reader: &mut R,
         buffer: &'a mut PacketBuffer,
     ) -> Result<(&'a [u8], u16)> {
-        if tokio::select! {
-            _ = stop.wait_async() => {
-                log::debug!("Inbound stream stopped while reading");
-                return Ok((&buffer.data()[..0], 0));  // Indicate end of stream, no error
-            }
-            result = buffer.read(reader) => {
-                result
-            }
-        }? == 0 { // EOF, fine, return empty data (end of stream, no error)
+        if buffer.read(reader).await? == 0 {
+            // EOF, fine, return empty data (end of stream, no error)
             log::debug!("EOF on crypted stream");
             return Ok((&buffer.data()[..0], 0));
         }
@@ -68,7 +60,6 @@ impl Crypt {
     // Writes data from buffer, encrypting it inplace
     pub async fn write<W: AsyncWriteExt + Unpin>(
         &mut self,
-        stop: &Trigger,
         writer: &mut W,
         channel: u16,
         data: &[u8],
@@ -78,16 +69,7 @@ impl Crypt {
         let length = data.len();
         self.encrypt(channel, length, &mut buffer)?;
 
-        let result = tokio::select! {
-            _ = stop.wait_async() => {
-                log::debug!("Outbound stream stopped while writing");
-                Ok(())  // Indicate end of processing
-            }
-            result = buffer.write(writer) => {
-                result.map(|_| ())  // Convert to Result<()>
-            }
-        };
-        result
+        buffer.write(writer).await.map(|_| ()) // Convert to Result<()>
     }
 }
 
@@ -101,8 +83,6 @@ mod tests {
     async fn test_read_write_roundtrip() {
         log::setup_logging("debug", log::LogType::Test);
 
-        let stop = Trigger::new();
-
         let key = SharedSecret::new([7u8; 32]);
         let mut crypt = Crypt::new(&key, 0);
         // Create a pair of in-memory streams
@@ -112,13 +92,13 @@ mod tests {
 
         // Write data from client to server
         crypt
-            .write(&stop, &mut client, 1, plaintext)
+            .write(&mut client, 1, plaintext)
             .await
             .expect("Failed to write data");
 
         // Read data from server to client
         let (decrypted_data, channel) = crypt
-            .read(&stop, &mut server, &mut buffer)
+            .read(&mut server, &mut buffer)
             .await
             .expect("Failed to read data");
 

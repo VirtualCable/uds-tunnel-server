@@ -368,7 +368,7 @@ async fn test_tunnel_outbound() -> Result<()> {
     };
 
     // Use same stop for session and tunnel client stream iin this case
-    let stop = session.stop_trigger();
+    let stop = session.stopper();
 
     let tss = TunnelClientStream::new(
         *session.id(),

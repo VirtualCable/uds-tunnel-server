@@ -235,7 +235,7 @@ impl Session {
         &self.shared_secret
     }
 
-    pub fn stop_trigger(&self) -> Trigger {
+    pub fn stopper(&self) -> Trigger {
         self.stop.clone()
     }
 

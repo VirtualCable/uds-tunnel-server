@@ -14,7 +14,7 @@ pub struct ServerConfig {
     pub ticket_api_url: String, // URL of the broker API, e.g., https://broker.example.com/uds/rest/ticket
     pub verify_ssl: Option<bool>, // Whether to verify SSL certificates on broker API: default: true
     pub broker_auth_token: String, // Auth token for the broker API
-    pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in bytes, default: 64Kb
+    pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in Kb, default: 64 (kb)
 }
 
 impl ServerConfig {

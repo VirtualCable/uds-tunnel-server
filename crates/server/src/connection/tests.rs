@@ -211,14 +211,13 @@ async fn read_until_close(
     in_crypt: &mut Crypt,
     mut client_stream: &mut DuplexStream,
     channel_id: u16,
-    stop: &Trigger,
 ) -> anyhow::Result<String> {
     let mut received = Vec::new();
     let mut buffer = PacketBuffer::new();
     loop {
         // Read response (also encrypted)
         log::debug!("Waiting for GET response from server");
-        let (data, channel) = in_crypt.read(stop, &mut client_stream, &mut buffer).await?;
+        let (data, channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
         if channel == channel_id {
             log::debug!("Received data on channel {}", channel_id);
             received.extend_from_slice(data);
@@ -255,7 +254,6 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
 
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             TEST_STREAM_CHANNEL_ID,
             ticket.as_ref(),
@@ -265,7 +263,7 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
     let (session_response_data, stream_channel_id) = in_crypt
-        .read(&stop, &mut client_stream, &mut buffer)
+        .read(&mut client_stream, &mut buffer)
         .await?;
 
     log::debug!(
@@ -292,7 +290,6 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     // Now, open the remote channel (1)
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             0, // Control channel
             Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
@@ -307,7 +304,6 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let get_request = get_request.as_bytes();
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             TEST_STREAM_CHANNEL_ID,
             get_request,
@@ -318,7 +314,6 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
         &mut in_crypt,
         &mut client_stream,
         TEST_STREAM_CHANNEL_ID,
-        &stop,
     )
     .await?;
 
@@ -334,7 +329,6 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let close_msg = Command::Close.to_message();
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             0, // Control channel
             close_msg.payload.as_ref(),
@@ -416,7 +410,6 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
     let send_result = out_crypt
         .write(
-            &stop,
             &mut client_stream,
             TEST_STREAM_CHANNEL_ID,
             ticket.as_ref(),
@@ -490,7 +483,6 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     };
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             TEST_STREAM_CHANNEL_ID,
             ticket.as_ref(),
@@ -500,7 +492,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
     let (session_response_data, channel) = in_crypt
-        .read(&stop, &mut client_stream, &mut buffer)
+        .read(&mut client_stream, &mut buffer)
         .await?;
     assert_eq!(
         channel, TEST_STREAM_CHANNEL_ID,
@@ -520,7 +512,6 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     // Now, open the remote channel (1)
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             0, // Control channel
             Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
@@ -534,18 +525,17 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     );
     let get_request = get_request.as_bytes();
     out_crypt
-        .write(&stop, &mut client_stream, 1, get_request)
+        .write(&mut client_stream, 1, get_request)
         .await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 1");
-    let response = read_until_close(&mut in_crypt, &mut client_stream, 1, &stop).await?;
+    let response = read_until_close(&mut in_crypt, &mut client_stream, 1).await?;
     log::info!("Received response: {}", response);
     assert!(response.contains("HTTP/1.1 200 OK"));
 
     // And open channel 2
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             0, // Control channel
             Command::OpenChannel { channel_id: 2 }.to_bytes().as_slice(),
@@ -559,11 +549,11 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     );
     let get_request = get_request.as_bytes();
     out_crypt
-        .write(&stop, &mut client_stream, 2, get_request)
+        .write(&mut client_stream, 2, get_request)
         .await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 2");
-    let response = read_until_close(&mut in_crypt, &mut client_stream, 2, &stop).await?;
+    let response = read_until_close(&mut in_crypt, &mut client_stream, 2).await?;
     log::info!("Received response on channel 2: {}", response);
     assert!(response.contains("HTTP/1.1 200 OK"));
 
@@ -575,7 +565,6 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let close_msg = Command::Close.to_message();
     out_crypt
         .write(
-            &stop,
             &mut client_stream,
             0, // Control channel
             close_msg.payload.as_ref(),

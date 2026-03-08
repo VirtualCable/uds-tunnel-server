@@ -110,7 +110,8 @@ impl ClientChannels {
             }
         });
 
-        self.clients_senders[(stream_channel_id - 1) as usize] = Some(ClientChannel { sender, stop });
+        self.clients_senders[(stream_channel_id - 1) as usize] =
+            Some(ClientChannel { sender, stop });
         Ok(())
     }
 
@@ -144,8 +145,10 @@ impl ClientChannels {
     }
 
     pub async fn recv(&mut self) -> Result<protocol::PayloadWithChannel> {
-        let msg = self.receiver.recv_async().await?;
-        Ok(msg)
+        self.receiver
+            .recv_async()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to receive from client channels: {}", e))
     }
 
     /// Closes the client for the given stream_channel_id
