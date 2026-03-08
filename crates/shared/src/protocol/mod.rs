@@ -40,7 +40,7 @@ pub mod ticket;
 
 pub use command::Command;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Payload(pub Vec<u8>);
 
 impl From<Vec<u8>> for Payload {
@@ -77,6 +77,7 @@ impl Payload {
     }
 }
 
+#[derive(Clone)]
 pub struct PayloadWithChannel {
     pub channel_id: u16,
     pub payload: Payload,

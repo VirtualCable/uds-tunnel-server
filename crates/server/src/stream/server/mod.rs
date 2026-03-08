@@ -150,11 +150,24 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
             self.session_id
         );
         // Send all unsent packets
-        while let Some(unsent_packet) = recovery_buffer.get().take_unsent_packet() {
+        while let Some((unsent_packet, old_seq)) = recovery_buffer.get().take_unsent_packet() {
             // We can block here because we are already in the connection task, and we want to ensure the unsent packet is sent before processing new packets
             // If we fail to send, we will retry on next connection, so it's not critical to send it on this connection
+            log::debug!(
+                "Resend old seq {} len {}: {:?}..{:?}",
+                old_seq,
+                unsent_packet.len(),
+                unsent_packet.payload.as_ref()[..std::cmp::min(8, unsent_packet.payload.len())]
+                    .to_vec(),
+                unsent_packet.payload.as_ref()[unsent_packet.payload.len().saturating_sub(8)..]
+                    .to_vec(),
+            );
             self.send_data(&unsent_packet).await?;
         }
+        log::debug!(
+            "Finished resending unsent packets for session {:?} in server outbound stream",
+            self.session_id
+        );
         Ok(())
     }
 
@@ -176,6 +189,13 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                             // Store on recovery buffer, so if we fail to send, we can retry on next connection
                             // Returns a reference to the newly added item, so we can send it without cloning
                             let data = recovery_buffer.get().push(self.crypt.current_seq() + 1, channel_data)?;
+                            log::debug!(
+                                "Sending packet seq {}, len {}: {:?}..{:?}",
+                                self.crypt.current_seq() + 1,
+                                data.len(),
+                                data.payload.as_ref()[..std::cmp::min(8, data.payload.len())].to_vec(),
+                                data.payload.as_ref()[data.payload.len().saturating_sub(8)..].to_vec(),
+                            );
                             self.send_data(data).await?;
                         }
                         Err(e) => {
@@ -321,7 +341,7 @@ where
         match tokio::try_join!(inbound.run(), outbound.run()) {
             Ok(_) => {
                 log::debug!(
-                    "Server tunnel streams ended normally for session {:?}",
+                    "Server tunnel streams without errors on session {:?}",
                     outbound.session_id
                 );
             }
@@ -336,11 +356,19 @@ where
                 );
             }
         }
+        let (inbound_seq, outbound_seq) =
+            (inbound.crypt.current_seq(), outbound.crypt.current_seq());
+        log::debug!(
+            "Server tunnel streams ended for session {:?}, inbound_seq: {}, outbound_seq: {}",
+            session_id,
+            inbound_seq,
+            outbound_seq
+        );
 
         // Store back seqs on session, so if client recovers, it can continue with correct seq numbers
         if let Some(session) = session_manager.get_session(&session_id) {
-            session.set_inbound_seq(inbound.crypt.current_seq());
-            session.set_outbound_seq(outbound.crypt.current_seq());
+            session.set_inbound_seq(inbound_seq);
+            session.set_outbound_seq(outbound_seq);
         }
 
         if session_manager.is_close_notified(&session_id) {

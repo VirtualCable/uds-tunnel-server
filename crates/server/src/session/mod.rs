@@ -30,7 +30,13 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use std::{
-    cell::UnsafeCell, net::SocketAddr, rc::Rc, sync::{RwLock, atomic::{AtomicBool, AtomicUsize}}
+    cell::UnsafeCell,
+    net::SocketAddr,
+    rc::Rc,
+    sync::{
+        RwLock,
+        atomic::{AtomicBool, AtomicUsize},
+    },
 };
 
 use anyhow::Result;
@@ -67,18 +73,12 @@ unsafe impl Sync for SessionRecoveryBuffer {}
 
 impl SessionRecoveryBuffer {
     pub fn new(max_bytes: usize) -> Self {
-        Self(Rc::new(UnsafeCell::new(RecoverySendBuffer::new(
-            max_bytes,
-        ))))
+        Self(Rc::new(UnsafeCell::new(RecoverySendBuffer::new(max_bytes))))
     }
 
     #[allow(clippy::mut_from_ref)]
     pub fn get(&self) -> &mut RecoverySendBuffer {
         unsafe { &mut *self.0.get() }
-    }
-
-    pub fn is_locked(&self) -> bool {
-        Rc::strong_count(&self.0) > 1
     }
 }
 
@@ -147,7 +147,9 @@ impl Session {
             proxy_task,
             server_running: AtomicBool::new(false),
             close_notified: AtomicBool::new(false),
-            recovery_buffer: SessionRecoveryBuffer::new(RECOVERY_BUFFER_SIZE.load(std::sync::atomic::Ordering::Relaxed)),
+            recovery_buffer: SessionRecoveryBuffer::new(
+                RECOVERY_BUFFER_SIZE.load(std::sync::atomic::Ordering::Relaxed),
+            ),
             tx,
             rx_server,
             tx_server,

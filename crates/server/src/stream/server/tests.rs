@@ -267,7 +267,7 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
     let ses_rec_buf = session.recovery_buffer();
     let buffer = ses_rec_buf.get();
     assert_eq!(buffer.len(), 1);
-    let item = buffer.take_unsent_packet().unwrap();
+    let (item, _old_seq) = buffer.take_unsent_packet().unwrap();
     assert_eq!(item.channel_id, 0);
     assert_eq!(item.payload.as_ref(), b"test");
 

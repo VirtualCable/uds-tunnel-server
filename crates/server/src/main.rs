@@ -61,7 +61,7 @@ async fn main() {
             .read()
             .unwrap()
             .recovery_buffer_size
-            .unwrap_or(64 * 1024 * 1024),
+            .unwrap_or(64 * 1024),
         std::sync::atomic::Ordering::Relaxed,
     );
     let listener = TcpListener::bind(listen_sock_addr).await.unwrap();

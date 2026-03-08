@@ -33,7 +33,7 @@ use anyhow::Result;
 
 use std::collections::VecDeque;
 
-use shared::protocol::PayloadWithChannel;
+use shared::{log, protocol::PayloadWithChannel};
 
 pub struct RecoverySendBuffer {
     items: VecDeque<BufferedPacket>,
@@ -99,16 +99,17 @@ impl RecoverySendBuffer {
         while let Some(item) = self.items.pop_front() {
             self.current_bytes -= item.data.len();
             if item.seq == seq {
+                log::debug!("Found requested sequence {}, len {:?}", seq, item.data.len());
                 return Ok(()); // Found the requested sequence, stop skipping
             }
         }
         Err(RecoveryError::NotFound { requested: seq })
     }
 
-    pub fn take_unsent_packet(&mut self) -> Option<PayloadWithChannel> {
+    pub fn take_unsent_packet(&mut self) -> Option<(PayloadWithChannel, u64)> {
         self.items.pop_front().map(|item| {
             self.current_bytes -= item.data.len();
-            item.data
+            (item.data, item.seq)
         })
     }
 
@@ -181,10 +182,12 @@ mod tests {
         assert_eq!(buf.len(), 2);
 
         // the remaining packets should be those with lengths 4 and 5
-        let p = buf.take_unsent_packet().unwrap();
+        let (p, seq) = buf.take_unsent_packet().unwrap();
         assert_eq!(p.len(), 4);
-        let p = buf.take_unsent_packet().unwrap();
+        assert_eq!(seq, 2);
+        let (p, seq) = buf.take_unsent_packet().unwrap();
         assert_eq!(p.len(), 5);
+        assert_eq!(seq, 3);
         assert!(buf.is_empty());
     }
 
@@ -197,8 +200,9 @@ mod tests {
 
         buf.skip(2).expect("sequence 2 should be present");
         // only packet 3 should remain
-        let p = buf.take_unsent_packet().unwrap();
+        let (p, seq) = buf.take_unsent_packet().unwrap();
         assert_eq!(p.len(), 5);
+        assert_eq!(seq, 3);
         assert!(buf.is_empty());
     }
 
@@ -220,8 +224,9 @@ mod tests {
         }
 
         for expected in 1..=3 {
-            let p = buf.take_unsent_packet().unwrap();
+            let (p, seq) = buf.take_unsent_packet().unwrap();
             assert_eq!(p.len(), expected as usize + 2);
+            assert_eq!(seq, expected);
         }
 
         assert!(buf.take_unsent_packet().is_none());
