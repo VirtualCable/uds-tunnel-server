@@ -1,5 +1,3 @@
-use core::fmt;
-
 // BSD 3-Clause License
 // Copyright (c) 2026, Virtual Cable S.L.
 // All rights reserved.
@@ -30,6 +28,8 @@ use core::fmt;
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
+use core::fmt;
+
 use anyhow::Result;
 
 mod command;

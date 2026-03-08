@@ -80,7 +80,7 @@ impl RecoverySendBuffer {
         // Evict old items if necessary
         while self.current_bytes + item_size > self.max_bytes {
             if let Some(old_item) = self.items.pop_front() {
-                self.current_bytes -= old_item.data.payload.len();
+                self.current_bytes -= old_item.data.len();
             } else {
                 break; // No more items to evict
             }
@@ -142,7 +142,6 @@ impl std::fmt::Debug for RecoverySendBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shared::protocol::PayloadWithChannel;
 
     /// Helper that builds a payload of the given size.
     fn make_payload(size: usize) -> PayloadWithChannel {
@@ -192,21 +191,21 @@ mod tests {
     #[test]
     fn skip_finds_sequence_and_removes_up_to_it() {
         let mut buf = RecoverySendBuffer::new(100);
-        buf.push(1, make_payload(1)).unwrap();
-        buf.push(2, make_payload(2)).unwrap();
-        buf.push(3, make_payload(3)).unwrap();
+        buf.push(1, make_payload(3)).unwrap();
+        buf.push(2, make_payload(4)).unwrap();
+        buf.push(3, make_payload(5)).unwrap();
 
         buf.skip(2).expect("sequence 2 should be present");
         // only packet 3 should remain
         let p = buf.take_unsent_packet().unwrap();
-        assert_eq!(p.len(), 3);
+        assert_eq!(p.len(), 5);
         assert!(buf.is_empty());
     }
 
     #[test]
     fn skip_not_found_returns_error() {
         let mut buf = RecoverySendBuffer::new(100);
-        buf.push(1, make_payload(1)).unwrap();
+        buf.push(1, make_payload(3)).unwrap();
         let err = buf.skip(99).unwrap_err();
 
         let RecoveryError::NotFound { requested } = err;
@@ -217,12 +216,12 @@ mod tests {
     fn take_unsent_packet_yields_insertion_order() {
         let mut buf = RecoverySendBuffer::new(100);
         for i in 1..=3 {
-            buf.push(i, make_payload(i as usize)).unwrap();
+            buf.push(i, make_payload(i as usize + 2)).unwrap();
         }
 
         for expected in 1..=3 {
             let p = buf.take_unsent_packet().unwrap();
-            assert_eq!(p.len(), expected as usize);
+            assert_eq!(p.len(), expected as usize + 2);
         }
 
         assert!(buf.take_unsent_packet().is_none());
