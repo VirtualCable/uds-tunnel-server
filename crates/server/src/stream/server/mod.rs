@@ -81,32 +81,32 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                     log::debug!("Server inbound stream stopping");
                     break;
                 }
-            result = self
-                .crypt
-                .read(&mut self.reader, &mut self.buffer)
-                => {
-                    let (decrypted_data, stream_channel_id) = result?;
-                    if decrypted_data.is_empty() {
-                        log::debug!("Server inbound stream reached EOF");
-                        // Connection closed
-                        break;
-                    }
-                    if stream_channel_id == 0 {
-                        // The CLOSE command is processed here, as we need to do it BEFORE the EOF
-                        if let Ok(cmd) = protocol::Command::from_slice(decrypted_data)
-                            && cmd == protocol::Command::Close
-                        {
-                            log::debug!("Received CLOSE command on server inbound stream");
-                            // Notify session manager that close was notified, so it can skip recovery grace period and close immediately
-                            SessionManager::get_instance().close_notified(&self.session_id);
+                result = self
+                    .crypt
+                    .read(&mut self.reader, &mut self.buffer)
+                    => {
+                        let (decrypted_data, stream_channel_id) = result?;
+                        if decrypted_data.is_empty() {
+                            log::debug!("Server inbound stream reached EOF");
+                            // Connection closed
                             break;
                         }
-                    }
-                    // Channels are processed on the proxy side, so just forward data
-                    self.sender
-                        .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
-                        .await?;
+                        if stream_channel_id == 0 {
+                            // The CLOSE command is processed here, as we need to do it BEFORE the EOF
+                            if let Ok(cmd) = protocol::Command::from_slice(decrypted_data)
+                                && cmd == protocol::Command::Close
+                            {
+                                log::debug!("Received CLOSE command on server inbound stream");
+                                // Notify session manager that close was notified, so it can skip recovery grace period and close immediately
+                                SessionManager::get_instance().close_notified(&self.session_id);
+                                break;
+                            }
                         }
+                        // Channels are processed on the proxy side, so just forward data
+                        self.sender
+                            .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
+                            .await?;
+                }
             }
         }
         // Ensure other side also stops
@@ -209,11 +209,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
 
     async fn send_data(&mut self, data: &PayloadWithChannel) -> Result<()> {
         self.crypt
-            .write(
-                &mut self.writer,
-                data.channel_id,
-                data.payload.as_ref(),
-            )
+            .write(&mut self.writer, data.channel_id, data.payload.as_ref())
             .await
     }
 }

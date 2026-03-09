@@ -117,7 +117,7 @@ impl Proxy {
                         }
                         Ok(handler::Command::ServerFailed) => {
                             log::debug!("Detaching server from session proxy");
-                            our_server_channels = None;
+                            our_server_channels.take();
                         }
                         Ok(handler::Command::ServerStopped) => {
                             log::debug!("Server stopped, closing session proxy");
