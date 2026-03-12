@@ -44,7 +44,15 @@ use shared::{log, system::trigger::Trigger};
 // Catch SIGTERM and SIGINT to perform a graceful shutdown
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    log::setup_logging("debug", log::LogType::Tunnel);
+    log::setup_logging("error", log::LogType::Tunnel);
+    log::set_log_level(
+        &config::get()
+            .read()
+            .unwrap()
+            .log_level
+            .clone()
+            .unwrap_or("info".to_string()),
+    );
     // Read config
     // Crate a listener with the configured address
     let (listen_sock_addr, use_proxy_protocol) = {
@@ -61,7 +69,8 @@ async fn main() {
             .read()
             .unwrap()
             .recovery_buffer_size
-            .unwrap_or(64) * 1024, // Convert from Kb to bytes
+            .unwrap_or(64)
+            * 1024, // Convert from Kb to bytes
         std::sync::atomic::Ordering::Relaxed,
     );
     let listener = TcpListener::bind(listen_sock_addr).await.unwrap();
