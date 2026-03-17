@@ -2,6 +2,13 @@
 members = ["crates/server", "crates/shared"]
 resolver = "3"
 
+[workspace.package]
+version = "5.0.0"
+edition = "2024"
+authors = ["Adolfo Gómez <dkmaster@dkmon.com>"]
+license = "BSD-3-Clause"
+
+
 [workspace.dependencies]
 # Utilities
 anyhow = "1.0"
@@ -45,7 +52,7 @@ serde = { version = "1.0", features = ["derive"] }
 # Json handling
 serde_json = "1.0"
 # toml for config
-toml = "0.9.8"
+toml = "1.0"
 
 # Encoding/Decoding
 base64 = "0.22.1"
