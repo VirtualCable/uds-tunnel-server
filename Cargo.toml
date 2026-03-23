@@ -68,7 +68,7 @@ hkdf = "0.12"
 sha2 = "0.10.9"
 
 # Post-quantum cryptography
-libcrux-ml-kem = "0.0.7"
+libcrux-ml-kem = "0.0.8"
 
 # regex
 regex = "1.12"

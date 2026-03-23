@@ -46,6 +46,9 @@ use shared::{
 pub struct TicketRemote {
     pub host: String,
     pub port: u16,
+    // Also has an optional "extra" field that can contain any additional information as a JSON object
+    // Currently, we ignore it buy this tunnel
+    // pub extra: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize, Debug)]
