@@ -29,7 +29,7 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -55,11 +55,11 @@ pub struct SessionManager {
 
 impl fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sessions = self.sessions.read().unwrap();
-        let equivs = self.equivs.read().unwrap();
+        let sessions_count = self.sessions.read().unwrap().len();
+        let equivs_count = self.equivs.read().unwrap().len();
         f.debug_struct("SessionManager")
-            .field("sessions_count", &sessions.len())
-            .field("equivs_count", &equivs.len())
+            .field("sessions_count", &sessions_count)
+            .field("equivs_count", &equivs_count)
             .finish()
     }
 }
@@ -147,14 +147,12 @@ impl SessionManager {
     /// Note: equivs will fail if the target session is removed or the equiv entry does not exist
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
         // If equivalent session exists, get it. If don't, try to use id as is.
-
-        // Ensure lock scope is limited
-        let equivs = self.equivs.read().unwrap();
-        if let Some(equiv_id) = equivs.get(id) {
-            self.get_session(equiv_id)
-        } else {
-            None
-        }
+        // Ensure lock scope is limited and avoid nested lock ordering.
+        let equiv_id = {
+            let equivs = self.equivs.read().unwrap();
+            equivs.get(id).copied()
+        };
+        equiv_id.and_then(|eid| self.get_session(&eid))
     }
 
     pub fn create_equiv_session(&self, to: &SessionId) -> Result<SessionId> {
@@ -223,9 +221,13 @@ impl SessionManager {
     }
 
     fn cleanup_equiv_sessions(&self) {
+        let active_session_ids: HashSet<SessionId> = {
+            let sessions = self.sessions.read().unwrap();
+            sessions.keys().copied().collect()
+        };
         let mut equivs = self.equivs.write().unwrap();
-        // Remove entries that are too old and original session does not exist anymore
-        equivs.retain(|_, orig| self.get_session(orig).is_some());
+        // Remove entries whose original session does not exist anymore.
+        equivs.retain(|_, orig| active_session_ids.contains(orig));
     }
 
     // Lazy cleanup of equiv sessions on each access, to avoid needing a background task
@@ -249,10 +251,14 @@ impl SessionManager {
     }
 
     pub fn log_debug_sessions(&self) {
-        let sessions = self.sessions.read().unwrap();
-        let equivs = self.equivs.read().unwrap();
-        log::debug!("Sessions: {:?}", sessions);
-        log::debug!("Equivs: {:?}", equivs);
+        {
+            let sessions = self.sessions.read().unwrap();
+            log::debug!("Sessions: {:?}", *sessions);
+        }
+        {
+            let equivs = self.equivs.read().unwrap();
+            log::debug!("Equivs: {:?}", *equivs);
+        }
     }
 }
 

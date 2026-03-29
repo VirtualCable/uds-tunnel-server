@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger};
+use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger, utils::sample_hex};
 
 use crate::{
     broker::{self, BrokerApi},
@@ -12,6 +12,7 @@ use crate::{
 };
 
 use super::types::OpenResponse;
+
 
 pub(super) async fn connect<R, W>(
     mut reader: R,
@@ -29,12 +30,18 @@ where
         // Note: On a future, the broker could return more than a single channel stream id
         // But currently, only one is supported, althout it's prepared to be extended later
         Ok(ticket_info) => {
-            log::debug!("Received ticket info from broker: {:?}", ticket_info);
+            let shared_secret = ticket_info.get_shared_secret()?;
+            log::debug!(
+                "Received ticket info from broker: remotes={} notify={} shared_secret={}",
+                ticket_info.remotes_count(),
+                sample_hex(ticket_info.notify.as_bytes()),
+                sample_hex(shared_secret.as_ref())
+            );
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             let stop = Trigger::new();
             let session = session_manager.add_session(Session::new(
-                ticket_info.get_shared_secret()?,
+                shared_secret,
                 *ticket,
                 stop.clone(),
                 src_ip,

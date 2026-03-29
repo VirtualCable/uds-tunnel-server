@@ -33,7 +33,7 @@ use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-use crate::{log, protocol::ticket};
+use crate::{log, protocol::ticket, utils::sample_hex};
 
 use super::{Crypt, types::SharedSecret};
 
@@ -50,9 +50,9 @@ pub fn derive_tunnel_material(
     ticket: &ticket::Ticket,
 ) -> Result<Material> {
     log::debug!(
-        "Deriving tunnel material with shared_secret: {:?} and ticket: {:?}",
-        shared_secret,
-        ticket
+        "Deriving tunnel material with shared_secret={} ticket={}",
+        sample_hex(shared_secret.as_ref()),
+        sample_hex(ticket.as_ref())
     );
 
     // HKDF-Extract + Expand with SHA-256
@@ -97,9 +97,9 @@ pub fn get_tunnel_crypts(
 ) -> Result<(Crypt, Crypt)> {
     let material = derive_tunnel_material(shared_secret, ticket)?;
     log::debug!(
-        "Derived tunnel material: key_receive={:?}, key_send={:?}",
-        material.key_receive,
-        material.key_send
+        "Derived tunnel material: key_receive={} key_send={}",
+        sample_hex(material.key_receive.as_ref()),
+        sample_hex(material.key_send.as_ref())
     );
 
     let inbound = Crypt::new(&material.key_receive, seqs.0);

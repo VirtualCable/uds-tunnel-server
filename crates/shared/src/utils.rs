@@ -54,6 +54,23 @@ fn hex_val(b: u8) -> Result<u8> {
     }
 }
 
+pub fn sample_hex(data: &[u8]) -> String {
+    const EDGE_BYTES: usize = 4;
+    if data.len() <= EDGE_BYTES * 2 {
+        return data.iter().map(|b| format!("{:02x}", b)).collect();
+    }
+
+    let prefix: String = data[..EDGE_BYTES]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let suffix: String = data[data.len() - EDGE_BYTES..]
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    format!("{}..{}", prefix, suffix)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
