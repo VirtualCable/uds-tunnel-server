@@ -282,3 +282,59 @@ async fn test_cleanup_equiv_sessions_prunes_missing() {
     assert!(manager.get_session(session.id()).is_none());
     assert!(manager.get_equiv_session(&equiv_session_id).is_none());
 }
+
+#[tokio::test]
+async fn test_session_manager_concurrent_equiv_operations() {
+    let manager = std::sync::Arc::new(SessionManager::new());
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(16));
+
+    let mut handles = tokio::task::JoinSet::new();
+
+    for _ in 0..16 {
+        let manager = manager.clone();
+        let barrier = barrier.clone();
+
+        handles.spawn(async move {
+            barrier.wait().await;
+
+            let session = manager
+                .add_session(new_session_for_test("127.0.0.1:1234"))
+                .unwrap();
+            let equiv_id = manager.create_equiv_session(session.id()).unwrap();
+
+            assert!(manager.get_equiv_session(&equiv_id).is_some());
+
+            manager.remove_session(session.id());
+            manager.cleanup_equiv_sessions();
+
+            // Equivalent session should no longer resolve to a session once original removed.
+            assert!(manager.get_equiv_session(&equiv_id).is_none());
+
+            manager.remove_equiv_session(&equiv_id);
+        });
+    }
+
+    while let Some(result) = handles.join_next().await {
+        result.unwrap();
+    }
+
+    assert_eq!(manager.count(), 0);
+    assert!(manager.equivs.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_remove_equiv_session_when_original_missing() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+    let equiv_id = manager.create_equiv_session(session.id()).unwrap();
+
+    manager.remove_session(session.id());
+    manager.cleanup_equiv_sessions();
+
+    // after cleanup the equiv mapping must be pruned
+    assert!(manager.get_equiv_session(&equiv_id).is_none());
+    assert!(manager.equivs.read().unwrap().is_empty());
+}
+
