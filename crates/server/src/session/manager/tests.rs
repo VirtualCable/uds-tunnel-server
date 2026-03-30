@@ -266,3 +266,19 @@ async fn test_remove_equiv_session() {
     assert!(manager.get_session(session.id()).is_some());
     assert!(manager.get_equiv_session(&equiv_session_id).is_none());
 }
+
+#[tokio::test]
+async fn test_cleanup_equiv_sessions_prunes_missing() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+
+    let equiv_session_id = manager.create_equiv_session(session.id()).unwrap();
+
+    manager.remove_session(session.id());
+    manager.cleanup_equiv_sessions();
+
+    assert!(manager.get_session(session.id()).is_none());
+    assert!(manager.get_equiv_session(&equiv_session_id).is_none());
+}

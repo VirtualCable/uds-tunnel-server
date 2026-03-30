@@ -81,4 +81,14 @@ mod tests {
         let expected: [u8; 15] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         assert_eq!(hex_to_bytes(input).unwrap(), expected);
     }
+
+    #[test]
+    fn test_sample_hex_short_and_long() {
+        assert_eq!(sample_hex(&[1, 2, 3, 4]), "01020304");
+        assert_eq!(sample_hex(&[1, 2, 3, 4, 5, 6, 7, 8]), "0102030405060708");
+        assert_eq!(
+            sample_hex(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+            "01020304..0708090a"
+        );
+    }
 }
