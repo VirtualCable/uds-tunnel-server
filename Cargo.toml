@@ -18,7 +18,7 @@ chrono = { version = "0.4.42" }
 num_enum = "0.7.5"
 
 # randomness
-rand = "0.10.0"
+rand = "0.10.1"
 
 # SSL/TLS
 rustls = "0.23.37"
