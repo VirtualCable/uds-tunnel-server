@@ -46,6 +46,7 @@ pub use tracing::{debug, error, info, trace, warn};
 
 static LOGGER_INIT: OnceLock<()> = OnceLock::new();
 static RELOAD_HANDLE: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+static CALCULATED_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 struct RotatingWriter {
     path: PathBuf,
@@ -121,7 +122,11 @@ impl std::fmt::Display for LogType {
 // Our log system wil also hook panics to log them
 pub fn setup_panic_hook() {
     panic::set_hook(Box::new(|info| {
-        let temp_log = std::env::temp_dir().join("udstunnel-panic.log");
+        let log_path = CALCULATED_LOG_PATH
+            .get()
+            .cloned()
+            .unwrap_or_else(|| std::env::temp_dir());
+        let temp_log = log_path.join("udstunnel-panic.log");
         log::error!("Panic occurred, writing details to {:?}", temp_log);
         let mut f = OpenOptions::new()
             .create(true)
@@ -173,6 +178,8 @@ pub fn setup_logging(level: &str, log_type: LogType) {
 
     let log_path =
         std::env::var(log_path).unwrap_or_else(|_| std::env::temp_dir().to_string_lossy().into());
+
+    let _ = CALCULATED_LOG_PATH.set(PathBuf::from(&log_path));
 
     let log_name = log_name.to_string() + ".log";
 
