@@ -1,0 +1,50 @@
+# =============================================================================
+# UDS Tunnel Server — Sample Configuration
+# =============================================================================
+# This file contains the default and recommended settings for the UDS Tunnel.
+# Mount this file into the container:
+#   docker run -v ./udstunnel.conf:/etc/udstunnel.conf:ro ...
+# =============================================================================
+
+# --- Network Settings ---
+
+# IP address to listen on. "*" means all interfaces.
+listen_addr = "*"
+
+# Port to listen on.
+listen_port = 4443
+
+# Whether to expect PROXY protocol v2 headers (if behind a proxy like HAProxy).
+use_proxy_protocol = false
+
+
+# --- Broker API Settings ---
+
+# URL of the UDS Broker Tunnel API endpoint.
+# Example: "https://your-broker.example.com/uds/rest/tunnelpq/ticket"
+ticket_api_url = "https://127.0.0.1:8443/uds/rest/tunnelpq/ticket"
+
+# Whether to verify SSL certificates when connecting to the Broker API.
+# Set to false for testing with self-signed certificates.
+verify_ssl = false
+
+# Authentication token for the Broker API.
+# Must match the token configured in the UDS Broker.
+broker_auth_token = "your-secret-token-here"
+
+
+# --- Performance Settings ---
+
+# Size of the session recovery buffer in KB. Default: 64
+recovery_buffer_size = 64
+
+
+# --- Logging Settings ---
+
+# Log level for the server. Options: "trace", "debug", "info", "warn", "error".
+log_level = "info"
+
+# NOTE: The log file path is NOT configured here.
+# It is controlled by the UDSTUNNEL_TUNNEL_LOG_PATH environment variable.
+# Inside the Docker container, it defaults to /var/log/udstunnel/uds-tunnel.log
+# and the panic log to /var/log/udstunnel/udstunnel-panic.log

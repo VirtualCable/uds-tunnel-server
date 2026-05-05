@@ -1,0 +1,37 @@
+# =============================================================================
+# UDS Tunnel Server — Builder Image
+# =============================================================================
+# Compiles the Rust tunnel-server binary.
+#
+# Usage:
+#   docker build -f docker/Dockerfile.build -t udstunnel-builder .
+#
+# Outputs (inside the image):
+#   /build/target/release/server   — Server binary
+# =============================================================================
+
+ARG DISTRO_VERSION=trixie
+FROM debian:${DISTRO_VERSION}
+
+LABEL maintainer="Virtual Cable S.L. <support@virtualcable.net>"
+LABEL description="udstunnel builder image"
+
+# Install build dependencies:
+#   - Rust toolchain (curl for rustup)
+#   - C/C++ build tools (build-essential, cmake, pkg-config)
+#   - System libraries (SSL, etc.)
+#   - devscripts/debhelper for potential packaging
+RUN apt-get update && apt-get install -y \
+    curl build-essential pkg-config cmake \
+    libssl-dev \
+    devscripts debhelper \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y
+ENV PATH="/root/.cargo/bin:$PATH"
+
+# --- Build Server ---
+WORKDIR /build
+COPY . .
+RUN cargo build --release --bin tunnel-server
