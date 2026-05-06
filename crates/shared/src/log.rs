@@ -125,7 +125,7 @@ pub fn setup_panic_hook() {
         let log_path = CALCULATED_LOG_PATH
             .get()
             .cloned()
-            .unwrap_or_else(|| std::env::temp_dir());
+            .unwrap_or_else(std::env::temp_dir);
         let temp_log = log_path.join("udstunnel-panic.log");
         log::error!("Panic occurred, writing details to {:?}", temp_log);
         let mut f = OpenOptions::new()

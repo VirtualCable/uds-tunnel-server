@@ -9,6 +9,11 @@ LOG_DIR="/var/log/udstunnel"
 CONFIG_FILE="/etc/udstunnel.conf"
 SERVER_BIN="/opt/udstunnel/udstunnel"
 
+# --- Set Network Environment Variables ---
+# These override values in the .conf file to ensure consistency with Docker infrastructure
+export UDSTUNNEL_LISTEN_ADDR="${UDSTUNNEL_LISTEN_ADDR:-0.0.0.0}"
+export UDSTUNNEL_LISTEN_PORT="${UDSTUNNEL_LISTEN_PORT:-4443}"
+
 # --- Set Log Environment Variable ---
 # This ensures that the server writes logs to the mounted volume
 export UDSTUNNEL_TUNNEL_LOG_PATH="${UDSTUNNEL_TUNNEL_LOG_PATH:-$LOG_DIR}"

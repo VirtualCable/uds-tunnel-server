@@ -44,12 +44,11 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
     // Note: Default config is not usable, but allow to start the server without a config file
     SERVER_CONFIG
         .get_or_init(|| {
-            if let Ok(config_str) = read_to_string(CONFIGFILE_PATH) {
-                let config = ServerConfig::from_toml_str(&config_str)
-                    .expect("Failed to parse server configuration file");
-                Arc::new(RwLock::new(config))
+            let mut config = if let Ok(config_str) = read_to_string(CONFIGFILE_PATH) {
+                ServerConfig::from_toml_str(&config_str)
+                    .expect("Failed to parse server configuration file")
             } else {
-                Arc::new(RwLock::new(ServerConfig {
+                ServerConfig {
                     log_level: None,
                     listen_addr: None,
                     listen_port: None,
@@ -58,8 +57,20 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     verify_ssl: None,
                     broker_auth_token: "".to_string(),
                     recovery_buffer_size: None,
-                }))
+                }
+            };
+
+            // Override with environment variables if present
+            if let Ok(addr) = std::env::var("UDSTUNNEL_LISTEN_ADDR") {
+                config.listen_addr = Some(addr);
             }
+            if let Ok(port_str) = std::env::var("UDSTUNNEL_LISTEN_PORT") {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    config.listen_port = Some(port);
+                }
+            }
+
+            Arc::new(RwLock::new(config))
         })
         .clone()
 }
