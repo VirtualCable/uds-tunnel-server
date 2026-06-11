@@ -9,7 +9,7 @@ use crate::consts::CONFIGFILE_PATH;
 #[derive(serde::Deserialize)]
 pub struct ServerConfig {
     pub listen_addr: Option<String>, // * = all interfaces, else IP address, default: *
-    pub log_level: Option<String>, // Log level for the server, default: "info"
+    pub log_level: Option<String>,   // Log level for the server, default: "info"
     pub listen_port: Option<u16>,    // Port to listen on, default: 443
     pub use_proxy_protocol: Option<bool>, // Whether to expect PROXY protocol v2 headers, default: false
     pub ticket_api_url: String, // URL of the broker API, e.g., https://broker.example.com/uds/rest/ticket
@@ -64,10 +64,10 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
             if let Ok(addr) = std::env::var("UDSTUNNEL_LISTEN_ADDR") {
                 config.listen_addr = Some(addr);
             }
-            if let Ok(port_str) = std::env::var("UDSTUNNEL_LISTEN_PORT") {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    config.listen_port = Some(port);
-                }
+            if let Ok(port_str) = std::env::var("UDSTUNNEL_LISTEN_PORT")
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                config.listen_port = Some(port);
             }
 
             Arc::new(RwLock::new(config))
