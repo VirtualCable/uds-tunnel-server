@@ -25,8 +25,8 @@ rustls = "0.23"
 rustls-native-certs = "0.8"
 
 # async & async TLS
-tokio-rustls = "0.26.4"
-tokio = { version = "1.50.0", features = [
+tokio-rustls = "0.26"
+tokio = { version = "1.53", features = [
     "net",
     "io-util",
     "rt-multi-thread",
@@ -63,15 +63,15 @@ rust-embed = "8.9"
 sys-locale = "0.3"
 
 # Encryption
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.13"
 sha2 = "0.11"
 
 # Post-quantum cryptography
-libcrux-ml-kem = "0.0.9"
+libcrux-ml-kem = "0.0.10"
 
 # regex
-regex = "1.12"
+regex = "1.13"
 
 # Logging
 tracing = "0.1"

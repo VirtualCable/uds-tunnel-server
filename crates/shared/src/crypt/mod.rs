@@ -29,12 +29,8 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use aes_gcm::{
-    AeadInPlace, Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
-};
+use aes_gcm::{AeadInOut, Aes256Gcm, Nonce, Tag, aead::{Aead, AeadCore, KeyInit}};
 use anyhow::Result;
-use sha2::digest::typenum;
 
 use crate::log;
 
@@ -98,9 +94,10 @@ impl Crypt {
         buffer.set_seq(seq);
         buffer.set_length(data_with_channel_length + consts::TAG_LENGTH)?; // Write header with seq and length of encrypted data
 
-        let mut nonce = [0; 12];
-        nonce[..8].copy_from_slice(&seq.to_be_bytes());
-        let aad = &seq.to_be_bytes();
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr[..8].copy_from_slice(&seq.to_be_bytes());
+        let nonce = Nonce::from(nonce_arr);
+        let aad = seq.to_be_bytes();
 
         // Get pointer to data part of the buffer, where encryption will happen
         let data = buffer.data_with_channel_mut();
@@ -117,14 +114,14 @@ impl Crypt {
 
         let tag = self
             .cipher
-            .encrypt_in_place_detached(
-                Nonce::from_slice(&nonce),
-                aad,
-                &mut data[..data_with_channel_length],
+            .encrypt_inout_detached(
+                &nonce,
+                &aad,
+                (&mut data[..data_with_channel_length]).into(),
             )
             .map_err(|e| anyhow::anyhow!("encryption failure: {:?}", e))?;
         data[data_with_channel_length..data_with_channel_length + consts::TAG_LENGTH]
-            .copy_from_slice(&tag);
+            .copy_from_slice(tag.as_slice());
 
         // Returns the FULL length of the encrypted packet (header + data + channel + tag)
         Ok(data_with_channel_length + consts::TAG_LENGTH)
@@ -156,16 +153,20 @@ impl Crypt {
         let len = length - consts::TAG_LENGTH;
         let chan_data_buffer = buffer.data_with_channel_mut();
 
-        let mut nonce = [0; 12];
-        nonce[..8].copy_from_slice(&seq.to_be_bytes());
-        let aad = &seq.to_be_bytes();
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr[..8].copy_from_slice(&seq.to_be_bytes());
+        let nonce = Nonce::from(nonce_arr);
+        let aad = seq.to_be_bytes();
 
-        // Split ciphertext and tag
+        // Split ciphertext and tag. `Tag` is parameterised by the tag size (not by
+        // the cipher); its default `U16` matches the tag size of `Aes256Gcm`.
         let (ciphertext, rest) = chan_data_buffer.split_at_mut(len);
-        let tag = &rest[..16];
+        let tag: &Tag = (&rest[..consts::TAG_LENGTH])
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid tag length"))?;
 
         self.cipher
-            .decrypt_in_place_detached(Nonce::from_slice(&nonce), aad, ciphertext, tag.into())
+            .decrypt_inout_detached(&nonce, &aad, ciphertext.into(), tag)
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
 
         self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
@@ -192,7 +193,10 @@ impl Crypt {
         nonce: &[u8; 12],
         data: &[u8],
     ) -> Result<Vec<u8>> {
-        let nonce: &Nonce<typenum::U12> = Nonce::from_slice(nonce.as_ref());
+        // aes-gcm 0.11 parameterises `Nonce` by the nonce size, not by the
+        // cipher. `Aes256Gcm` is an alias of `AesGcm<Aes256, U12, U16>` and its
+        // `NonceSize` is `U12`, so use the fully-qualified form.
+        let nonce: &Nonce<<Aes256Gcm as AeadCore>::NonceSize> = &Nonce::from(*nonce);
         let cipher = Aes256Gcm::new(key.as_ref().into());
         cipher
             .decrypt(nonce, data)
@@ -356,5 +360,201 @@ mod tests {
         crypt.encrypt(1, 1, &mut buf2).unwrap();
         let c2 = buf2.buffer().unwrap().to_vec();
         assert_ne!(c1, c2);
+    }
+
+    // ── additional coverage ──────────────────────────────────────────────
+
+    #[test]
+    fn test_simple_decrypt_roundtrip() {
+        // simple_decrypt is the inverse of the *payload* encryption used to
+        // wrap the initial ticket info, which does NOT use the internal seq
+        // machinery. We hand-craft a ciphertext with aes-gcm directly so we
+        // can assert that the wrapper roundtrips and fails when tampered.
+        use aes_gcm::aead::{Aead, KeyInit};
+
+        let key = SharedSecret::new([0xABu8; 32]);
+        let nonce_bytes = [0x11u8; 12];
+        let plaintext = b"openuds-ticket-payload";
+
+        let cipher = Aes256Gcm::new(key.as_ref().into());
+        let ciphertext = cipher
+            .encrypt(&aes_gcm::Nonce::from(nonce_bytes), plaintext.as_ref())
+            .unwrap();
+
+        let decrypted = Crypt::simple_decrypt(&key, &nonce_bytes, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Tampering with the tag must fail
+        let mut bad = ciphertext.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 0xFF;
+        assert!(Crypt::simple_decrypt(&key, &nonce_bytes, &bad).is_err());
+
+        // Wrong nonce must also fail (GCM is unauthenticated w/o the right key+nonce)
+        let wrong_nonce = [0x22u8; 12];
+        assert!(Crypt::simple_decrypt(&key, &wrong_nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_fails_on_wrong_aad() {
+        // The seq is bound as associated data. If a different seq is forced
+        // on a copy of the buffer, decryption must fail because the AAD check
+        // does not match what was authenticated at encrypt time.
+        let key = SharedSecret::new([0x55u8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+
+        let mut buf = types::PacketBuffer::new();
+        let plaintext = b"aad-bound payload!!".to_vec();
+        buf.set_data(&plaintext).unwrap();
+        crypt.encrypt(7, plaintext.len(), &mut buf).unwrap();
+
+        let mut tampered = buf.clone();
+        let original_seq = tampered.seq().unwrap();
+        tampered.set_seq(original_seq.wrapping_add(1));
+
+        let err = crypt.decrypt(&mut tampered).unwrap_err();
+        assert!(
+            err.to_string().contains("decryption failure"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_decrypt_fails_on_wrong_nonce() {
+        // The nonce is derived from the seq header, and GCM authenticates the
+        // (key, nonce, aad) tuple. If an attacker rewrites the seq header so
+        // the decrypt path builds a different nonce, GCM must reject the
+        // ciphertext. Use a fresh receiver that has *not* seen any seqs yet,
+        // so the replay check does not preempt the GCM check.
+        let key = SharedSecret::new([0x66u8; 32]);
+        let mut sender = Crypt::new(&key, 0);
+        let mut receiver = Crypt::new(&key, 0);
+
+        let mut pkt = types::PacketBuffer::new();
+        pkt.set_data(b"same-payload").unwrap();
+        sender.encrypt(1, 12, &mut pkt).unwrap();
+        // pkt is now bound to seq=1 with the sender's seq.
+
+        // Tamper the seq header to a never-seen value, so the receiver will
+        // derive a *different* nonce when trying to decrypt. The replay
+        // window is satisfied (99 > 0) and the AAD also changes, so the
+        // GCM tag check must fail.
+        pkt.set_seq(99);
+
+        let err = receiver.decrypt(&mut pkt).unwrap_err();
+        assert!(
+            err.to_string().contains("decryption failure"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_decrypt_advances_seq() {
+        // After a successful decrypt, the internal seq must advance to
+        // seq+1 so that subsequent out-of-order / replayed packets get
+        // rejected even if they look syntactically valid.
+        let key = SharedSecret::new([0x77u8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+
+        let mut buf = types::PacketBuffer::new();
+        buf.set_data(b"data").unwrap();
+        crypt.encrypt(1, 4, &mut buf).unwrap();
+
+        let after_encrypt = crypt.current_seq();
+        crypt.decrypt(&mut buf).unwrap();
+        assert_eq!(crypt.current_seq(), after_encrypt + 1);
+
+        // A *new* encrypted packet that happens to land on the previous seq
+        // (because we just re-encrypted with a fresh Crypt on the same
+        // starting state) must be rejected as a replay.
+        let mut other = Crypt::new(&key, 0);
+        let mut replay = types::PacketBuffer::new();
+        replay.set_data(b"new!").unwrap();
+        other.encrypt(1, 4, &mut replay).unwrap();
+        // `replay` now has seq=1, which is < our current seq=2.
+        let err = crypt.decrypt(&mut replay).unwrap_err();
+        assert!(
+            err.to_string().contains("replay attack detected"),
+            "{}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_encrypt_empty_payload() {
+        // 0-byte payloads are a legitimate edge case (e.g. keep-alive). The
+        // channel id is encrypted as part of the AAD-bound payload, and a
+        // tag is still produced; the resulting length must be 2 (channel)
+        // + 16 (tag) and roundtrip cleanly with the channel id restored.
+        let key = SharedSecret::new([0x88u8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+
+        let mut buf = types::PacketBuffer::new();
+        let written = crypt.encrypt(42, 0, &mut buf).unwrap();
+
+        assert_eq!(
+            written,
+            types::PacketBuffer::calc_data_with_channel_len(0).unwrap() + consts::TAG_LENGTH
+        );
+
+        let mut decrypted = buf.clone();
+        crypt.decrypt(&mut decrypted).unwrap();
+        assert_eq!(decrypted.data(), b"");
+        // After decryption the channel id is restored in cleartext.
+        assert_eq!(decrypted.channel_id(), 42);
+    }
+
+    #[test]
+    fn test_encrypt_max_payload() {
+        // Encrypt a payload at the maximum that the buffer can hold and make
+        // sure it roundtrips without truncation. Uses CRYPT_PACKET_SIZE which
+        // is the intended working max (well under MAX_PACKET_SIZE).
+        let key = SharedSecret::new([0x99u8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+
+        let payload = vec![0xCDu8; consts::CRYPT_PACKET_SIZE];
+        let mut buf = types::PacketBuffer::new();
+        buf.set_data(&payload).unwrap();
+
+        let written = crypt.encrypt(7, payload.len(), &mut buf).unwrap();
+        assert_eq!(
+            written,
+            types::PacketBuffer::calc_data_with_channel_len(payload.len()).unwrap()
+                + consts::TAG_LENGTH
+        );
+
+        let mut out = buf.clone();
+        crypt.decrypt(&mut out).unwrap();
+        assert_eq!(out.data(), payload.as_slice());
+        assert_eq!(out.channel_id(), 7);
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_many_packets_in_order() {
+        // Exercise the seq path with multiple back-to-back packets to make
+        // sure nonce derivation, AAD, and seq advance all stay consistent.
+        // `decrypt` advances the internal seq to `seq+1`, so after a full
+        // roundtrip the seq must have advanced by 1 per packet.
+        let key = SharedSecret::new([0xCCu8; 32]);
+        let mut crypt = Crypt::new(&key, 0);
+
+        let mut max_seq = 0u64;
+        for i in 0u16..16 {
+            let payload = format!("packet-{i:02}");
+            let mut buf = types::PacketBuffer::new();
+            buf.set_data(payload.as_bytes()).unwrap();
+            crypt.encrypt(i, payload.len(), &mut buf).unwrap();
+            let mut out = buf.clone();
+            crypt.decrypt(&mut out).unwrap();
+            assert_eq!(out.data(), payload.as_bytes());
+            assert_eq!(out.channel_id(), i);
+            max_seq = out.seq().unwrap();
+        }
+
+        // The last encrypted packet's seq is `initial + 16`. After the
+        // matching decrypt the internal seq is set to that value + 1.
+        assert_eq!(crypt.current_seq(), max_seq + 1);
     }
 }
