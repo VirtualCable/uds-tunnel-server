@@ -44,6 +44,12 @@ pub const PROXY_V2_SIGNATURE: [u8; 12] = [
 // Channel related constants
 pub const CHANNEL_SIZE: usize = 2048; // 2k messages as much on a channel buffer
 
+// Hard cap on the channel id accepted by the server. The broker controls the
+// legitimate count (typically 1 or 2 remotes per ticket, almost never more
+// than 4). 8 leaves comfortable headroom for any reasonable deployment while
+// keeping the worst-case per-session `clients_senders` slot count tiny.
+pub const MAX_CHANNEL_ID: u16 = 8;
+
 // Ticket related constants
 pub const TICKET_LENGTH: usize = 48;
 

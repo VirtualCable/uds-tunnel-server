@@ -361,3 +361,79 @@ async fn reattach_server_works() -> Result<()> {
 
     Ok(())
 }
+
+// Regression tests for the bounds-check on `create_client`. Without these
+// checks an attacker (or buggy client) holding a valid ticket could either
+// grow `clients_senders` up to `u16::MAX` (memory DoS) or trigger an
+// out-of-bounds index into `session.remotes` (panic). See
+// `strix_runs/.../vuln-0002.md`.
+#[tokio::test]
+async fn create_client_rejects_channel_id_zero() -> Result<()> {
+    use super::channels::ClientChannels;
+
+    let session = std::sync::Arc::new(new_session_for_test("127.0.0.1:1"));
+    let mut channels = ClientChannels::new();
+
+    let err = channels.create_client(0, session).await.unwrap_err();
+    assert!(
+        err.to_string().contains("reserved for the control channel"),
+        "{}",
+        err
+    );
+    assert_eq!(channels.slots_len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
+    use super::channels::ClientChannels;
+
+    // Session has exactly one remote, so any id > 1 must be rejected.
+    let session = std::sync::Arc::new(new_session_for_test("127.0.0.1:1"));
+    let mut channels = ClientChannels::new();
+
+    let err = channels.create_client(2, session.clone()).await.unwrap_err();
+    assert!(
+        err.to_string().contains("only 1 remotes available"),
+        "{}",
+        err
+    );
+    assert_eq!(channels.slots_len(), 0);
+
+    // u16::MAX must be rejected before any allocation happens.
+    let err = channels.create_client(u16::MAX, session).await.unwrap_err();
+    // Could be the remotes check or the hard cap; either way no allocation.
+    assert!(
+        err.to_string().contains("only 1 remotes available")
+            || err.to_string().contains("exceeds hard cap"),
+        "{}",
+        err
+    );
+    assert_eq!(channels.slots_len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
+    use super::channels::ClientChannels;
+
+    // Hard cap is MAX_CHANNEL_ID; use a remote that is *not* a real
+    // server (port 1 is reserved) so that, even if the cap check were
+    // missing, the test would block on TcpStream::connect for a long time
+    // instead of returning quickly. The hard cap must reject before any
+    // network call.
+    let session = std::sync::Arc::new(new_session_for_test("127.0.0.1:1"));
+    let mut channels = ClientChannels::new();
+
+    let above_cap = shared::protocol::consts::MAX_CHANNEL_ID + 1;
+    let err = channels.create_client(above_cap, session)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("exceeds hard cap"),
+        "{}",
+        err
+    );
+    assert_eq!(channels.slots_len(), 0);
+    Ok(())
+}

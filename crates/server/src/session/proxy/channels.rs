@@ -60,19 +60,49 @@ impl ClientChannels {
         }
     }
 
+    /// Number of slots currently allocated in `clients_senders`. Test-only.
+    #[cfg(test)]
+    pub(super) fn slots_len(&self) -> usize {
+        self.clients_senders.len()
+    }
+
     pub async fn create_client(
         &mut self,
         stream_channel_id: u16,
         session: Arc<Session>,
     ) -> Result<()> {
-        // Ensure vector is large enough
-        if self.clients_senders.len() < stream_channel_id as usize {
-            self.clients_senders
-                .resize(stream_channel_id as usize, None);
+        // Reject channel id 0 (reserved for the control channel) and any id
+        // outside the legitimate remote count returned by the broker. Without
+        // these checks a malicious or buggy client could grow
+        // `clients_senders` up to `u16::MAX` slots (memory DoS) or index
+        // `session.remotes` out of bounds (panic).
+        if stream_channel_id == 0 {
+            anyhow::bail!("Invalid stream_channel_id: 0 is reserved for the control channel");
+        }
+        if stream_channel_id > shared::protocol::consts::MAX_CHANNEL_ID {
+            anyhow::bail!(
+                "Invalid stream_channel_id: {} exceeds hard cap of {}",
+                stream_channel_id,
+                shared::protocol::consts::MAX_CHANNEL_ID
+            );
+        }
+        let idx = (stream_channel_id - 1) as usize;
+        if idx >= session.remotes.len() {
+            anyhow::bail!(
+                "Invalid stream_channel_id: {} (only {} remotes available for this session)",
+                stream_channel_id,
+                session.remotes.len()
+            );
+        }
+
+        // Ensure vector is large enough, but cap the growth at the
+        // legitimate remote count for this session.
+        if self.clients_senders.len() <= idx {
+            self.clients_senders.resize(idx + 1, None);
         }
 
         // If current client is Some, we are replacing it, so ensure old one receives the stop signal
-        if let Some(old_client) = &self.clients_senders[(stream_channel_id - 1) as usize] {
+        if let Some(old_client) = &self.clients_senders[idx] {
             // Ensure notify old client to stop before replacing
             old_client.stop.trigger();
         }
@@ -80,9 +110,8 @@ impl ClientChannels {
         let (sender, receiver) = protocol::payload_pair();
         // (self.sender.clone(), receiver)
 
-        // If outside remotes, will fail and return error
-        let target_stream =
-            TcpStream::connect(&session.remotes[stream_channel_id as usize - 1]).await?;
+        // `idx` is guaranteed in range by the checks above.
+        let target_stream = TcpStream::connect(&session.remotes[idx]).await?;
 
         // Split the target stream into reader and writer
         let (target_reader, target_writer) = target_stream.into_split();
@@ -110,8 +139,7 @@ impl ClientChannels {
             }
         });
 
-        self.clients_senders[(stream_channel_id - 1) as usize] =
-            Some(ClientChannel { sender, stop });
+        self.clients_senders[idx] = Some(ClientChannel { sender, stop });
         Ok(())
     }
 
