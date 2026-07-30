@@ -30,6 +30,21 @@ where
     let session_manager = SessionManager::get_instance();
     match session_manager.get_equiv_session(recover_session_id) {
         Some(session) => {
+            // Validate the client-supplied sequence numbers BEFORE touching the
+            // recovery buffer. Crypt::next_seq pre-increments from 0, so the
+            // smallest legitimate inbound seq is 1. A value of 0 would underflow
+            // the `in_seqs.0 - 1` subtraction below. Any value outside the
+            // buffer's [head, tail] window is malformed and must be rejected
+            // without emptying the buffer.
+            if in_seqs.0 == 0 {
+                log::error!(
+                    "Refusing recovery for session {:?}: in_seq underflows",
+                    session.id()
+                );
+                return Err(anyhow::anyhow!(
+                    "Invalid recovery sequence: in_seq must be >= 1"
+                ));
+            }
             // Skip packages in the recovery buffer until the requested seq is found, if not found, return error
             {
                 let ses_rec_buf = session.recovery_buffer();
@@ -40,10 +55,29 @@ where
                     in_seqs.0,
                     buffer
                 );
-                buffer.skip(in_seqs.0 - 1)?;
+                let requested = in_seqs.0 - 1;
+                let head = buffer.head_seq();
+                let tail = buffer.tail_seq();
+                // Empty buffer (head == tail == 0) means the server has nothing
+                // buffered for retransmission: a legitimate client always asks
+                // for seq >= 1, so any non-empty request against an empty
+                // window is also a malformed recovery attempt.
+                if tail == 0 || requested < head || requested > tail {
+                    log::error!(
+                        "Refusing recovery for session {:?}: requested seq {} outside buffer window [{}, {}]",
+                        session.id(),
+                        in_seqs.0,
+                        head,
+                        tail
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Invalid recovery sequence: requested seq outside recovery buffer window"
+                    ));
+                }
+                buffer.skip(requested)?;
                 log::debug!(
                     "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
-                    in_seqs.0 - 1,
+                    requested,
                     session.id(),
                     buffer,
                 );

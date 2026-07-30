@@ -641,3 +641,34 @@ async fn test_connection_invalid_remote() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// Regression tests for vuln-0003: a malformed Recover handshake could
+// empty the recovery buffer and tear down the recovered session. The
+// fix validates `in_seqs.0` against the buffer's window before mutating
+// any session state.
+
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn recover_validation_runs_before_network() -> Result<()> {
+    // A bogus ticket + in_seq=0 must fail before any read on the stream.
+    // We deliberately do not write anything to the client half of the
+    // duplex: if validation does not reject, recover will block reading
+    // and the test will time out.
+    use crate::connection::recover::recover;
+
+    let (client, server_io) = tokio::io::duplex(64);
+    let (r, w) = tokio::io::split(server_io);
+    let fake_ticket = Ticket::new([0xBBu8; TICKET_LENGTH]);
+    let ip: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+
+    let res = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        recover(r, w, &fake_ticket, (0, 0), ip),
+    )
+    .await
+    .expect("recover should reject in_seq=0 without blocking on the stream")
+    .expect_err("recover must return an error for in_seq=0");
+
+    drop(client);
+    Ok(())
+}

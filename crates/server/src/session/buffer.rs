@@ -94,6 +94,12 @@ impl RecoverySendBuffer {
     }
 
     pub fn skip(&mut self, seq: u64) -> Result<(), RecoveryError> {
+        // Defensive guard: `u64::MAX` is the sentinel produced by an underflow
+        // in the caller (e.g. `in_seqs.0 - 1` when `in_seqs.0 == 0`). Reject it
+        // up front so we don't walk the entire buffer for nothing.
+        if seq == u64::MAX {
+            return Err(RecoveryError::NotFound { requested: seq });
+        }
         // skip items until we find the one with the requested sequence or we exhaust the buffer
         // If we exhaust the buffer without finding the requested sequence, return an error
         while let Some(item) = self.items.pop_front() {
@@ -104,6 +110,16 @@ impl RecoverySendBuffer {
             }
         }
         Err(RecoveryError::NotFound { requested: seq })
+    }
+
+    /// Smallest sequence number currently in the buffer, or 0 if empty.
+    pub fn head_seq(&self) -> u64 {
+        self.items.front().map(|item| item.seq).unwrap_or(0)
+    }
+
+    /// Largest sequence number currently in the buffer, or 0 if empty.
+    pub fn tail_seq(&self) -> u64 {
+        self.items.back().map(|item| item.seq).unwrap_or(0)
     }
 
     pub fn take_unsent_packet(&mut self) -> Option<(PayloadWithChannel, u64)> {
@@ -231,5 +247,47 @@ mod tests {
 
         assert!(buf.take_unsent_packet().is_none());
         assert!(buf.is_empty());
+    }
+
+    // Regression tests for vuln-0003: the recover path used to call
+    // `buffer.skip(in_seqs.0 - 1)` without validating the offset, which
+    // let a malformed Recover handshake empty the buffer and tear down
+    // the recovered session. The skip path now rejects `u64::MAX`
+    // upfront, and the caller (connection/recover.rs) bounds-checks the
+    // requested sequence against the buffer window before mutating
+    // anything.
+
+    #[test]
+    fn skip_rejects_u64_max_without_walking_buffer() {
+        let mut buf = RecoverySendBuffer::new(100);
+        buf.push(1, make_payload(3)).unwrap();
+        buf.push(2, make_payload(4)).unwrap();
+        let initial_len = buf.len();
+        assert_eq!(initial_len, 2);
+
+        // The pre-fix code would have walked both items, then returned
+        // NotFound. After the fix `u64::MAX` is rejected up front, but
+        // crucially the buffer must NOT be mutated as a side effect.
+        let err = buf.skip(u64::MAX).unwrap_err();
+        let RecoveryError::NotFound { requested } = err;
+        assert_eq!(requested, u64::MAX);
+        assert_eq!(
+            buf.len(),
+            initial_len,
+            "skip(u64::MAX) must not consume buffered items"
+        );
+    }
+
+    #[test]
+    fn head_seq_and_tail_seq_reflect_window() {
+        let mut buf = RecoverySendBuffer::new(100);
+        assert_eq!(buf.head_seq(), 0);
+        assert_eq!(buf.tail_seq(), 0);
+
+        buf.push(5, make_payload(3)).unwrap();
+        buf.push(6, make_payload(3)).unwrap();
+        buf.push(7, make_payload(3)).unwrap();
+        assert_eq!(buf.head_seq(), 5);
+        assert_eq!(buf.tail_seq(), 7);
     }
 }
