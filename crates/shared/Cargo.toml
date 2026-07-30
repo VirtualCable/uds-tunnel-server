@@ -5,6 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[features]
+# Test-only helpers (e.g. the deterministic ML-KEM-768 keypair in
+# `crypt::kem::debug`). Gated by feature so they never ship in release
+# binaries; downstream crates enable it from their `[dev-dependencies]`.
+test-utils = []
+
 [dependencies]
 # utilities
 anyhow.workspace = true

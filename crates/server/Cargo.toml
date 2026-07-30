@@ -37,5 +37,10 @@ async-trait.workspace = true
 flume.workspace = true
 
 [dev-dependencies]
+# Pull in the test-only helpers from `shared` (e.g. the deterministic
+# ML-KEM-768 keypair used by the integration tests). Enabling the feature
+# here makes it available to this crate's tests without leaking it into
+# release builds of `shared`.
+shared = { path = "../shared", features = ["test-utils"] }
 mockito.workspace = true
 serial_test.workspace = true

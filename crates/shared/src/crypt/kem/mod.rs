@@ -74,6 +74,12 @@ fn gen_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
     ))
 }
 
+// Test-only module: contains a hardcoded ML-KEM-768 keypair used by the
+// integration tests. Gated behind the `test-utils` feature (plus `cfg(test)`
+// for in-crate tests) so the private key never ends up in the release
+// binary's `.rodata`. Downstream crates enable the feature from their
+// `[dev-dependencies]`.
+#[cfg(any(test, feature = "test-utils"))]
 pub mod debug;
 
 #[cfg(test)]
