@@ -31,9 +31,6 @@ async fn setup_server_and_api(auth_token: &str) -> (mockito::ServerGuard, HttpBr
 
     log::info!("Setting up mock server and API client");
     let (private_key, public_key) = get_debug_kem_keypair_768();
-    // Store keys on /tmp for external checking
-    std::fs::write("/tmp/kem_private_key_768_testing.bin", private_key).unwrap();
-    std::fs::write("/tmp/kem_public_key_768_testing.bin", public_key).unwrap();
 
     let api = HttpBrokerApi::new(&url, auth_token, false).with_keys(private_key, public_key);
     // Pass the base url (without /ui) to the API

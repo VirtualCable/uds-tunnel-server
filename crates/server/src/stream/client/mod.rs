@@ -29,8 +29,6 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use std::io::Write;
-
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -67,8 +65,6 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
     }
     pub async fn run(&mut self) -> Result<()> {
         log::debug!("Starting client inbound stream");
-        // Create file on /tmp for debug dumping received data
-        let mut file = std::fs::File::create("/tmp/client_inbound.bin")?;
 
         // We can use a bigger buffer, because client will split data into CRYPT_PACKET_SIZE chunks
         let mut buffer = [0u8; 16384];
@@ -92,8 +88,6 @@ impl<R: AsyncReadExt + Unpin> TunnelClientInboundStream<R> {
                             break;
                         }
                         Ok(count) => {
-                            file.write_all(format!("***** BYTES: {} *****", count).as_bytes()).unwrap();
-                            file.write_all(&buffer[..count])?;
                             // Send to channel, fail if disconnected
                             self.send_data(&PayloadWithChannel::new(self.stream_channel_id, &buffer[..count])).await?;
                         }
@@ -156,7 +150,6 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
         }
     }
     pub async fn run(&mut self) -> Result<()> {
-        let mut file = std::fs::File::create("/tmp/client_outbound.bin")?;
         // Run on client side is mandatory. If run ends, stop must be set. in any case.
         log::debug!("Starting client outbound stream");
         loop {
@@ -167,7 +160,6 @@ impl<W: AsyncWriteExt + Unpin> TunnelClientOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(data) => {
-                            file.write_all(data.as_ref())?;
                             match self.writer.write_all(data.as_ref()).await {
                                 Ok(_) => {}
                                 Err(e) => {
