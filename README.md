@@ -83,5 +83,4 @@ Current version: 5.0.0
 
 ## License
 
-BSD 3-Clause License</content>
-<parameter name="filePath">/home/dkmaster/projects/uds/5.0/repos/tunnel/tunnel-server.md
+BSD 3-Clause License
