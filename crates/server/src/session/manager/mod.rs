@@ -158,15 +158,16 @@ impl SessionManager {
     }
 
     pub fn create_equiv_session(&self, to: &SessionId) -> Result<SessionId> {
-        // If too many entries, return err
-        {
-            let equivs = self.equivs.read().unwrap();
-            if equivs.len() >= consts::MAX_EQUIV_ENTRIES {
-                anyhow::bail!("Too many equivalent session entries");
-            }
-        }
+        // Check the bound and insert under the same write lock so two
+        // concurrent callers cannot both pass the check and overshoot
+        // `MAX_EQUIV_ENTRIES`. The previous read-then-write pattern
+        // had a narrow TOCTOU window; the limit is a soft DoS guard but
+        // there is no reason to leave it racey.
         let from = SessionId::new_random();
         let mut equivs = self.equivs.write().unwrap();
+        if equivs.len() >= consts::MAX_EQUIV_ENTRIES {
+            anyhow::bail!("Too many equivalent session entries");
+        }
         equivs.insert(from, *to);
         log::debug!("Created equivalent session {:?} from {:?}", from, to);
         Ok(from)
