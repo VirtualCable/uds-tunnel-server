@@ -53,5 +53,13 @@ pub const MAX_CHANNEL_ID: u16 = 8;
 // Ticket related constants
 pub const TICKET_LENGTH: usize = 48;
 
+/// Maximum declared length of a PROXY protocol v2 payload. The
+/// largest legitimate header is ~232 bytes (TCP6 address block plus
+/// a few TLVs); 512 leaves headroom for vendor extensions while
+/// rejecting the attacker-controlled 65535-byte declarations that
+/// would otherwise pin a server-side buffer until the slow read
+/// completes.
+pub const MAX_PROXY_V2_LEN: usize = 512;
+
 // Maximum length for error messages in the protocol
 pub const MAX_ERROR_MSG_LENGTH: usize = 512;

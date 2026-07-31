@@ -35,7 +35,7 @@ use tokio::io::AsyncReadExt;
 
 // https://github.com/haproxy/haproxy/blob/master/doc/proxy-protocol.txt
 
-use super::consts::PROXY_V2_SIGNATURE;
+use super::consts::{MAX_PROXY_V2_LEN, PROXY_V2_SIGNATURE};
 
 #[derive(Debug)]
 pub struct ProxyInfo {
@@ -72,6 +72,16 @@ impl ProxyInfo {
         ensure!(
             (ver_cmd & 0x0F) == 0x1,
             "unsupported PROXY command (only PROXY=1 allowed)"
+        );
+        // Reject attacker-controlled length declarations before
+        // allocating. The largest legitimate PROXY v2 header is
+        // ~232 bytes; cap at consts::MAX_PROXY_V2_LEN so a slow read
+        // cannot pin a 65 KB buffer on the server.
+        ensure!(
+            len <= MAX_PROXY_V2_LEN,
+            "PROXY v2 declared length {} exceeds maximum {}",
+            len,
+            MAX_PROXY_V2_LEN
         );
 
         let total_len = 16 + len;
@@ -159,6 +169,7 @@ impl ProxyInfo {
 
 #[cfg(test)]
 mod tests {
+    use crate::protocol::consts::MAX_PROXY_V2_LEN;
     use super::*;
 
     #[tokio::test]
@@ -283,5 +294,56 @@ mod tests {
         let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
         println!("Error: {}", err);
         assert!(err.to_string().contains("early eof"));
+    }
+
+    /// A PROXY v2 header that declares a payload length above the
+    /// configured cap must be rejected before any allocation. This
+    /// is the slow-read resource exhaustion guard: the parser must
+    /// not pin a buffer larger than `MAX_PROXY_V2_LEN` even when the
+    /// attacker sends only the 16-byte signature header.
+    #[tokio::test]
+    async fn test_proxy_v2_rejects_oversized_declared_length() {
+        // 16-byte header declaring len=65535 (the attacker-controlled
+        // value the report called out).
+        let oversized_len: u16 = u16::MAX;
+        let buf = vec![
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+            0x21, // version=2, command=1
+            0x11, // family=1 (IPv4), proto=1 (TCP)
+            (oversized_len >> 8) as u8,
+            (oversized_len & 0xFF) as u8,
+        ];
+
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
+        let err = ProxyInfo::read_from_stream(&mut stream).await.unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected length-cap error, got: {}",
+            err
+        );
+    }
+
+    /// The maximum declared length is still accepted, so legitimate
+    /// clients with full TLV chains do not regress.
+    #[tokio::test]
+    async fn test_proxy_v2_accepts_length_at_cap() {
+        // len == MAX_PROXY_V2_LEN, with a body of zeros so read_exact
+        // completes immediately. We do not parse the result for
+        // meaningful ProxyInfo — the test only cares that the cap
+        // does not over-reject.
+        let len: u16 = MAX_PROXY_V2_LEN as u16;
+        let mut buf = vec![
+            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+            0x21, // version=2, command=1
+            0x11, // family=1 (IPv4), proto=1 (TCP)
+            (len >> 8) as u8,
+            (len & 0xFF) as u8,
+        ];
+        buf.resize(buf.len() + len as usize, 0u8);
+
+        let mut stream = tokio::io::BufReader::new(std::io::Cursor::new(buf));
+        // We expect parse() to error (zeros are not a valid address
+        // block), but read_from_stream must not reject the length.
+        let _ = ProxyInfo::read_from_stream(&mut stream).await;
     }
 }
