@@ -12,7 +12,12 @@ pub struct OpenResponse {
 }
 
 impl OpenResponse {
-    pub fn new(session_id: Ticket, channel_count: u16, inbound_seq: u64, outbound_seq: u64) -> Self {
+    pub fn new(
+        session_id: Ticket,
+        channel_count: u16,
+        inbound_seq: u64,
+        outbound_seq: u64,
+    ) -> Self {
         OpenResponse {
             session_id,
             channel_count,
@@ -54,7 +59,12 @@ impl OpenResponse {
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("Failed to parse outbound sequence"))?,
         );
-        Ok(OpenResponse::new(session_id, channel_count, inbound_seq, outbound_seq))
+        Ok(OpenResponse::new(
+            session_id,
+            channel_count,
+            inbound_seq,
+            outbound_seq,
+        ))
     }
 }
 

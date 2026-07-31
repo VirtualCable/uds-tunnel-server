@@ -175,7 +175,10 @@ mod tests {
     fn validate_accepts_remotes_up_to_max_channel_id() {
         use shared::protocol::consts::MAX_CHANNEL_ID;
         let resp = make_response_with_n_remotes(MAX_CHANNEL_ID as usize);
-        assert!(resp.validate().is_ok(), "should accept exactly MAX_CHANNEL_ID");
+        assert!(
+            resp.validate().is_ok(),
+            "should accept exactly MAX_CHANNEL_ID"
+        );
     }
 
     #[test]

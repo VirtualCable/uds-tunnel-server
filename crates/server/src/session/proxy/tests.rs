@@ -392,7 +392,10 @@ async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
     let session = std::sync::Arc::new(new_session_for_test("127.0.0.1:1"));
     let mut channels = ClientChannels::new();
 
-    let err = channels.create_client(2, session.clone()).await.unwrap_err();
+    let err = channels
+        .create_client(2, session.clone())
+        .await
+        .unwrap_err();
     assert!(
         err.to_string().contains("only 1 remotes available"),
         "{}",
@@ -426,14 +429,11 @@ async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
     let mut channels = ClientChannels::new();
 
     let above_cap = shared::protocol::consts::MAX_CHANNEL_ID + 1;
-    let err = channels.create_client(above_cap, session)
+    let err = channels
+        .create_client(above_cap, session)
         .await
         .unwrap_err();
-    assert!(
-        err.to_string().contains("exceeds hard cap"),
-        "{}",
-        err
-    );
+    assert!(err.to_string().contains("exceeds hard cap"), "{}", err);
     assert_eq!(channels.slots_len(), 0);
     Ok(())
 }

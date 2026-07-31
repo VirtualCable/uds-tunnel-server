@@ -30,7 +30,7 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use anyhow::Result;
-use rand::{prelude::*, distr::Alphanumeric};
+use rand::{distr::Alphanumeric, prelude::*};
 
 // Re-export so callers can use `Ticket` and `TICKET_LENGTH` from the
 // same module without reaching into `super::consts`.

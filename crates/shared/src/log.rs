@@ -120,9 +120,17 @@ fn fallback_log_file(primary: &std::path::Path, primary_err: io::Error) -> fs::F
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/dev/stderr"));
 
-    let mode = if cfg!(debug_assertions) { "falling back" } else { "routing log to" };
+    let mode = if cfg!(debug_assertions) {
+        "falling back"
+    } else {
+        "routing log to"
+    };
 
-    match OpenOptions::new().create(true).append(true).open(&fallback_path) {
+    match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&fallback_path)
+    {
         Ok(f) => {
             eprintln!(
                 "udstunnel: failed to open log file {:?}: {}; {} {:?}",

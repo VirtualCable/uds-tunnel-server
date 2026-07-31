@@ -248,10 +248,7 @@ impl Session {
     /// the Recover handler, which used to TOCTOU-race itself when two
     /// recovery attempts on the same session interleaved).
     pub fn fetch_add_seqs(&self, in_delta: u64, out_delta: u64) -> (u64, u64) {
-        let mut seq_lock = self
-            .seq
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut seq_lock = self.seq.write().unwrap_or_else(|e| e.into_inner());
         let prev = *seq_lock;
         seq_lock.0 = prev.0.wrapping_add(in_delta);
         seq_lock.1 = prev.1.wrapping_add(out_delta);
@@ -411,12 +408,11 @@ mod tests {
             }));
         }
 
-        let mut all: Vec<(u64, u64)> =
-            futures::future::join_all(handles)
-                .await
-                .into_iter()
-                .flat_map(|h| h.expect("task panicked"))
-                .collect();
+        let mut all: Vec<(u64, u64)> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .flat_map(|h| h.expect("task panicked"))
+            .collect();
 
         // Every observation must be unique — no two callers saw the same
         // (inbound, outbound) pair, which is what the old TOCTOU code

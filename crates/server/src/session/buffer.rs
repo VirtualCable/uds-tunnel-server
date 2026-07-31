@@ -105,7 +105,11 @@ impl RecoverySendBuffer {
         while let Some(item) = self.items.pop_front() {
             self.current_bytes -= item.data.len();
             if item.seq == seq {
-                log::debug!("Found requested sequence {}, len {:?}", seq, item.data.len());
+                log::debug!(
+                    "Found requested sequence {}, len {:?}",
+                    seq,
+                    item.data.len()
+                );
                 return Ok(()); // Found the requested sequence, stop skipping
             }
         }

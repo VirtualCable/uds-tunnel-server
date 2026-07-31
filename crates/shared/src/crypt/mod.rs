@@ -29,7 +29,10 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-use aes_gcm::{AeadInOut, Aes256Gcm, Nonce, Tag, aead::{Aead, AeadCore, KeyInit}};
+use aes_gcm::{
+    AeadInOut, Aes256Gcm, Nonce, Tag,
+    aead::{Aead, AeadCore, KeyInit},
+};
 use anyhow::Result;
 
 use crate::log;
@@ -114,11 +117,7 @@ impl Crypt {
 
         let tag = self
             .cipher
-            .encrypt_inout_detached(
-                &nonce,
-                &aad,
-                (&mut data[..data_with_channel_length]).into(),
-            )
+            .encrypt_inout_detached(&nonce, &aad, (&mut data[..data_with_channel_length]).into())
             .map_err(|e| anyhow::anyhow!("encryption failure: {:?}", e))?;
         data[data_with_channel_length..data_with_channel_length + consts::TAG_LENGTH]
             .copy_from_slice(tag.as_slice());
@@ -413,11 +412,7 @@ mod tests {
         tampered.set_seq(original_seq.wrapping_add(1));
 
         let err = crypt.decrypt(&mut tampered).unwrap_err();
-        assert!(
-            err.to_string().contains("decryption failure"),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains("decryption failure"), "{}", err);
     }
 
     #[test]
@@ -443,11 +438,7 @@ mod tests {
         pkt.set_seq(99);
 
         let err = receiver.decrypt(&mut pkt).unwrap_err();
-        assert!(
-            err.to_string().contains("decryption failure"),
-            "{}",
-            err
-        );
+        assert!(err.to_string().contains("decryption failure"), "{}", err);
     }
 
     #[test]

@@ -109,7 +109,7 @@ where
                     )
                 })
         }
-        handshake::HandshakeAction::Recover { ticket, seqs} => {
+        handshake::HandshakeAction::Recover { ticket, seqs } => {
             recover::recover(reader, writer, &ticket, seqs, src_ip)
                 .await
                 .map_err(|e| {

@@ -31,13 +31,23 @@
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{utils::hex_to_bytes};
+use crate::utils::hex_to_bytes;
 
 use super::consts;
 
 // Hard type for shared secret
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+//
+// `Copy` is intentionally NOT derived: the 32-byte AES session key
+// must not be silently duplicated on every assignment. `Clone` is kept
+// because callers that explicitly need a copy (rare) can opt in and the
+// resulting `SharedSecret` is still zeroized on drop.
+//
+// `Zeroize` + `ZeroizeOnDrop` wipe the buffer when the value goes out
+// of scope, so a leaked core dump / VM snapshot does not retain the
+// key any longer than strictly necessary.
+#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SharedSecret([u8; 32]);
 
 /// This code block is implementing functionality for the `SharedSecret` struct in Rust. Here's a
@@ -105,12 +115,18 @@ impl PacketBuffer {
 
     // length is length of data + channel id (2 bytes)
     pub fn data_mut(&mut self) -> &mut [u8] {
-        let length = self.length().unwrap_or(consts::MAX_PACKET_SIZE).saturating_sub(2);
+        let length = self
+            .length()
+            .unwrap_or(consts::MAX_PACKET_SIZE)
+            .saturating_sub(2);
         &mut self.buffer[consts::DATA_START..consts::DATA_START + length]
     }
 
     pub fn data(&self) -> &[u8] {
-        let length = self.length().unwrap_or(consts::MAX_PACKET_SIZE).saturating_sub(2);
+        let length = self
+            .length()
+            .unwrap_or(consts::MAX_PACKET_SIZE)
+            .saturating_sub(2);
         &self.buffer[consts::DATA_START..consts::DATA_START + length]
     }
 

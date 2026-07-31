@@ -40,4 +40,3 @@ pub const BUFFER_SIZE: usize = MAX_PACKET_SIZE + 2 + HEADER_SIZE; // 2 bytes for
 pub const HEADER_START: usize = 0;
 pub const CHANNEL_ID_START: usize = HEADER_SIZE;
 pub const DATA_START: usize = HEADER_SIZE + 2;
-

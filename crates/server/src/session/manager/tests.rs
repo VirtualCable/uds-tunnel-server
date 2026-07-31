@@ -32,7 +32,7 @@ use super::*;
 use shared::{
     crypt::types::SharedSecret,
     log,
-    protocol::ticket::{self, Ticket, TICKET_LENGTH},
+    protocol::ticket::{self, TICKET_LENGTH, Ticket},
     system::trigger::Trigger,
 };
 

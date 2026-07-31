@@ -39,7 +39,6 @@ use tokio::io::{AsyncWriteExt, DuplexStream};
 use shared::{
     crypt::{
         Crypt,
-        kem::{debug::get_debug_kem_keypair_768, set_comms_keypair},
         tunnel::derive_tunnel_material,
         types::{PacketBuffer, SharedSecret},
     },
@@ -88,12 +87,6 @@ async fn setup_testing_connection(
 
     let mut server = Server::new_async().await;
     let url = server.url() + "/"; // For testing, our base URL will be the mockito server
-
-    // Set global comms config to known testint values
-    {
-        let (private_key, public_key) = get_debug_kem_keypair_768();
-        set_comms_keypair(private_key, public_key);
-    }
 
     // Setup global config for tests
     {
@@ -253,18 +246,13 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
 
     out_crypt
-        .write(
-            &mut client_stream,
-            TEST_STREAM_CHANNEL_ID,
-            ticket.as_ref(),
-        )
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
         .await?;
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let (session_response_data, stream_channel_id) = in_crypt
-        .read(&mut client_stream, &mut buffer)
-        .await?;
+    let (session_response_data, stream_channel_id) =
+        in_crypt.read(&mut client_stream, &mut buffer).await?;
 
     log::debug!(
         "Received session response on channel {}: {:?}",
@@ -303,19 +291,11 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     );
     let get_request = get_request.as_bytes();
     out_crypt
-        .write(
-            &mut client_stream,
-            TEST_STREAM_CHANNEL_ID,
-            get_request,
-        )
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, get_request)
         .await?;
     // Read response (also encrypted)
-    let response = read_until_close(
-        &mut in_crypt,
-        &mut client_stream,
-        TEST_STREAM_CHANNEL_ID,
-    )
-    .await?;
+    let response =
+        read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID).await?;
 
     log::info!("Received response: {}", response);
     assert!(response.contains("HTTP/1.1 200 OK"));
@@ -409,11 +389,7 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
     let ticket = Ticket::new_random();
     let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
     let send_result = out_crypt
-        .write(
-            &mut client_stream,
-            TEST_STREAM_CHANNEL_ID,
-            ticket.as_ref(),
-        )
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
         .await;
 
     // Expect close on response
@@ -482,18 +458,12 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         )
     };
     out_crypt
-        .write(
-            &mut client_stream,
-            TEST_STREAM_CHANNEL_ID,
-            ticket.as_ref(),
-        )
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
         .await?;
     // Must respond with the session id now
     let mut buffer: PacketBuffer = PacketBuffer::new();
     log::debug!("Waiting for session id response from server");
-    let (session_response_data, channel) = in_crypt
-        .read(&mut client_stream, &mut buffer)
-        .await?;
+    let (session_response_data, channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
     assert_eq!(
         channel, TEST_STREAM_CHANNEL_ID,
         "Channel mismatch in response"
@@ -524,9 +494,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt
-        .write(&mut client_stream, 1, get_request)
-        .await?;
+    out_crypt.write(&mut client_stream, 1, get_request).await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 1");
     let response = read_until_close(&mut in_crypt, &mut client_stream, 1).await?;
@@ -548,9 +516,7 @@ async fn test_connection_proxy_working() -> anyhow::Result<()> {
         TEST_REMOTE_SERVER
     );
     let get_request = get_request.as_bytes();
-    out_crypt
-        .write(&mut client_stream, 2, get_request)
-        .await?;
+    out_crypt.write(&mut client_stream, 2, get_request).await?;
     // Read response (also encrypted)
     log::debug!("Waiting for GET response from server on channel 2");
     let response = read_until_close(&mut in_crypt, &mut client_stream, 2).await?;

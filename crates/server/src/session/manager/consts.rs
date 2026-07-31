@@ -35,4 +35,3 @@
 // from `add_session` plus at most one entry from the latest Recover),
 // so a hard cap is unreachable. Kept as a placeholder for any future
 // constants the manager might need.
-

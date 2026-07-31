@@ -32,6 +32,7 @@
 use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroize;
 
 use crate::{log, protocol::ticket};
 
@@ -75,12 +76,23 @@ pub fn derive_tunnel_material(
 
     // Note: The key_send is the key used by sender, so we use this key for decrypting recived data (inbound)
     // and key_receive is the key used by receiver, so we use this key for encrypting data to send (outbound)
-    Ok(Material {
+    let material = Material {
         key_payload: key_payload.into(),
         key_receive: key_send.into(),
         key_send: key_receive.into(),
         nonce_payload,
-    })
+    };
+
+    // Zeroize the HKDF output before it goes out of scope. The
+    // `key_*` arrays have already been moved into the `SharedSecret`
+    // fields of `material`, so they are gone from the stack. The
+    // `SharedSecret` fields are `ZeroizeOnDrop` and will be wiped
+    // when `material` is eventually consumed by `get_tunnel_crypts`
+    // and dropped. `okm` itself still holds every derived byte
+    // (3 key segments + nonce) and must be wiped explicitly.
+    okm.zeroize();
+
+    Ok(material)
 }
 
 /// Returns (inbound, outbound) crypts

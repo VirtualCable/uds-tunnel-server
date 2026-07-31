@@ -47,19 +47,23 @@ pub struct Payload {
 
 impl From<Vec<u8>> for Payload {
     fn from(value: Vec<u8>) -> Self {
-        Payload {data: value}
+        Payload { data: value }
     }
 }
 
 impl<const N: usize> From<&[u8; N]> for Payload {
     fn from(value: &[u8; N]) -> Self {
-        Payload {data: value.to_vec()}
+        Payload {
+            data: value.to_vec(),
+        }
     }
 }
 
 impl From<&[u8]> for Payload {
     fn from(value: &[u8]) -> Self {
-        Payload {data: value.to_vec()}
+        Payload {
+            data: value.to_vec(),
+        }
     }
 }
 
