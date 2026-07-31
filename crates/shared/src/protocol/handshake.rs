@@ -120,9 +120,9 @@ impl Handshake {
                 let action = match cmd {
                     HandshakeCommand::Open => {
                         let ticket: Ticket = ticket_buf.into();
-                        // Defense in depth (vuln-0008): reject non-alphanumeric
-                        // tickets at the earliest possible point so they do not
-                        // flow into HKDF salt or session lookup keys.
+                        // Defense in depth: reject non-alphanumeric tickets at
+                        // the earliest possible point so they do not flow into
+                        // HKDF salt or session lookup keys.
                         ticket.validate().map_err(|e| {
                             ErrorWithAddres::new(
                                 ip,
@@ -295,11 +295,10 @@ mod tests {
         }
     }
 
-    /// Regression test for vuln-0008: `Ticket::validate()` must run on
-    /// tickets received from the wire. Non-alphanumeric bytes are
-    /// rejected at handshake parse time and never reach the HKDF salt
-    /// or the session manager lookup. Same check applies to both the
-    /// `Open` and `Recover` paths.
+    /// `Ticket::validate()` must run on tickets received from the wire.
+    /// Non-alphanumeric bytes are rejected at handshake parse time
+    /// and never reach the HKDF salt or the session manager lookup.
+    /// Same check applies to both the `Open` and `Recover` paths.
     #[tokio::test]
     async fn test_handshake_parse_rejects_non_alphanumeric_ticket_open() {
         let mut data = Vec::new();

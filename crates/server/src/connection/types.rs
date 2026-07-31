@@ -115,10 +115,10 @@ mod tests {
         assert_eq!(open_response.channel_count, 65535);
     }
 
-    /// Regression test for the defense-in-depth cap introduced together
-    /// with vuln-0002. The `connect` path must never advertise a
-    /// `channel_count` larger than `MAX_CHANNEL_ID`, regardless of what
-    /// the broker returned.
+    /// The `connect` path must never advertise a `channel_count` larger
+    /// than `MAX_CHANNEL_ID`, regardless of what the broker returned.
+    /// This is the defense-in-depth cap that bounds the per-session
+    /// channel count even when the broker is unexpectedly permissive.
     #[test]
     fn test_open_response_channel_count_matches_remotes() {
         // The validate() call in `broker::response::TicketResponse::validate`

@@ -608,10 +608,10 @@ async fn test_connection_invalid_remote() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Regression tests for vuln-0003: a malformed Recover handshake could
-// empty the recovery buffer and tear down the recovered session. The
-// fix validates `in_seqs.0` against the buffer's window before mutating
-// any session state.
+// A malformed Recover handshake must not empty the recovery buffer and
+// tear down the recovered session. The Recover path validates
+// `in_seqs.0` against the buffer's window before mutating any session
+// state, so the checks below run before any network side-effects.
 
 #[serial_test::serial(manager)]
 #[tokio::test]

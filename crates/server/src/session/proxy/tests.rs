@@ -362,11 +362,10 @@ async fn reattach_server_works() -> Result<()> {
     Ok(())
 }
 
-// Regression tests for the bounds-check on `create_client`. Without these
-// checks an attacker (or buggy client) holding a valid ticket could either
-// grow `clients_senders` up to `u16::MAX` (memory DoS) or trigger an
-// out-of-bounds index into `session.remotes` (panic). See
-// `strix_runs/.../vuln-0002.md`.
+// Regression tests for the bounds-check on `create_client`. Without
+// these checks an attacker (or buggy client) holding a valid ticket
+// could either grow `clients_senders` up to `u16::MAX` (memory DoS)
+// or trigger an out-of-bounds index into `session.remotes` (panic).
 #[tokio::test]
 async fn create_client_rejects_channel_id_zero() -> Result<()> {
     use super::channels::ClientChannels;

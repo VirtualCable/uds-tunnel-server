@@ -277,11 +277,10 @@ async fn test_remove_equiv_session() {
     assert!(manager.get_equiv_session(&equiv_session_id).is_none());
 }
 
-/// Regression test for vuln-0005: `remove_session` must clear the
-/// session's current equiv id so it stops resolving once the session
-/// is gone. (Before phase 2, the manager kept a HashMap of equiv
-/// entries that needed to be cleaned up; after phase 2 the equiv id
-/// lives inside the Session and is dropped together with it.)
+/// `remove_session` must clear the session's current equiv id so it
+/// stops resolving once the session is gone. The equiv id lives
+/// inside the `Session` (one slot per session), so removing the
+/// session from the manager is enough to retire the equiv entry.
 #[tokio::test]
 async fn test_remove_session_clears_current_equiv_id() {
     let manager = SessionManager::new();
@@ -298,10 +297,10 @@ async fn test_remove_session_clears_current_equiv_id() {
     assert!(manager.get_session(session.id()).is_none());
 }
 
-/// Regression test for vuln-0005: the recover pattern "remove old equiv,
-/// mint new equiv" must not accumulate entries. Simulating the loop
-/// directly on the manager (no broker / handshake needed) verifies that
-/// the invariant holds no matter how many recovers happen.
+/// The recover pattern "remove old equiv, mint new equiv" must not
+/// accumulate entries. Simulating the loop directly on the manager
+/// (no broker / handshake needed) verifies that the invariant holds
+/// no matter how many recovers happen.
 #[tokio::test]
 async fn test_equivs_do_not_accumulate_across_recoveries() {
     let manager = SessionManager::new();
@@ -344,10 +343,9 @@ async fn test_equivs_do_not_accumulate_across_recoveries() {
     }
 }
 
-/// Regression test for vuln-0005: a recover that removes its old equiv id
-/// and mints a new one must leave exactly one live equiv for the session
-/// (no idempotent self-entry in phase 2), and the old equiv must no
-/// longer resolve.
+/// A recover that removes its old equiv id and mints a new one must
+/// leave exactly one live equiv for the session, and the old equiv
+/// must no longer resolve.
 #[tokio::test]
 async fn test_recover_invalidates_old_equiv_id() {
     let manager = SessionManager::new();

@@ -253,13 +253,12 @@ mod tests {
         assert!(buf.is_empty());
     }
 
-    // Regression tests for vuln-0003: the recover path used to call
-    // `buffer.skip(in_seqs.0 - 1)` without validating the offset, which
-    // let a malformed Recover handshake empty the buffer and tear down
-    // the recovered session. The skip path now rejects `u64::MAX`
-    // upfront, and the caller (connection/recover.rs) bounds-checks the
-    // requested sequence against the buffer window before mutating
-    // anything.
+    // The recover path used to call `buffer.skip(in_seqs.0 - 1)`
+    // without validating the offset, which let a malformed Recover
+    // handshake empty the buffer and tear down the recovered session.
+    // The skip path now rejects `u64::MAX` upfront, and the caller
+    // (connection/recover.rs) bounds-checks the requested sequence
+    // against the buffer window before mutating anything.
 
     #[test]
     fn skip_rejects_u64_max_without_walking_buffer() {
