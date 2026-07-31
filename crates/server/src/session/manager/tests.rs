@@ -36,6 +36,8 @@ use shared::{
     system::trigger::Trigger,
 };
 
+use crate::config;
+
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -438,4 +440,43 @@ async fn test_equiv_id_is_session_scoped() {
     assert_eq!(session_a.current_equiv_id(), Some(equiv_a));
     assert_eq!(session_b.current_equiv_id(), Some(equiv_b));
     assert_ne!(session_a.current_equiv_id(), session_b.current_equiv_id());
+}
+
+/// `add_session` must respect the `max_sessions` cap from the server
+/// config so the O(n) lookup paths in `get_equiv_session` /
+/// `remove_equiv_session` cannot be made to degrade indefinitely by
+/// flooding the manager with sessions.
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn test_add_session_respects_max_sessions_cap() {
+    let manager = SessionManager::new();
+
+    // Force a tiny cap so the test stays cheap.
+    {
+        let cfg = config::get();
+        cfg.write().unwrap().max_sessions = Some(2);
+    }
+
+    let _a = manager
+        .add_session(new_session_for_test("127.0.0.1:1"))
+        .expect("first session fits under cap");
+    let _b = manager
+        .add_session(new_session_for_test("127.0.0.1:2"))
+        .expect("second session fits under cap");
+    let rejected = manager.add_session(new_session_for_test("127.0.0.1:3"));
+    assert!(
+        rejected.is_err(),
+        "third session must be refused once at cap"
+    );
+    assert_eq!(manager.count(), 2);
+
+    // Free up a slot and ensure the manager accepts again.
+    manager.remove_session(_a.id());
+    let _c = manager
+        .add_session(new_session_for_test("127.0.0.1:4"))
+        .expect("after freeing a slot the manager accepts again");
+    assert_eq!(manager.count(), 2);
+
+    // Reset the cap so subsequent tests see the production default.
+    config::get().write().unwrap().max_sessions = None;
 }

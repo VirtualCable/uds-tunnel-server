@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, OnceLock, RwLock},
 };
 
-use crate::consts::CONFIGFILE_PATH;
+use crate::consts::{CONFIGFILE_PATH, DEFAULT_MAX_SESSIONS};
 
 #[derive(serde::Deserialize)]
 pub struct ServerConfig {
@@ -16,11 +16,17 @@ pub struct ServerConfig {
     pub verify_ssl: Option<bool>, // Whether to verify SSL certificates on broker API: default: true
     pub broker_auth_token: String, // Auth token for the broker API
     pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in Kb, default: 64 (kb)
+    pub max_sessions: Option<usize>, // Hard cap on concurrent sessions, default: DEFAULT_MAX_SESSIONS (8192)
 }
 
 impl ServerConfig {
     pub fn from_toml_str(toml_str: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(toml_str)
+    }
+
+    /// Effective session cap, falling back to the default when unset.
+    pub fn max_sessions(&self) -> usize {
+        self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
     }
 
     pub fn listen_sockaddr(&self) -> SocketAddr {
@@ -57,6 +63,7 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     verify_ssl: None,
                     broker_auth_token: "".to_string(),
                     recovery_buffer_size: None,
+                    max_sessions: None,
                 }
             };
 

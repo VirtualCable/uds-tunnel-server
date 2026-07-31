@@ -48,3 +48,11 @@ pub const DEFAULT_LOG_LEVEL: &str = "debug";
 
 #[cfg(not(debug_assertions))]
 pub const DEFAULT_LOG_LEVEL: &str = "info";
+
+/// Default hard cap on concurrent sessions. Sized for a single-server
+/// deployment expected to handle a few thousand concurrent tunnels
+/// (each one keeps an open TCP connection + the per-session proxy
+/// task + the recovery buffer). Exceeding the cap rejects the new
+/// Open handshake at the SessionManager level — see
+/// `ServerConfig::max_sessions` for the override knob.
+pub const DEFAULT_MAX_SESSIONS: usize = 8192;

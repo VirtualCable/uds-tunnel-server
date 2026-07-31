@@ -37,6 +37,7 @@ use anyhow::Result;
 use shared::log;
 use shared::protocol::{PayloadWithChannelReceiver, PayloadWithChannelSender};
 
+use crate::config;
 use crate::session::SessionRecoveryBuffer;
 
 use super::{Session, SessionId};
@@ -67,8 +68,31 @@ impl SessionManager {
     }
 
     /// Register a freshly built session.
+    ///
+    /// Rejects the insertion when the manager is already holding
+    /// `config::ServerConfig::max_sessions()` entries (default 8192).
+    /// Capping the active set keeps the O(n) lookup paths in
+    /// `get_equiv_session` / `remove_equiv_session` bounded even
+    /// under session-flood conditions.
     pub fn add_session(&self, session: Session) -> Result<Arc<Session>> {
+        let max = config::get().read().unwrap().max_sessions();
         let mut sessions = self.sessions.write().unwrap();
+        if sessions.len() >= max {
+            log::warn!(
+                "Refusing new session: SessionManager at cap ({} of {})",
+                sessions.len(),
+                max
+            );
+            // Drop the local `Session` here so its Drop impl triggers
+            // the proxy shutdown; the proxy's exit path will call
+            // `remove_session(&self)` with an id that is not in the
+            // map, which is a no-op under the `if let Some` guard.
+            return Err(anyhow::anyhow!(
+                "SessionManager at cap ({} sessions, max {})",
+                sessions.len(),
+                max
+            ));
+        }
         let session = Arc::new(session);
         sessions.insert(session.id, session.clone());
         Ok(session)
@@ -99,6 +123,12 @@ impl SessionManager {
     pub fn count(&self) -> usize {
         let sessions = self.sessions.read().unwrap();
         sessions.len()
+    }
+
+    /// Effective cap from `ServerConfig::max_sessions()`. Convenience
+    /// for tests and for the connection layer when logging rejections.
+    pub fn max_sessions(&self) -> usize {
+        config::get().read().unwrap().max_sessions()
     }
 
     pub async fn start_server(&self, id: &SessionId) -> Result<()> {
