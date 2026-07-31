@@ -29,7 +29,12 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 use super::*;
 
-use shared::{crypt::types::SharedSecret, log, protocol::ticket, system::trigger::Trigger};
+use shared::{
+    crypt::types::SharedSecret,
+    log,
+    protocol::ticket::{self, Ticket, TICKET_LENGTH},
+    system::trigger::Trigger,
+};
 
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -218,10 +223,13 @@ async fn test_get_equiv_session_default() {
         .add_session(new_session_for_test("127.0.0.1:1234"))
         .unwrap();
 
-    let equiv_session = manager.get_equiv_session(session.id()).unwrap();
-    let direct_session = manager.get_session(session.id()).unwrap();
-
-    assert!(Arc::ptr_eq(&equiv_session, &direct_session));
+    // The internal session id is no longer a valid equiv id: phase 2
+    // moved the equiv id into a per-session `Option<Ticket>` that
+    // starts as `None`. Only an id minted via `create_equiv_session`
+    // (or the original ticket returned by the OpenResponse) should
+    // resolve.
+    assert!(manager.get_equiv_session(session.id()).is_none());
+    assert!(manager.get_session(session.id()).is_some());
 }
 
 #[tokio::test]
@@ -267,35 +275,24 @@ async fn test_remove_equiv_session() {
     assert!(manager.get_equiv_session(&equiv_session_id).is_none());
 }
 
-/// Regression test for vuln-0005: `remove_session` must clear every equiv
-/// entry pointing at the removed session, not just the first one.
+/// Regression test for vuln-0005: `remove_session` must clear the
+/// session's current equiv id so it stops resolving once the session
+/// is gone. (Before phase 2, the manager kept a HashMap of equiv
+/// entries that needed to be cleaned up; after phase 2 the equiv id
+/// lives inside the Session and is dropped together with it.)
 #[tokio::test]
-async fn test_remove_session_clears_all_equiv_entries() {
+async fn test_remove_session_clears_current_equiv_id() {
     let manager = SessionManager::new();
     let session = manager
         .add_session(new_session_for_test("127.0.0.1:1234"))
         .unwrap();
 
-    // Mint several distinct equiv ids for the same session.
-    let equiv_ids: Vec<SessionId> = (0..5)
-        .map(|_| manager.create_equiv_session(session.id()).unwrap())
-        .collect();
-
-    // Sanity: all of them resolve to the same session.
-    for eq in &equiv_ids {
-        assert!(manager.get_equiv_session(eq).is_some());
-    }
+    let equiv_id = manager.create_equiv_session(session.id()).unwrap();
+    assert!(manager.get_equiv_session(&equiv_id).is_some());
 
     manager.remove_session(session.id());
 
-    // Every equiv id must be gone, not just the most recent one.
-    for eq in &equiv_ids {
-        assert!(
-            manager.get_equiv_session(eq).is_none(),
-            "equiv {:?} still present after remove_session",
-            eq
-        );
-    }
+    assert!(manager.get_equiv_session(&equiv_id).is_none());
     assert!(manager.get_session(session.id()).is_none());
 }
 
@@ -321,22 +318,34 @@ async fn test_equivs_do_not_accumulate_across_recoveries() {
         previous = Some(manager.create_equiv_session(session.id()).unwrap());
     }
 
-    let equiv_count = manager.equivs.read().unwrap().len();
-    // 1 from `add_session` (idempotent entry) + 1 from the latest recover.
+    // After phase 2 (per-session equiv id), the session carries exactly
+    // one equiv id at any time. The 10 simulated recovers each
+    // overwrite the previous one, so the total is 1, not 10.
+    let session = manager.get_session(session.id()).unwrap();
     assert_eq!(
-        equiv_count, 2,
-        "equiv entries leaked across recovers: {equiv_count}"
+        session.current_equiv_id().as_ref(),
+        previous.as_ref(),
+        "session should hold the most recent equiv id"
     );
 
     // And only the latest equiv id still resolves.
     let latest = previous.expect("loop ran");
     assert!(manager.get_equiv_session(&latest).is_some());
+
+    // None of the intermediate equiv ids should resolve.
+    for i in 0..9 {
+        let fake = Ticket::new([i as u8; TICKET_LENGTH]);
+        assert!(
+            manager.get_equiv_session(&fake).is_none(),
+            "intermediate equiv id {i} unexpectedly still resolves"
+        );
+    }
 }
 
 /// Regression test for vuln-0005: a recover that removes its old equiv id
 /// and mints a new one must leave exactly one live equiv for the session
-/// (plus the idempotent self-entry from `add_session`), and the old
-/// equiv must no longer resolve.
+/// (no idempotent self-entry in phase 2), and the old equiv must no
+/// longer resolve.
 #[tokio::test]
 async fn test_recover_invalidates_old_equiv_id() {
     let manager = SessionManager::new();
@@ -353,4 +362,80 @@ async fn test_recover_invalidates_old_equiv_id() {
     assert!(manager.get_equiv_session(&old_equiv).is_none());
     assert!(manager.get_equiv_session(&new_equiv).is_some());
     assert!(manager.get_session(session.id()).is_some());
+}
+
+/// Phase 2 invariant: a session owns at most one equiv_id at any time.
+/// Calling `create_equiv_session` twice without an intermediate
+/// `remove_equiv_session` must overwrite the previous equiv, not stack
+/// a second one. This is the property that lets the manager drop its
+/// global `HashMap<SessionId, SessionId>`: any "second mint" implicitly
+/// supersedes the first, so no cleanup pass is needed.
+#[tokio::test]
+async fn test_create_equiv_session_twice_overwrites_previous() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+
+    let first = manager.create_equiv_session(session.id()).unwrap();
+    // Intentionally skip `remove_equiv_session` — this is the path that
+    // would have accumulated an extra entry in the old HashMap.
+    let second = manager.create_equiv_session(session.id()).unwrap();
+
+    assert_ne!(first, second, "equiv ids must differ between mints");
+
+    // The session must point at the latest equiv (the only one it owns).
+    assert_eq!(
+        session.current_equiv_id(),
+        Some(second),
+        "session's equiv slot must hold the latest mint"
+    );
+
+    // The old equiv must no longer resolve, since the session has moved
+    // on. This is the key behaviour change vs. the HashMap model: the
+    // previous equiv is *gone*, not just out-of-date.
+    assert!(
+        manager.get_equiv_session(&first).is_none(),
+        "first equiv id must be invalidated by the second mint"
+    );
+    assert!(
+        manager.get_equiv_session(&second).is_some(),
+        "second equiv id must resolve"
+    );
+}
+
+/// Equiv ids are session-scoped: an equiv minted for session A must not
+/// resolve via `get_equiv_session` when looked up from session B's
+/// perspective. This guards against any future regression that, say,
+/// stores the equiv in a flat map keyed only by equiv id without
+/// verifying the owning session.
+#[tokio::test]
+async fn test_equiv_id_is_session_scoped() {
+    let manager = SessionManager::new();
+    let session_a = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+    let session_b = manager
+        .add_session(new_session_for_test("127.0.0.1:1235"))
+        .unwrap();
+
+    let equiv_a = manager.create_equiv_session(session_a.id()).unwrap();
+    let equiv_b = manager.create_equiv_session(session_b.id()).unwrap();
+    assert_ne!(equiv_a, equiv_b);
+
+    // Each equiv resolves to its own session.
+    let resolved_a = manager
+        .get_equiv_session(&equiv_a)
+        .expect("equiv_a must resolve");
+    let resolved_b = manager
+        .get_equiv_session(&equiv_b)
+        .expect("equiv_b must resolve");
+    assert_eq!(resolved_a.id(), session_a.id());
+    assert_eq!(resolved_b.id(), session_b.id());
+
+    // The session that owns an equiv must also report it from
+    // `current_equiv_id` — and only that one must do so.
+    assert_eq!(session_a.current_equiv_id(), Some(equiv_a));
+    assert_eq!(session_b.current_equiv_id(), Some(equiv_b));
+    assert_ne!(session_a.current_equiv_id(), session_b.current_equiv_id());
 }

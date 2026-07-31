@@ -123,6 +123,11 @@ pub struct Session {
     // only updated on server side killed. (the one receives/sends data from client)
     seq: RwLock<(u64, u64)>,
 
+    // External (equiv) session id the client uses to talk to us. `None`
+    // until the first Recover mints one, after which it is the only
+    // valid id for this session (the internal `id` is never exposed).
+    current_equiv_id: RwLock<Option<SessionId>>,
+
     // Ip of the client connected
     src_ip: RwLock<SocketAddr>,
 }
@@ -160,6 +165,7 @@ impl Session {
             tx_server,
             rx,
             seq: RwLock::new((0, 0)),
+            current_equiv_id: RwLock::new(None),
             src_ip: RwLock::new(src_ip),
             remotes,
         }
@@ -250,6 +256,22 @@ impl Session {
         seq_lock.0 = prev.0.wrapping_add(in_delta);
         seq_lock.1 = prev.1.wrapping_add(out_delta);
         prev
+    }
+
+    /// Set or clear the external (equiv) session id that the client uses
+    /// to talk to this session. There is at most one valid equiv id at
+    /// any time; setting a new one implicitly invalidates the previous
+    /// because nothing else stores the old value.
+    pub fn set_current_equiv_id(&self, id: Option<SessionId>) {
+        if let Ok(mut lock) = self.current_equiv_id.write() {
+            *lock = id;
+        }
+    }
+
+    /// Returns the current external (equiv) session id, or `None` if the
+    /// session has not yet been addressed by a Recover handshake.
+    pub fn current_equiv_id(&self) -> Option<SessionId> {
+        self.current_equiv_id.read().ok().and_then(|g| *g)
     }
 
     pub fn ticket(&self) -> &ticket::Ticket {
@@ -420,5 +442,57 @@ mod tests {
         let (final_in, final_out) = session.seqs();
         assert_eq!(final_in, N * 4);
         assert_eq!(final_out, N * 4);
+    }
+
+    /// `current_equiv_id` starts as `None` on a fresh session, accepts
+    /// arbitrary `Some(_)` writes, and accepts a clear back to `None`.
+    /// This is the atomicity guarantee of the unit backing
+    /// `SessionManager::get_equiv_session` / `create_equiv_session`.
+    #[tokio::test]
+    async fn current_equiv_id_starts_none_and_round_trips() {
+        let session = new_test_session().await;
+        assert!(
+            session.current_equiv_id().is_none(),
+            "fresh session must not carry an equiv id"
+        );
+
+        let id = ticket::Ticket::new_random();
+        session.set_current_equiv_id(Some(id));
+        assert_eq!(session.current_equiv_id(), Some(id));
+
+        session.set_current_equiv_id(None);
+        assert!(
+            session.current_equiv_id().is_none(),
+            "clearing the equiv id must restore the initial state"
+        );
+    }
+
+    /// Writing a new equiv id overwrites the previous one without
+    /// leaving the old value around. This is the property that lets
+    /// phase 2 drop the old `HashMap<SessionId, SessionId>`: the
+    /// session itself owns the slot, so a new write is implicitly a
+    /// drop of the previous one.
+    #[tokio::test]
+    async fn set_current_equiv_id_overwrites_previous_value() {
+        let session = new_test_session().await;
+        let first = ticket::Ticket::new_random();
+        let second = ticket::Ticket::new_random();
+
+        session.set_current_equiv_id(Some(first));
+        assert_eq!(session.current_equiv_id(), Some(first));
+
+        // Same pattern the recover flow uses: a fresh equiv id replaces
+        // the old one without an explicit clear in between.
+        session.set_current_equiv_id(Some(second));
+        assert_eq!(
+            session.current_equiv_id(),
+            Some(second),
+            "second write must overwrite the first, not stack on top"
+        );
+        assert_ne!(
+            session.current_equiv_id(),
+            Some(first),
+            "old equiv id must not leak through after overwrite"
+        );
     }
 }

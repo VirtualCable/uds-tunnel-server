@@ -32,7 +32,9 @@
 use anyhow::Result;
 use rand::{prelude::*, distr::Alphanumeric};
 
-use super::consts::TICKET_LENGTH;
+// Re-export so callers can use `Ticket` and `TICKET_LENGTH` from the
+// same module without reaching into `super::consts`.
+pub use super::consts::TICKET_LENGTH;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ticket([u8; TICKET_LENGTH]);

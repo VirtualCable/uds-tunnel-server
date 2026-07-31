@@ -47,18 +47,13 @@ pub static SESSION_MANAGER: OnceLock<SessionManager> = OnceLock::new();
 
 pub struct SessionManager {
     sessions: RwLock<HashMap<SessionId, Arc<Session>>>,
-    // For equivalent sessions mapping. Cleaned deterministically on
-    // `remove_session` and `recover::recover`; no lazy background sweep.
-    equivs: RwLock<HashMap<SessionId, SessionId>>,
 }
 
 impl fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let sessions = self.sessions.read().unwrap();
-        let equivs = self.equivs.read().unwrap();
         f.debug_struct("SessionManager")
             .field("sessions_count", &sessions.len())
-            .field("equivs_count", &equivs.len())
             .finish()
     }
 }
@@ -68,30 +63,14 @@ impl SessionManager {
     fn new() -> Self {
         SessionManager {
             sessions: RwLock::new(HashMap::new()),
-            equivs: RwLock::new(HashMap::new()),
         }
     }
 
-    // A new session is created with a new session id
-    // Also add an idempotent entry in equivs, so wen recovering from this session id works
-    // Without no more checks
+    /// Register a freshly built session.
     pub fn add_session(&self, session: Session) -> Result<Arc<Session>> {
-        let session = {
-            let mut sessions = self.sessions.write().unwrap();
-            let session = Arc::new(session);
-            sessions.insert(session.id, session.clone());
-            session
-        };
-        // Also, insert an idempotent entry in equivs
-        {
-            let mut equivs = self.equivs.write().unwrap();
-            debug_assert!(
-                equivs.len() < 1024,
-                "equiv entries growing unexpectedly: {}",
-                equivs.len()
-            );
-            equivs.insert(session.id, session.id);
-        }
+        let mut sessions = self.sessions.write().unwrap();
+        let session = Arc::new(session);
+        sessions.insert(session.id, session.clone());
         Ok(session)
     }
 
@@ -106,13 +85,9 @@ impl SessionManager {
             session.stop.trigger();
             sessions.remove(id);
         }
-        // Also clean up any equiv entries pointing at this session so we
-        // do not leak memory on long-lived processes that handle many
-        // connections. The lazy 16-second cleanup is a safety net, not
-        // the primary mechanism.
-        drop(sessions);
-        let mut equivs = self.equivs.write().unwrap();
-        equivs.retain(|_, orig| *orig != *id);
+        // The session's `current_equiv_id` lives inside the Session and
+        // is dropped together with the Arc, so no global equiv map needs
+        // to be cleaned up here.
     }
 
     pub async fn finish_all_sessions(&self) {
@@ -154,40 +129,42 @@ impl SessionManager {
         }
     }
 
-    /// Note: equivs will fail if the target session is removed or the equiv entry does not exist
+    /// Look up a session by its external (equiv) id. Only the equiv id
+    /// that the client knows is accepted; the internal session id is
+    /// never exposed and is not a valid key.
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
-        // If equivalent session exists, get it. If don't, try to use id as is.
-
-        // Ensure lock scope is limited
-        let equivs = self.equivs.read().unwrap();
-        if let Some(equiv_id) = equivs.get(id) {
-            self.get_session(equiv_id)
-        } else {
-            None
-        }
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .values()
+            .find(|s| s.current_equiv_id().as_ref() == Some(id))
+            .cloned()
     }
 
+    /// Mint a new random equiv id for the given session, replacing any
+    /// previous one. The old equiv id becomes unresolvable the moment
+    /// the new one is installed.
     pub fn create_equiv_session(&self, to: &SessionId) -> Result<SessionId> {
-        // With the deterministic cleanup in `remove_session` and at the
-        // top of `recover::recover`, this map is bounded to 2 entries
-        // per session (the idempotent self-entry from `add_session` plus
-        // the most recent Recover equiv id), so no hard cap is needed.
         let from = SessionId::new_random();
-        let mut equivs = self.equivs.write().unwrap();
-        debug_assert!(
-            equivs.len() < 1024,
-            "equiv entries growing unexpectedly: {}",
-            equivs.len()
-        );
-        equivs.insert(from, *to);
-        log::debug!("Created equivalent session {:?} from {:?}", from, to);
+        let session = self
+            .get_session(to)
+            .ok_or_else(|| anyhow::anyhow!("Session {:?} not found", to))?;
+        session.set_current_equiv_id(Some(from));
+        log::debug!("Created equivalent session {:?} for {:?}", from, to);
         Ok(from)
     }
 
+    /// Clear the equiv id of whichever session currently holds it, if
+    /// any. Used by `recover::recover` to invalidate the inbound
+    /// recover_session_id before minting a new one.
     pub fn remove_equiv_session(&self, from: &SessionId) {
-        log::debug!("Removing equivalent session {:?} from manager", from);
-        let mut equivs = self.equivs.write().unwrap();
-        equivs.remove(from);
+        let sessions = self.sessions.read().unwrap();
+        if let Some(session) = sessions
+            .values()
+            .find(|s| s.current_equiv_id().as_ref() == Some(from))
+        {
+            log::debug!("Removing equivalent session {:?} from manager", from);
+            session.set_current_equiv_id(None);
+        }
     }
 
     pub fn get_recovery_buffer(&self, id: &SessionId) -> Result<SessionRecoveryBuffer> {
