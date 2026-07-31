@@ -48,7 +48,7 @@ where
             // Skip packages in the recovery buffer until the requested seq is found, if not found, return error
             {
                 let ses_rec_buf = session.recovery_buffer();
-                let buffer = ses_rec_buf.get();
+                let mut buffer = ses_rec_buf.lock();
                 log::debug!(
                     "Found session {:?} for recovery, skipping packets until seq {:?} (buf: {:?})",
                     session.id(),

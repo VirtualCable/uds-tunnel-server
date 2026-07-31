@@ -149,10 +149,19 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
             "Resending unsent packet for session {:?} in server outbound stream",
             self.session_id
         );
-        // Send all unsent packets
-        while let Some((unsent_packet, old_seq)) = recovery_buffer.get().take_unsent_packet() {
-            // We can block here because we are already in the connection task, and we want to ensure the unsent packet is sent before processing new packets
-            // If we fail to send, we will retry on next connection, so it's not critical to send it on this connection
+        // Drain the buffer into a local vec under the lock, then release it
+        // before any .await. Holding the MutexGuard across an await would
+        // also make the future non-Send (the guard is !Send).
+        let unsent: Vec<(PayloadWithChannel, u64)> = {
+            let mut buf = recovery_buffer.lock();
+            let mut drained = Vec::new();
+            while let Some(item) = buf.take_unsent_packet() {
+                drained.push(item);
+            }
+            drained
+        };
+
+        for (unsent_packet, old_seq) in unsent {
             log::debug!(
                 "Resend old seq {} len {}: {:?}..{:?}",
                 old_seq,
@@ -186,10 +195,16 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(channel_data) => {
-                            // Store on recovery buffer, so if we fail to send, we can retry on next connection
-                            // Returns a reference to the newly added item, so we can send it without cloning
-                            let data = recovery_buffer.get().push(self.crypt.current_seq() + 1, channel_data)?;
-                            self.send_data(data).await?;
+                            // Store on recovery buffer, so if we fail to send, we can retry on next connection.
+                            // The buffer is behind a Mutex, so we clone the payload here and release the
+                            // lock before sending; the item stored in the buffer remains valid for the
+                            // next recover replay.
+                            let to_send = {
+                                let mut buf = recovery_buffer.lock();
+                                let stored = buf.push(self.crypt.current_seq() + 1, channel_data)?;
+                                stored.clone()
+                            };
+                            self.send_data(&to_send).await?;
                         }
                         Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine

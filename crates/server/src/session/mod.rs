@@ -30,11 +30,9 @@
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
 use std::{
-    cell::UnsafeCell,
     net::SocketAddr,
-    rc::Rc,
     sync::{
-        RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicUsize},
     },
 };
@@ -66,19 +64,26 @@ pub type SessionId = ticket::Ticket;
 pub static RECOVERY_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(64 * 1024); // Default to 64 KB, can be configured at runtime
 
 #[derive(Debug, Clone)]
-pub struct SessionRecoveryBuffer(Rc<UnsafeCell<RecoverySendBuffer>>);
+pub struct SessionRecoveryBuffer(Arc<Mutex<RecoverySendBuffer>>);
 
-unsafe impl Send for SessionRecoveryBuffer {}
-unsafe impl Sync for SessionRecoveryBuffer {}
+// Arc<Mutex<T>> is automatically Send + Sync when T: Send, so no manual
+// unsafe impl is needed. The previous Rc<UnsafeCell<T>> design with hand-
+// rolled unsafe impl Send/Sync was unsound: get() returned a &mut through
+// a shared reference, which is undefined behaviour if two tasks (e.g. an
+// in-flight server outbound push and a concurrent Recover handler
+// calling skip on the same session) ever observed the cell at once.
 
 impl SessionRecoveryBuffer {
     pub fn new(max_bytes: usize) -> Self {
-        Self(Rc::new(UnsafeCell::new(RecoverySendBuffer::new(max_bytes))))
+        Self(Arc::new(Mutex::new(RecoverySendBuffer::new(max_bytes))))
     }
 
-    #[allow(clippy::mut_from_ref)]
-    pub fn get(&self) -> &mut RecoverySendBuffer {
-        unsafe { &mut *self.0.get() }
+    /// Lock the underlying buffer for exclusive access. The critical
+    /// section is short (push/pop/skip are O(1) or O(n) over a small n),
+    /// so a std::sync::Mutex is appropriate; the lock is released as
+    /// soon as the returned guard goes out of scope.
+    pub fn lock(&self) -> std::sync::MutexGuard<'_, RecoverySendBuffer> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

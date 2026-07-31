@@ -264,7 +264,7 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
 
     // The session should contain the packet in the recovery buffer
     let ses_rec_buf = session.recovery_buffer();
-    let buffer = ses_rec_buf.get();
+    let mut buffer = ses_rec_buf.lock();
     assert_eq!(buffer.len(), 1);
     let (item, _old_seq) = buffer.take_unsent_packet().unwrap();
     assert_eq!(item.channel_id, 0);
@@ -286,16 +286,20 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
     let (_tx, rx) = flume::bounded(10);
     let (mut client, server) = tokio::io::duplex(1024);
 
-    // Insert a packet in the recovery buffer, simulating a previous failed send
-    let ses_rec_buf = session.recovery_buffer();
-    let buffer = ses_rec_buf.get();
-    buffer.push(
-        out_crypt.current_seq(),
-        PayloadWithChannel {
-            channel_id: 0,
-            payload: b"test".into(),
-        },
-    )?;
+    // Insert a packet in the recovery buffer, simulating a previous failed send.
+    // Scope the MutexGuard so it is dropped before we spawn the outbound
+    // task — otherwise the guard crosses an .await and the future loses Send.
+    {
+        let ses_rec_buf = session.recovery_buffer();
+        let mut buffer = ses_rec_buf.lock();
+        buffer.push(
+            out_crypt.current_seq(),
+            PayloadWithChannel {
+                channel_id: 0,
+                payload: b"test".into(),
+            },
+        )?;
+    }
 
     let mut outbound =
         TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
