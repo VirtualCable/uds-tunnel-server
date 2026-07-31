@@ -118,9 +118,19 @@ impl Handshake {
                     )
                 })?;
                 let action = match cmd {
-                    HandshakeCommand::Open => HandshakeAction::Open {
-                        ticket: ticket_buf.into(),
-                    },
+                    HandshakeCommand::Open => {
+                        let ticket: Ticket = ticket_buf.into();
+                        // Defense in depth (vuln-0008): reject non-alphanumeric
+                        // tickets at the earliest possible point so they do not
+                        // flow into HKDF salt or session lookup keys.
+                        ticket.validate().map_err(|e| {
+                            ErrorWithAddres::new(
+                                ip,
+                                format!("invalid ticket: {}", e).as_str(),
+                            )
+                        })?;
+                        HandshakeAction::Open { ticket }
+                    }
                     HandshakeCommand::Recover => {
                         // For recover, we also need to read the sequence numbers (2 u64)
                         let mut seq_buf = [0u8; 16];
@@ -136,10 +146,15 @@ impl Handshake {
                         let seqs = (in_seq, out_seq);
                         log::debug!("Received recover sequence numbers: {:?}", seqs);
 
-                        HandshakeAction::Recover {
-                            ticket: ticket_buf.into(),
-                            seqs, // Placeholder, update with actual sequence numbers if available
-                        }
+                        // Same defense-in-depth check as the Open branch above.
+                        let ticket: Ticket = ticket_buf.into();
+                        ticket.validate().map_err(|e| {
+                            ErrorWithAddres::new(
+                                ip,
+                                format!("invalid ticket: {}", e).as_str(),
+                            )
+                        })?;
+                        HandshakeAction::Recover { ticket, seqs }
                     }
                     _ => unreachable!(),
                 };
@@ -277,6 +292,67 @@ mod tests {
         match handshake.action {
             HandshakeAction::Test => {}
             _ => panic!("expected Test action"),
+        }
+    }
+
+    /// Regression test for vuln-0008: `Ticket::validate()` must run on
+    /// tickets received from the wire. Non-alphanumeric bytes are
+    /// rejected at handshake parse time and never reach the HKDF salt
+    /// or the session manager lookup. Same check applies to both the
+    /// `Open` and `Recover` paths.
+    #[tokio::test]
+    async fn test_handshake_parse_rejects_non_alphanumeric_ticket_open() {
+        let mut data = Vec::new();
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Open.into());
+        // 23 ASCII bytes + a null byte + 24 ASCII bytes = 48 bytes, but
+        // contains a non-alphanumeric byte (0x00).
+        let mut ticket = [b'A'; consts::TICKET_LENGTH];
+        ticket[23] = 0x00;
+        data.extend_from_slice(&ticket);
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let result = Handshake::parse(&mut reader, false).await;
+        assert!(
+            result.is_err(),
+            "Open handshake with non-alphanumeric ticket must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_rejects_non_alphanumeric_ticket_recover() {
+        let mut data = Vec::new();
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Recover.into());
+        let mut ticket = [b'Z'; consts::TICKET_LENGTH];
+        // High-bit byte (>0x7F) is not ASCII alphanumeric.
+        ticket[10] = 0xFF;
+        data.extend_from_slice(&ticket);
+        let in_seq = 1u64;
+        let out_seq = 2u64;
+        data.extend_from_slice(&in_seq.to_be_bytes());
+        data.extend_from_slice(&out_seq.to_be_bytes());
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let result = Handshake::parse(&mut reader, false).await;
+        assert!(
+            result.is_err(),
+            "Recover handshake with non-alphanumeric ticket must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handshake_parse_accepts_all_alphanumeric_ticket() {
+        // Counter-test: a clean alphanumeric ticket still parses
+        // successfully (so we have not broken the happy path).
+        let mut data = Vec::new();
+        data.extend_from_slice(consts::HANDSHAKE_V2_SIGNATURE);
+        data.push(HandshakeCommand::Open.into());
+        let ticket = [b'a'; consts::TICKET_LENGTH];
+        data.extend_from_slice(&ticket);
+        let mut reader = tokio::io::BufReader::new(&data[..]);
+        let handshake = Handshake::parse(&mut reader, false).await.unwrap();
+        match handshake.action {
+            HandshakeAction::Open { ticket: t } => assert_eq!(t, ticket.into()),
+            _ => panic!("expected Open action"),
         }
     }
 }
