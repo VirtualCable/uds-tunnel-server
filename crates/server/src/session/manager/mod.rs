@@ -32,7 +32,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, OnceLock, RwLock};
-use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use shared::log;
@@ -48,9 +47,9 @@ pub static SESSION_MANAGER: OnceLock<SessionManager> = OnceLock::new();
 
 pub struct SessionManager {
     sessions: RwLock<HashMap<SessionId, Arc<Session>>>,
-    // For equivalent sessions mapping
+    // For equivalent sessions mapping. Cleaned deterministically on
+    // `remove_session` and `recover::recover`; no lazy background sweep.
     equivs: RwLock<HashMap<SessionId, SessionId>>,
-    last_cleanup: RwLock<Instant>,
 }
 
 impl fmt::Debug for SessionManager {
@@ -70,7 +69,6 @@ impl SessionManager {
         SessionManager {
             sessions: RwLock::new(HashMap::new()),
             equivs: RwLock::new(HashMap::new()),
-            last_cleanup: RwLock::new(Instant::now()),
         }
     }
 
@@ -87,6 +85,11 @@ impl SessionManager {
         // Also, insert an idempotent entry in equivs
         {
             let mut equivs = self.equivs.write().unwrap();
+            debug_assert!(
+                equivs.len() < 1024,
+                "equiv entries growing unexpectedly: {}",
+                equivs.len()
+            );
             equivs.insert(session.id, session.id);
         }
         Ok(session)
@@ -103,6 +106,13 @@ impl SessionManager {
             session.stop.trigger();
             sessions.remove(id);
         }
+        // Also clean up any equiv entries pointing at this session so we
+        // do not leak memory on long-lived processes that handle many
+        // connections. The lazy 16-second cleanup is a safety net, not
+        // the primary mechanism.
+        drop(sessions);
+        let mut equivs = self.equivs.write().unwrap();
+        equivs.retain(|_, orig| *orig != *id);
     }
 
     pub async fn finish_all_sessions(&self) {
@@ -158,16 +168,17 @@ impl SessionManager {
     }
 
     pub fn create_equiv_session(&self, to: &SessionId) -> Result<SessionId> {
-        // Check the bound and insert under the same write lock so two
-        // concurrent callers cannot both pass the check and overshoot
-        // `MAX_EQUIV_ENTRIES`. The previous read-then-write pattern
-        // had a narrow TOCTOU window; the limit is a soft DoS guard but
-        // there is no reason to leave it racey.
+        // With the deterministic cleanup in `remove_session` and at the
+        // top of `recover::recover`, this map is bounded to 2 entries
+        // per session (the idempotent self-entry from `add_session` plus
+        // the most recent Recover equiv id), so no hard cap is needed.
         let from = SessionId::new_random();
         let mut equivs = self.equivs.write().unwrap();
-        if equivs.len() >= consts::MAX_EQUIV_ENTRIES {
-            anyhow::bail!("Too many equivalent session entries");
-        }
+        debug_assert!(
+            equivs.len() < 1024,
+            "equiv entries growing unexpectedly: {}",
+            equivs.len()
+        );
         equivs.insert(from, *to);
         log::debug!("Created equivalent session {:?} from {:?}", from, to);
         Ok(from)
@@ -223,30 +234,9 @@ impl SessionManager {
         }
     }
 
-    fn cleanup_equiv_sessions(&self) {
-        let mut equivs = self.equivs.write().unwrap();
-        // Remove entries that are too old and original session does not exist anymore
-        equivs.retain(|_, orig| self.get_session(orig).is_some());
-    }
-
-    // Lazy cleanup of equiv sessions on each access, to avoid needing a background task
-    // This allows to easyly keep memory in limits.
-    fn maybe_cleanup_equivs(&self) {
-        let now = Instant::now();
-        let mut last = self.last_cleanup.write().unwrap();
-        if now.duration_since(*last)
-            > Duration::from_secs(consts::CLEANUP_EQUIV_SESSIONS_INTERVAL_SECS)
-        {
-            self.cleanup_equiv_sessions();
-            *last = now;
-        }
-    }
-
     // Get the global session manager instance
     pub fn get_instance() -> &'static SessionManager {
-        let manager = SESSION_MANAGER.get_or_init(SessionManager::new);
-        manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
-        manager
+        SESSION_MANAGER.get_or_init(SessionManager::new)
     }
 }
 

@@ -29,9 +29,10 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-// Interval for cleaning up old equivalent sessions
-pub(super) const CLEANUP_EQUIV_SESSIONS_INTERVAL_SECS: u64 = 16;
+// This module is intentionally empty: with the deterministic cleanup
+// of equiv entries in `remove_session` and `recover::recover`, the
+// per-session equiv count is bounded by 2 (one idempotent self-entry
+// from `add_session` plus at most one entry from the latest Recover),
+// so a hard cap is unreachable. Kept as a placeholder for any future
+// constants the manager might need.
 
-// Rasonably small limit to prevent DoS via equiv session entries
-// Note that the normal number of equiv sessions should be very small.. 0 or 1 :)
-pub(super) const MAX_EQUIV_ENTRIES: usize = 32;

@@ -266,3 +266,91 @@ async fn test_remove_equiv_session() {
     assert!(manager.get_session(session.id()).is_some());
     assert!(manager.get_equiv_session(&equiv_session_id).is_none());
 }
+
+/// Regression test for vuln-0005: `remove_session` must clear every equiv
+/// entry pointing at the removed session, not just the first one.
+#[tokio::test]
+async fn test_remove_session_clears_all_equiv_entries() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+
+    // Mint several distinct equiv ids for the same session.
+    let equiv_ids: Vec<SessionId> = (0..5)
+        .map(|_| manager.create_equiv_session(session.id()).unwrap())
+        .collect();
+
+    // Sanity: all of them resolve to the same session.
+    for eq in &equiv_ids {
+        assert!(manager.get_equiv_session(eq).is_some());
+    }
+
+    manager.remove_session(session.id());
+
+    // Every equiv id must be gone, not just the most recent one.
+    for eq in &equiv_ids {
+        assert!(
+            manager.get_equiv_session(eq).is_none(),
+            "equiv {:?} still present after remove_session",
+            eq
+        );
+    }
+    assert!(manager.get_session(session.id()).is_none());
+}
+
+/// Regression test for vuln-0005: the recover pattern "remove old equiv,
+/// mint new equiv" must not accumulate entries. Simulating the loop
+/// directly on the manager (no broker / handshake needed) verifies that
+/// the invariant holds no matter how many recovers happen.
+#[tokio::test]
+async fn test_equivs_do_not_accumulate_across_recoveries() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+
+    // Simulate 10 recovers: each one removes the previous equiv and mints
+    // a fresh one. After all the recovers the manager must hold the
+    // session itself plus at most one extra equiv id, not 10 of them.
+    let mut previous: Option<SessionId> = None;
+    for _ in 0..10 {
+        if let Some(prev) = previous.take() {
+            manager.remove_equiv_session(&prev);
+        }
+        previous = Some(manager.create_equiv_session(session.id()).unwrap());
+    }
+
+    let equiv_count = manager.equivs.read().unwrap().len();
+    // 1 from `add_session` (idempotent entry) + 1 from the latest recover.
+    assert_eq!(
+        equiv_count, 2,
+        "equiv entries leaked across recovers: {equiv_count}"
+    );
+
+    // And only the latest equiv id still resolves.
+    let latest = previous.expect("loop ran");
+    assert!(manager.get_equiv_session(&latest).is_some());
+}
+
+/// Regression test for vuln-0005: a recover that removes its old equiv id
+/// and mints a new one must leave exactly one live equiv for the session
+/// (plus the idempotent self-entry from `add_session`), and the old
+/// equiv must no longer resolve.
+#[tokio::test]
+async fn test_recover_invalidates_old_equiv_id() {
+    let manager = SessionManager::new();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1234"))
+        .unwrap();
+
+    let old_equiv = manager.create_equiv_session(session.id()).unwrap();
+    // Simulate the body of recover::recover: invalidate the inbound
+    // equiv_session_id before minting a new one.
+    manager.remove_equiv_session(&old_equiv);
+    let new_equiv = manager.create_equiv_session(session.id()).unwrap();
+
+    assert!(manager.get_equiv_session(&old_equiv).is_none());
+    assert!(manager.get_equiv_session(&new_equiv).is_some());
+    assert!(manager.get_session(session.id()).is_some());
+}

@@ -113,6 +113,11 @@ where
                 log::error!("Invalid recover session id from client");
                 return Err(anyhow::anyhow!("Invalid recover session id from client"));
             }
+            // Invalidate the old equiv session ID before minting a new
+            // one so successive recoveries do not accumulate stale entries
+            // in `SessionManager.equivs` (which would slowly leak memory
+            // and widen the recovery-credential attack surface).
+            session_manager.remove_equiv_session(recover_session_id);
             let equiv_id = session_manager.create_equiv_session(session_id)?;
             // Atomically fetch the current seqs and reserve the next ones for
             // this recovery handshake. Doing this in a single critical
