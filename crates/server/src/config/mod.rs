@@ -1,10 +1,10 @@
+use crate::consts::{CONFIGFILE_PATH, DEFAULT_MAX_SESSIONS};
+use shared::log;
 use std::{
     fs::read_to_string,
     net::SocketAddr,
     sync::{Arc, OnceLock, RwLock},
 };
-
-use crate::consts::{CONFIGFILE_PATH, DEFAULT_MAX_SESSIONS};
 
 #[derive(serde::Deserialize)]
 pub struct ServerConfig {
@@ -31,6 +31,23 @@ impl ServerConfig {
     /// Effective session cap, falling back to the default when unset.
     pub fn max_sessions(&self) -> usize {
         self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
+    }
+
+    /// Logs `warn!` entries for any configuration knobs that materially weaken
+    /// the security posture of the tunnel server. Called from `main` after the
+    /// logger has been initialized so the warnings actually show up.
+    ///
+    /// Each check is intentionally explicit and self-contained — adding a new
+    /// dangerous setting is just one more `if` block here.
+    pub fn report_dangerous_settings(&self) {
+        // TLS cert verification disabled on broker API client.
+        if self.dangerous_disable_ssl_verify.unwrap_or(false) {
+            log::warn!(
+                "dangerous_disable_ssl_verify = true: TLS certificate validation is DISABLED for broker API requests. \
+                 This exposes the connection to man-in-the-middle attacks. \
+                 Use only for diagnostics against self-signed brokers; never in production."
+            );
+        }
     }
 
     pub fn listen_sockaddr(&self) -> SocketAddr {

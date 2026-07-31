@@ -169,8 +169,8 @@ impl ProxyInfo {
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::consts::MAX_PROXY_V2_LEN;
     use super::*;
+    use crate::protocol::consts::MAX_PROXY_V2_LEN;
 
     #[tokio::test]
     async fn test_proxy_v2_ipv4_no_tlvs() {
@@ -307,7 +307,18 @@ mod tests {
         // value the report called out).
         let oversized_len: u16 = u16::MAX;
         let buf = vec![
-            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+            0x0D,
+            0x0A,
+            0x0D,
+            0x0A,
+            0x00,
+            0x0D,
+            0x0A,
+            0x51,
+            0x55,
+            0x49,
+            0x54,
+            0x0A,
             0x21, // version=2, command=1
             0x11, // family=1 (IPv4), proto=1 (TCP)
             (oversized_len >> 8) as u8,
@@ -333,7 +344,18 @@ mod tests {
         // does not over-reject.
         let len: u16 = MAX_PROXY_V2_LEN as u16;
         let mut buf = vec![
-            0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+            0x0D,
+            0x0A,
+            0x0D,
+            0x0A,
+            0x00,
+            0x0D,
+            0x0A,
+            0x51,
+            0x55,
+            0x49,
+            0x54,
+            0x0A,
             0x21, // version=2, command=1
             0x11, // family=1 (IPv4), proto=1 (TCP)
             (len >> 8) as u8,

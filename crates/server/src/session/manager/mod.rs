@@ -137,10 +137,7 @@ impl SessionManager {
     /// bounds the active set.
     pub fn count_by_remote(&self, remote: std::net::SocketAddr) -> usize {
         let sessions = self.sessions.read().unwrap();
-        sessions
-            .values()
-            .filter(|s| s.src_ip() == remote)
-            .count()
+        sessions.values().filter(|s| s.src_ip() == remote).count()
     }
 
     pub async fn start_server(&self, id: &SessionId) -> Result<()> {

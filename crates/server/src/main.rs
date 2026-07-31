@@ -53,6 +53,10 @@ async fn main() {
             .clone()
             .unwrap_or("info".to_string()),
     );
+    // Warn on any configuration that materially weakens security posture.
+    // Must run after set_log_level so the warnings are actually emitted.
+    config::get().read().unwrap().report_dangerous_settings();
+
     // Read config
     // Crate a listener with the configured address
     let listen_sock_addr = config::get().read().unwrap().listen_sockaddr();

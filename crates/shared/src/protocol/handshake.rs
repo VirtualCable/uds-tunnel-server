@@ -124,10 +124,7 @@ impl Handshake {
                         // the earliest possible point so they do not flow into
                         // HKDF salt or session lookup keys.
                         ticket.validate().map_err(|e| {
-                            ErrorWithAddres::new(
-                                ip,
-                                format!("invalid ticket: {}", e).as_str(),
-                            )
+                            ErrorWithAddres::new(ip, format!("invalid ticket: {}", e).as_str())
                         })?;
                         HandshakeAction::Open { ticket }
                     }
@@ -149,10 +146,7 @@ impl Handshake {
                         // Same defense-in-depth check as the Open branch above.
                         let ticket: Ticket = ticket_buf.into();
                         ticket.validate().map_err(|e| {
-                            ErrorWithAddres::new(
-                                ip,
-                                format!("invalid ticket: {}", e).as_str(),
-                            )
+                            ErrorWithAddres::new(ip, format!("invalid ticket: {}", e).as_str())
                         })?;
                         HandshakeAction::Recover { ticket, seqs }
                     }

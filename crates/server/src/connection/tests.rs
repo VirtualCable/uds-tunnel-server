@@ -154,8 +154,7 @@ async fn setup_testing_connection(
     tokio::spawn(async move {
         let (server_reader, server_writer) = tokio::io::split(server_stream);
         // Simulate server-side handling
-        if let Err(e) = handle_connection(server_reader, server_writer, fake_src_ip).await
-        {
+        if let Err(e) = handle_connection(server_reader, server_writer, fake_src_ip).await {
             log::error!("Server connection handling failed: {:?}", e);
         }
     });

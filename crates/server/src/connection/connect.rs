@@ -43,10 +43,7 @@ where
             // Compute the predicate synchronously and drop the config
             // read-lock before any `.await` so the guard does not
             // cross an await point (which would break `tokio::spawn`).
-            let per_remote_cap = config::get()
-                .read()
-                .unwrap()
-                .max_sessions_per_remote;
+            let per_remote_cap = config::get().read().unwrap().max_sessions_per_remote;
             if let Some(per_remote) = per_remote_cap
                 && session_manager.count_by_remote(src_ip) >= per_remote
             {
@@ -56,10 +53,7 @@ where
                     per_remote
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                return Err(anyhow::anyhow!(
-                    "session cap for remote {} reached",
-                    src_ip
-                ));
+                return Err(anyhow::anyhow!("session cap for remote {} reached", src_ip));
             }
 
             let stop = Trigger::new();
