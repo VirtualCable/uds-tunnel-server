@@ -24,9 +24,13 @@ use_proxy_protocol = false
 # Example: "https://your-broker.example.com/uds/rest/tunnelpq/ticket"
 ticket_api_url = "https://127.0.0.1:8443/uds/rest/tunnelpq/ticket"
 
-# Whether to verify SSL certificates when connecting to the Broker API.
-# Set to false for testing with self-signed certificates.
-verify_ssl = false
+# SECURITY: setting this to `true` disables TLS certificate validation
+# on the broker API client. Useful for diagnostics against
+# self-signed brokers; **never** enable in production. Default `false`.
+#
+# Only used by the Docker image for offline smoke tests; production
+# configs should leave this unset (or explicitly set to `false`).
+dangerous_disable_ssl_verify = false
 
 # Authentication token for the Broker API.
 # Must match the token configured in the UDS Broker.

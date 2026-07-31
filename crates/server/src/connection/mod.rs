@@ -44,6 +44,8 @@ use shared::{
     protocol::handshake,
 };
 
+use crate::config;
+
 mod connect;
 mod recover;
 mod types;
@@ -52,13 +54,20 @@ pub async fn handle_connection<R, W>(
     mut reader: R,
     mut writer: W,
     connection_ip: std::net::SocketAddr,
-    use_proxy_v2: bool,
 ) -> Result<(), ErrorWithAddres>
 where
     R: AsyncReadExt + Unpin + Send + 'static,
     W: AsyncWriteExt + Unpin + Send + 'static,
 {
     log::debug!("Starting connection handshake");
+    // Read the proxy-protocol flag synchronously and drop the config
+    // read-lock before any `.await` so the guard does not cross an
+    // await point (which would break `tokio::spawn`).
+    let use_proxy_v2 = config::get()
+        .read()
+        .unwrap()
+        .use_proxy_protocol
+        .unwrap_or(false);
     let (src_ip, action) = match timeout(
         Duration::from_millis(HANDSHAKE_TIMEOUT_MS),
         handshake::Handshake::parse(&mut reader, use_proxy_v2),

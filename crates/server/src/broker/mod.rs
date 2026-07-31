@@ -66,7 +66,18 @@ pub struct HttpBrokerApi {
 }
 
 impl HttpBrokerApi {
-    pub fn new(ticket_rest_url: &str, auth_token: &str, verify_ssl: bool) -> Self {
+    /// Construct a broker API client.
+    ///
+    /// `dangerous_disable_ssl_verify` is the field the configuration
+    /// exposes under the same name: pass it through directly to reqwest
+    /// so the boolean polarity is identical between the config layer and
+    /// the HTTP client. **Never set this to `true` outside of
+    /// diagnostics against a self-signed broker.**
+    pub fn new(
+        ticket_rest_url: &str,
+        auth_token: &str,
+        dangerous_disable_ssl_verify: bool,
+    ) -> Self {
         // Remove trailing slash if present
         let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
         log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
@@ -87,7 +98,7 @@ impl HttpBrokerApi {
                     );
                     headers
                 })
-                .danger_accept_invalid_certs(!verify_ssl)
+                .danger_accept_invalid_certs(dangerous_disable_ssl_verify)
                 .build()
                 .unwrap(), // If not built, panic intentionally
             auth_token: auth_token.to_string(),
@@ -176,7 +187,12 @@ pub fn get() -> impl BrokerApi {
     HttpBrokerApi::new(
         &cfg.ticket_api_url,
         &cfg.broker_auth_token,
-        cfg.verify_ssl.unwrap_or(true),
+        // SAFETY flag is named with a "dangerous_" prefix so the call
+        // site has to acknowledge the implication; default is `false`
+        // (verification on). Passing the field straight through to
+        // reqwest's `danger_accept_invalid_certs` keeps the boolean
+        // polarity identical between config and HTTP client.
+        cfg.dangerous_disable_ssl_verify.unwrap_or(false),
     )
 }
 

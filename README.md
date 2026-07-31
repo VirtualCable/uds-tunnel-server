@@ -27,7 +27,7 @@ use_proxy_protocol = false # Enable PROXY protocol v2 (default: false)
 
 # Broker API settings
 ticket_api_url = "https://broker.example.com/uds/rest/tunnel/ticket"
-verify_ssl = true           # Verify SSL certificates (default: true)
+dangerous_disable_ssl_verify = false  # Verify SSL certificates (default: false). Only enable for diagnostics against self-signed brokers.
 broker_auth_token = "your_auth_token"
 ```
 

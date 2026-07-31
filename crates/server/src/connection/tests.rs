@@ -94,7 +94,7 @@ async fn setup_testing_connection(
         let mut config = config.write().unwrap();
         config.use_proxy_protocol = Some(proxy_v2);
         config.broker_auth_token = auth_token.to_string();
-        config.verify_ssl = Some(false);
+        config.dangerous_disable_ssl_verify = Some(false);
         config.ticket_api_url = url.clone();
     }
 
@@ -154,7 +154,7 @@ async fn setup_testing_connection(
     tokio::spawn(async move {
         let (server_reader, server_writer) = tokio::io::split(server_stream);
         // Simulate server-side handling
-        if let Err(e) = handle_connection(server_reader, server_writer, fake_src_ip, proxy_v2).await
+        if let Err(e) = handle_connection(server_reader, server_writer, fake_src_ip).await
         {
             log::error!("Server connection handling failed: {:?}", e);
         }
@@ -563,7 +563,7 @@ async fn test_connection_invalid_remote() -> anyhow::Result<()> {
         let mut config = config.write().unwrap();
         config.use_proxy_protocol = Some(proxy_v2);
         config.broker_auth_token = auth_token.to_string();
-        config.verify_ssl = Some(false);
+        config.dangerous_disable_ssl_verify = Some(false);
         config.ticket_api_url = url.clone();
     }
 
@@ -596,7 +596,7 @@ async fn test_connection_invalid_remote() -> anyhow::Result<()> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         let (server_reader, server_writer) = tokio::io::split(server_stream);
         // Simulate server-side handling
-        handle_connection(server_reader, server_writer, fake_src_ip, false).await
+        handle_connection(server_reader, server_writer, fake_src_ip).await
     })
     .await?;
 

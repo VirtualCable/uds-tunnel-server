@@ -55,14 +55,7 @@ async fn main() {
     );
     // Read config
     // Crate a listener with the configured address
-    let (listen_sock_addr, use_proxy_protocol) = {
-        let config = config::get();
-        let config = config.read().unwrap();
-        (
-            config.listen_sockaddr(),
-            config.use_proxy_protocol.unwrap_or(false),
-        )
-    };
+    let listen_sock_addr = config::get().read().unwrap().listen_sockaddr();
 
     session::RECOVERY_BUFFER_SIZE.store(
         config::get()
@@ -124,7 +117,7 @@ async fn main() {
                             let (reader, writer) = socket.into_split();
                             async move {
                                 if let Err(e) =
-                                    connection::handle_connection(reader, writer, addr, use_proxy_protocol).await
+                                    connection::handle_connection(reader, writer, addr).await
                                 {
                                     log::error!("Error handling connection from {}: {:?}", addr, e);
                                 }

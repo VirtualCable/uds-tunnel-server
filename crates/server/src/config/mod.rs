@@ -13,7 +13,10 @@ pub struct ServerConfig {
     pub listen_port: Option<u16>,    // Port to listen on, default: 443
     pub use_proxy_protocol: Option<bool>, // Whether to expect PROXY protocol v2 headers, default: false
     pub ticket_api_url: String, // URL of the broker API, e.g., https://broker.example.com/uds/rest/ticket
-    pub verify_ssl: Option<bool>, // Whether to verify SSL certificates on broker API: default: true
+    // SECURITY: setting this to `true` disables TLS certificate validation
+    // on the broker API client. Useful for diagnostics against
+    // self-signed brokers; **never** enable in production. Default `false`.
+    pub dangerous_disable_ssl_verify: Option<bool>,
     pub broker_auth_token: String, // Auth token for the broker API
     pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in Kb, default: 64 (kb)
     pub max_sessions: Option<usize>, // Hard cap on concurrent sessions, default: DEFAULT_MAX_SESSIONS (8192)
@@ -61,7 +64,7 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     listen_port: None,
                     use_proxy_protocol: None,
                     ticket_api_url: "".to_string(),
-                    verify_ssl: None,
+                    dangerous_disable_ssl_verify: None,
                     broker_auth_token: "".to_string(),
                     recovery_buffer_size: None,
                     max_sessions: None,
@@ -95,7 +98,7 @@ mod tests {
             listen_port = 443
             use_proxy_protocol = true
             ticket_api_url = "https://broker.example.com/uds/rest/ticket"
-            verify_ssl = false
+            dangerous_disable_ssl_verify = true
             broker_auth_token = "test_token"
         "#;
         let config = ServerConfig::from_toml_str(toml_str).unwrap();
@@ -106,7 +109,7 @@ mod tests {
             config.ticket_api_url,
             "https://broker.example.com/uds/rest/ticket".to_string()
         );
-        assert_eq!(config.verify_ssl, Some(false));
+        assert_eq!(config.dangerous_disable_ssl_verify, Some(true));
         assert_eq!(config.broker_auth_token, "test_token".to_string());
     }
 }
