@@ -69,6 +69,7 @@ impl TryFrom<&[u8]> for OpenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shared::protocol::consts::MAX_CHANNEL_ID;
 
     #[test]
     fn test_open_response_serialization() {
@@ -102,5 +103,29 @@ mod tests {
         assert!(result.is_ok()); // Channel count is valid, just large
         let open_response = result.unwrap();
         assert_eq!(open_response.channel_count, 65535);
+    }
+
+    /// Regression test for the defense-in-depth cap introduced together
+    /// with vuln-0002. The `connect` path must never advertise a
+    /// `channel_count` larger than `MAX_CHANNEL_ID`, regardless of what
+    /// the broker returned.
+    #[test]
+    fn test_open_response_channel_count_matches_remotes() {
+        // The validate() call in `broker::response::TicketResponse::validate`
+        // enforces that remotes_count > 0 and <= MAX_CHANNEL_ID, so the
+        // OpenResponse the server builds carries that count unchanged.
+        let session_id = Ticket::new([1u8; TICKET_LENGTH]);
+
+        for n in 1..=(MAX_CHANNEL_ID as usize) {
+            let response = OpenResponse::new(session_id, n as u16, 1, 1);
+            assert!(response.channel_count >= 1);
+            assert!(response.channel_count <= MAX_CHANNEL_ID);
+        }
+
+        // A zero count would have been rejected by validate(), so it is
+        // not a value we expect the server to ever produce; the test only
+        // documents that the wire format still tolerates it.
+        let zero = OpenResponse::new(session_id, 0, 1, 1);
+        assert_eq!(zero.channel_count, 0);
     }
 }

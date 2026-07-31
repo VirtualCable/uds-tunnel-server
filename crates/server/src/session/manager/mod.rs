@@ -247,13 +247,6 @@ impl SessionManager {
         manager.maybe_cleanup_equivs(); // Lazy cleanup on each access
         manager
     }
-
-    pub fn log_debug_sessions(&self) {
-        let sessions = self.sessions.read().unwrap();
-        let equivs = self.equivs.read().unwrap();
-        log::debug!("Sessions: {:?}", sessions);
-        log::debug!("Equivs: {:?}", equivs);
-    }
 }
 
 impl Default for SessionManager {

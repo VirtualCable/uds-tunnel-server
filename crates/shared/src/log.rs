@@ -87,20 +87,56 @@ impl<'a> fmt::MakeWriter<'a> for RotatingWriter {
     fn make_writer(&'a self) -> Self::Writer {
         // Rotate if needed
         let _ = self.rotate_if_needed();
-        // Always open in append mode, creating it if it doesn't exist
-        // If self.path cannot be opened, try with one in temp dir
+        // Open the configured log path. If it fails we pick a fallback
+        // depending on the build profile:
+        //
+        //   - debug build: fall back to /tmp/udstunnel-fallback.log so
+        //     developers can keep working without thinking about log
+        //     directory permissions.
+        //   - release build: the operator MUST have configured
+        //     UDSTUNNEL_*_LOG_PATH to a directory the process owns. If
+        //     that path is wrong, log to stderr (captured by journald or
+        //     the container runtime) and keep the service running. If
+        //     stderr is somehow unusable too, abort so the failure is
+        //     surfaced via the supervisor rather than silently dropping
+        //     traffic metadata.
         OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
-            .unwrap_or_else(|_e| {
-                let temp_path = std::env::temp_dir().join("udstunnel-fallback.log");
-                OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&temp_path)
-                    .unwrap_or_else(|e| panic!("Failed to open log file {:?}: {}", temp_path, e))
-            })
+            .unwrap_or_else(|primary_err| fallback_log_file(&self.path, primary_err))
+    }
+}
+
+/// Resolves the fallback log file when the primary path cannot be opened.
+/// `UDSTUNNEL_STDERR_LOG_FILE` overrides the stderr target in release so
+/// tests and operators can redirect the log without code changes.
+#[cold]
+fn fallback_log_file(primary: &std::path::Path, primary_err: io::Error) -> fs::File {
+    #[cfg(debug_assertions)]
+    let fallback_path = std::env::temp_dir().join("udstunnel-fallback.log");
+    #[cfg(not(debug_assertions))]
+    let fallback_path = std::env::var_os("UDSTUNNEL_STDERR_LOG_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/dev/stderr"));
+
+    let mode = if cfg!(debug_assertions) { "falling back" } else { "routing log to" };
+
+    match OpenOptions::new().create(true).append(true).open(&fallback_path) {
+        Ok(f) => {
+            eprintln!(
+                "udstunnel: failed to open log file {:?}: {}; {} {:?}",
+                primary, primary_err, mode, fallback_path
+            );
+            f
+        }
+        Err(fallback_err) => {
+            eprintln!(
+                "udstunnel: failed to open log file {:?} ({}), also failed to open fallback {:?} ({}); aborting",
+                primary, primary_err, fallback_path, fallback_err
+            );
+            std::process::abort()
+        }
     }
 }
 

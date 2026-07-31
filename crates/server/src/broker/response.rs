@@ -82,6 +82,18 @@ impl TicketResponse {
         if self.remotes.is_empty() {
             return Err(anyhow::anyhow!("No remotes in ticket response"));
         }
+        // Defense in depth: the server enforces a hard cap on the number of
+        // channels per session (see shared::protocol::consts::MAX_CHANNEL_ID).
+        // A broker that returns more remotes than the cap would have us open
+        // a session we cannot honour, so reject it up front and close the
+        // connection rather than silently truncate.
+        if self.remotes.len() > shared::protocol::consts::MAX_CHANNEL_ID as usize {
+            return Err(anyhow::anyhow!(
+                "Too many remotes in ticket response: {} (max {})",
+                self.remotes.len(),
+                shared::protocol::consts::MAX_CHANNEL_ID
+            ));
+        }
         for remote in &self.remotes {
             if remote.host.is_empty() || remote.port == 0 {
                 return Err(anyhow::anyhow!(
@@ -132,5 +144,61 @@ impl EncryptedTicketResponse {
 
         serde_json::from_slice(&plaintext)
             .map_err(|_| anyhow::format_err!("Failed to parse JSON from decrypted data"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_response_with_n_remotes(n: usize) -> TicketResponse {
+        let remotes = (0..n)
+            .map(|i| TicketRemote {
+                host: format!("host{i}.example.com"),
+                port: 10000 + i as u16,
+            })
+            .collect();
+        TicketResponse {
+            remotes,
+            notify: String::new(),
+            shared_secret: None,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_empty_remotes() {
+        let resp = make_response_with_n_remotes(0);
+        assert!(resp.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_remotes_up_to_max_channel_id() {
+        use shared::protocol::consts::MAX_CHANNEL_ID;
+        let resp = make_response_with_n_remotes(MAX_CHANNEL_ID as usize);
+        assert!(resp.validate().is_ok(), "should accept exactly MAX_CHANNEL_ID");
+    }
+
+    #[test]
+    fn validate_rejects_more_remotes_than_max_channel_id() {
+        use shared::protocol::consts::MAX_CHANNEL_ID;
+        let resp = make_response_with_n_remotes(MAX_CHANNEL_ID as usize + 1);
+        let err = resp.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Too many remotes") && msg.contains("max"),
+            "unexpected error: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_host_or_zero_port() {
+        let mut resp = make_response_with_n_remotes(1);
+        resp.remotes[0].host = String::new();
+        assert!(resp.validate().is_err());
+
+        let mut resp = make_response_with_n_remotes(1);
+        resp.remotes[0].port = 0;
+        assert!(resp.validate().is_err());
     }
 }
