@@ -359,4 +359,66 @@ mod tests {
         assert_eq!((in_seq, out_seq), (3, 0));
         assert_eq!(session.seqs(), (3, 5));
     }
+
+    /// Concurrent fetches must each observe a unique pre-increment pair.
+    /// This is the regression test for the TOCTOU race in the Recover
+    /// handler: before the atomic helper was added, two parallel recovers
+    /// on the same session could both read the same pre-increment value
+    /// and overwrite each other's `set_*_seq` updates.
+    #[serial_test::serial(manager)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fetch_add_seqs_is_atomic_under_concurrency() {
+        use crate::session::SessionManager;
+
+        let session = new_test_session().await;
+        let session = SessionManager::get_instance()
+            .add_session(session)
+            .expect("session id collision unlikely with random ticket");
+        let session: Arc<Session> = session;
+
+        const N: u64 = 500;
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let s = session.clone();
+            handles.push(tokio::task::spawn_blocking(move || {
+                let mut observed = Vec::with_capacity(N as usize);
+                for _ in 0..N {
+                    observed.push(s.fetch_add_seqs(1, 1));
+                }
+                observed
+            }));
+        }
+
+        let mut all: Vec<(u64, u64)> =
+            futures::future::join_all(handles)
+                .await
+                .into_iter()
+                .flat_map(|h| h.expect("task panicked"))
+                .collect();
+
+        // Every observation must be unique — no two callers saw the same
+        // (inbound, outbound) pair, which is what the old TOCTOU code
+        // would have produced.
+        all.sort();
+        let original_len = all.len();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            original_len,
+            "fetch_add_seqs returned duplicate pairs (TOCTOU race)"
+        );
+
+        // The observed pre-increment pairs must form a contiguous range
+        // [0, N*4) with no gaps. A gap would indicate that some caller
+        // saw a duplicate pre-increment and skipped a value.
+        let min = *all.first().expect("at least one observation");
+        let max = *all.last().expect("at least one observation");
+        assert_eq!(min, (0, 0));
+        assert_eq!(max, (N * 4 - 1, N * 4 - 1));
+
+        // And the final seqs must equal the number of increments.
+        let (final_in, final_out) = session.seqs();
+        assert_eq!(final_in, N * 4);
+        assert_eq!(final_out, N * 4);
+    }
 }

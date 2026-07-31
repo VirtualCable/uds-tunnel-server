@@ -275,6 +275,63 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
 
 #[serial_test::serial(manager)]
 #[tokio::test]
+async fn test_outbound_server_recovers_with_empty_buffer() -> Result<()> {
+    // Regression test: when a new outbound stream attaches to a session
+    // whose recovery buffer is empty (no failed sends to replay), the
+    // drain phase must be a no-op and the stream must continue to
+    // process new traffic normally.
+    log::setup_logging("debug", log::LogType::Test);
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    // Verify the buffer really starts empty.
+    assert_eq!(session.recovery_buffer().lock().len(), 0);
+
+    let (_, out_crypt) = make_test_crypts();
+    let stop = Trigger::new();
+    let (_tx, rx) = flume::bounded(10);
+    let (_client, server) = tokio::io::duplex(1024);
+
+    let mut outbound =
+        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+
+    let errored = Arc::new(AtomicBool::new(false));
+    let outbound_handle = tokio::spawn({
+        let stop = stop.clone();
+        let errored = errored.clone();
+        async move {
+            tokio::select! {
+                _ = stop.wait_async() => {}
+                res = outbound.run() => {
+                    if let Err(e) = res {
+                        log::error!("Outbound stream failed: {:?}", e);
+                        errored.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    });
+
+    // Give the recover_buffer() drain a chance to run and finish.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // The stream must still be alive (not errored) after the empty drain.
+    assert!(
+        !errored.load(std::sync::atomic::Ordering::Relaxed),
+        "outbound stream errored during empty-buffer drain"
+    );
+
+    // And the buffer must still be empty (the drain did not invent any
+    // items, did not panic, and did not consume a non-existent one).
+    assert_eq!(session.recovery_buffer().lock().len(), 0);
+
+    stop.trigger();
+    let _ = outbound_handle.await;
+    Ok(())
+}
+
+#[serial_test::serial(manager)]
+#[tokio::test]
 async fn test_outbound_server_reads_recover_packet() -> Result<()> {
     log::setup_logging("debug", log::LogType::Test);
     let session = new_session_for_test("127.0.0.1:1234");
