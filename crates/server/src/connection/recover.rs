@@ -114,7 +114,13 @@ where
                 return Err(anyhow::anyhow!("Invalid recover session id from client"));
             }
             let equiv_id = session_manager.create_equiv_session(session_id)?;
-            let (in_seq, out_seq) = session.seqs();
+            // Atomically fetch the current seqs and reserve the next ones for
+            // this recovery handshake. Doing this in a single critical
+            // section prevents two concurrent Recover attempts from reading
+            // the same pre-increment pair and overwriting each other's
+            // updates, which would desync the loser's crypt from the
+            // server's view of the sequence window.
+            let (in_seq, out_seq) = session.fetch_add_seqs(1, 1);
             let response = OpenResponse::new(equiv_id, 0, in_seq, out_seq); // On recover, no new streams are created
             let response_data = response.as_vec();
             log::debug!(
@@ -128,10 +134,9 @@ where
                 .write(&mut writer, stream_channel_id, &response_data)
                 .await?;
 
-            // Now the recv/send seq should have been keept from previous session, increment them both by 1
-            // because we just received and sent one packet each
-            session.set_inbound_seq(in_seq + 1);
-            session.set_outbound_seq(out_seq + 1);
+            // The next expected seqs are already (in_seq + 1, out_seq + 1)
+            // because fetch_add_seqs reserved them. Both tunnel sides will
+            // create a crypt based on these seq numbers.
             // Note: both tunnel sides will create a crypt based on these seq numbers
 
             // Client stream should already be there, just create the server stream
