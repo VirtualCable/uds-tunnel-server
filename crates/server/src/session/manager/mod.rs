@@ -131,6 +131,18 @@ impl SessionManager {
         config::get().read().unwrap().max_sessions()
     }
 
+    /// Number of currently registered sessions whose `src_ip` matches
+    /// the given remote. O(N) — only call when a per-IP cap is
+    /// configured, otherwise the global `add_session` cap already
+    /// bounds the active set.
+    pub fn count_by_remote(&self, remote: std::net::SocketAddr) -> usize {
+        let sessions = self.sessions.read().unwrap();
+        sessions
+            .values()
+            .filter(|s| s.src_ip() == remote)
+            .count()
+    }
+
     pub async fn start_server(&self, id: &SessionId) -> Result<()> {
         if let Some(session) = self.get_session(id) {
             session.start_server().await?;

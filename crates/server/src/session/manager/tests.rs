@@ -478,3 +478,36 @@ async fn test_add_session_respects_max_sessions_cap() {
     // Reset the cap so subsequent tests see the production default.
     config::get().write().unwrap().max_sessions = None;
 }
+
+/// `count_by_remote` returns the number of currently registered
+/// sessions whose `src_ip` matches the given address. Used by the
+/// per-remote-IP cap in `connection::connect` (when enabled via
+/// `ServerConfig::max_sessions_per_remote`).
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn test_count_by_remote() {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    fn new_session_with_src(src: SocketAddr) -> Session {
+        Session::new(
+            SharedSecret::new([0u8; 32]),
+            ticket::Ticket::new_random(),
+            Trigger::new(),
+            src,
+            vec![],
+        )
+    }
+
+    let manager = SessionManager::new();
+    let a: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 443);
+    let b: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 443);
+    let other: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3)), 443);
+
+    manager.add_session(new_session_with_src(a)).unwrap();
+    manager.add_session(new_session_with_src(a)).unwrap();
+    manager.add_session(new_session_with_src(b)).unwrap();
+
+    assert_eq!(manager.count_by_remote(a), 2);
+    assert_eq!(manager.count_by_remote(b), 1);
+    assert_eq!(manager.count_by_remote(other), 0);
+}

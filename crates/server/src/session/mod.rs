@@ -204,6 +204,15 @@ impl Session {
         }
     }
 
+    /// Returns the current `src_ip` recorded for this session.
+    /// Cheap (single read-lock); used by `SessionManager::count_by_remote`.
+    pub fn src_ip(&self) -> SocketAddr {
+        // Ignore the poison: if the lock was poisoned by a previous
+        // panic we still want the inner value back so the caller can
+        // continue to operate on the session.
+        *self.src_ip.read().unwrap_or_else(|e| e.into_inner())
+    }
+
     pub async fn start_server(&self) -> Result<ServerEndpoints> {
         self.server_running
             .store(true, std::sync::atomic::Ordering::Relaxed);

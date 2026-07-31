@@ -7,6 +7,7 @@ use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::
 
 use crate::{
     broker::{self, BrokerApi},
+    config,
     session::{Session, SessionManager},
     stream::server::TunnelServerStream,
 };
@@ -31,6 +32,35 @@ where
         Ok(ticket_info) => {
             log::debug!("Received ticket info from broker: {:?}", ticket_info);
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
+
+            // Optional per-remote-IP cap: when the config sets
+            // `max_sessions_per_remote`, refuse to add the session and
+            // stall the response for one second so the client cannot
+            // distinguish "per-IP cap" from "broker slow" or "transient
+            // network hiccup". No O(N) scan runs when the cap is
+            // disabled (the default).
+            //
+            // Compute the predicate synchronously and drop the config
+            // read-lock before any `.await` so the guard does not
+            // cross an await point (which would break `tokio::spawn`).
+            let per_remote_cap = config::get()
+                .read()
+                .unwrap()
+                .max_sessions_per_remote;
+            if let Some(per_remote) = per_remote_cap
+                && session_manager.count_by_remote(src_ip) >= per_remote
+            {
+                log::warn!(
+                    "Per-remote-IP session cap hit for {} (cap {}); stalling",
+                    src_ip,
+                    per_remote
+                );
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                return Err(anyhow::anyhow!(
+                    "session cap for remote {} reached",
+                    src_ip
+                ));
+            }
 
             let stop = Trigger::new();
             let session = session_manager.add_session(Session::new(

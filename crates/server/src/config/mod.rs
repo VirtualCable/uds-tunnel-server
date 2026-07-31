@@ -17,6 +17,7 @@ pub struct ServerConfig {
     pub broker_auth_token: String, // Auth token for the broker API
     pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in Kb, default: 64 (kb)
     pub max_sessions: Option<usize>, // Hard cap on concurrent sessions, default: DEFAULT_MAX_SESSIONS (8192)
+    pub max_sessions_per_remote: Option<usize>, // Per-source-IP cap. None = disabled (no per-IP check).
 }
 
 impl ServerConfig {
@@ -64,6 +65,7 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     broker_auth_token: "".to_string(),
                     recovery_buffer_size: None,
                     max_sessions: None,
+                    max_sessions_per_remote: None,
                 }
             };
 
