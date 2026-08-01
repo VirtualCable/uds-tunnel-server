@@ -90,6 +90,9 @@ where
             // Channel does not matter here in fact, just extract the data. This is a MUST match
             if data != *ticket {
                 log::error!("Invalid ticket from client");
+                // Remove the session we added: the client did not echo the ticket back,
+                // so the session is unusable and must not leak in the SessionManager.
+                session_manager.remove_session(session.id());
                 return Err(anyhow::anyhow!("Invalid ticket from client"));
             }
             log::info!("TICKET VALIDATED");
