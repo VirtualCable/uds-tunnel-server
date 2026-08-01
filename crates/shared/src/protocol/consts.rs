@@ -63,3 +63,24 @@ pub const MAX_PROXY_V2_LEN: usize = 512;
 
 // Maximum length for error messages in the protocol
 pub const MAX_ERROR_MSG_LENGTH: usize = 512;
+
+// HTTP `Authorization` header for the tunnel server's broker ticket calls.
+//
+// The tunnel server authenticates with the broker exclusively via the
+// `Authorization: Bearer sk-<token>` header. The token is *not* sent in
+// the JSON body of the request.
+//
+// The namespace prefix after `Bearer ` is a short, opaque tag that lets
+// the broker (and future tooling) distinguish the *kind* of credential
+// at a glance:
+//
+//   - `sk-`    : a static, long-lived "secret key" — i.e. the tunnel
+//                server's own `Server.token` registered at deploy time.
+//   - future:  `sess-`, `svc-`, etc. for other credential types that may
+//              one day share the same `Authorization: Bearer` slot.
+//
+// The operator-supplied token in `broker_auth_token` MAY already carry
+// the `sk-` prefix (new style) or not (legacy). Both are normalised to a
+// single prefix before being put on the wire.
+pub const TUNNEL_AUTH_HEADER: &str = "Authorization";
+pub const TUNNEL_AUTH_NAMESPACE_PREFIX: &str = "sk-";

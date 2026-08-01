@@ -1,7 +1,10 @@
 use super::*;
 
 use mockito::Server;
-use shared::{crypt::kem::debug::get_debug_kem_keypair_768, protocol::consts::TICKET_LENGTH};
+use shared::{
+    crypt::kem::debug::get_debug_kem_keypair_768,
+    protocol::consts::{TICKET_LENGTH, TUNNEL_AUTH_HEADER, TUNNEL_AUTH_NAMESPACE_PREFIX},
+};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 pub const TICKET_ID: &str = "c6s9FAa5fhb854BVMckqUBJ4hOXg2iE5i1FYPCuktks4eNZD";
@@ -45,6 +48,10 @@ async fn test_http_broker() {
     let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)), 0);
     let _m = server
         .mock("POST", "/")
+        .match_header(
+            TUNNEL_AUTH_HEADER,
+            format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token).as_str(),
+        )
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(TICKET_RESPONSE_JSON)
@@ -64,11 +71,37 @@ async fn test_http_broker() {
 }
 
 #[tokio::test]
+async fn test_http_broker_sends_sk_prefixed_auth_header() {
+    // Operator pre-configured the new namespace prefix; the header MUST
+    // carry the prefix exactly once, NOT be doubled.
+    let auth_token = "sk-abc123def456";
+    let (mut server, api) = setup_server_and_api(auth_token).await;
+    let ticket: Ticket = TICKET_ID.as_bytes().try_into().unwrap();
+    let ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(172, 27, 0, 1)), 0);
+    let _m = server
+        .mock("POST", "/")
+        .match_header(TUNNEL_AUTH_HEADER, "Bearer sk-abc123def456")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(TICKET_RESPONSE_JSON)
+        .create();
+    let response = api.start_connection(&ticket, ip).await.unwrap();
+    assert_eq!(response.remotes[0].host, "example.com");
+}
+
+#[tokio::test]
 async fn test_http_broker_stop() {
     let auth_token = "test_token";
     let (mut server, api) = setup_server_and_api(auth_token).await;
     let ticket: Ticket = [b'A'; TICKET_LENGTH].into();
-    let _m = server.mock("POST", "/").with_status(200).create();
+    let _m = server
+        .mock("POST", "/")
+        .match_header(
+            TUNNEL_AUTH_HEADER,
+            format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token).as_str(),
+        )
+        .with_status(200)
+        .create();
     let result = api.stop_connection(&ticket).await;
     assert!(result.is_ok());
 }

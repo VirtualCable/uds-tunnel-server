@@ -38,7 +38,7 @@ use crate::config;
 use shared::{
     crypt::kem::{PRIVATE_KEY_SIZE, PUBLIC_KEY_SIZE, comms_keypair},
     log,
-    protocol::ticket::Ticket,
+    protocol::{consts::TUNNEL_AUTH_NAMESPACE_PREFIX, ticket::Ticket},
 };
 
 mod request;
@@ -59,7 +59,6 @@ pub trait BrokerApi {
 
 pub struct HttpBrokerApi {
     client: Client,
-    auth_token: String,
     ticket_rest_url: String,
     public_key: [u8; PUBLIC_KEY_SIZE],
     private_key: [u8; PRIVATE_KEY_SIZE],
@@ -82,6 +81,19 @@ impl HttpBrokerApi {
         let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
         log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
         let keys = comms_keypair();
+
+        // Build the `Authorization: Bearer sk-...` header value once.
+        //
+        // Idempotent: if the operator already configured the token with the
+        // `sk-` namespace prefix (new style), we do NOT prepend it a second
+        // time. Older 5.0 configs use the bare token; we add the prefix
+        // transparently so the header is always well-formed.
+        let auth_header_value = if auth_token.starts_with(TUNNEL_AUTH_NAMESPACE_PREFIX) {
+            format!("Bearer {}", auth_token)
+        } else {
+            format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token)
+        };
+
         HttpBrokerApi {
             client: Client::builder()
                 .use_rustls_tls()
@@ -96,12 +108,18 @@ impl HttpBrokerApi {
                         reqwest::header::CONTENT_TYPE,
                         reqwest::header::HeaderValue::from_static("application/json"),
                     );
+                    // Tunnel-server authenticates exclusively via the
+                    // `Authorization: Bearer sk-<token>` header.
+                    headers.insert(
+                        reqwest::header::AUTHORIZATION,
+                        reqwest::header::HeaderValue::from_str(&auth_header_value)
+                            .expect("auth token value is not a valid HTTP header value"),
+                    );
                     headers
                 })
                 .danger_accept_invalid_certs(dangerous_disable_ssl_verify)
                 .build()
                 .unwrap(), // If not built, panic intentionally
-            auth_token: auth_token.to_string(),
             ticket_rest_url: ticket_rest_url.to_string(),
             public_key: keys.public_key,
             private_key: keys.private_key,
@@ -138,7 +156,6 @@ impl BrokerApi for HttpBrokerApi {
         let ticket_request = request::TicketRequest::new_start(
             ticket,
             &ip,
-            &self.auth_token,
             general_purpose::STANDARD.encode(self.public_key),
         );
         self.client
@@ -162,7 +179,7 @@ impl BrokerApi for HttpBrokerApi {
             ticket.as_str()
         );
         // No response body expected
-        let ticket_request = request::TicketRequest::new_stop(ticket, &self.auth_token, 0, 0);
+        let ticket_request = request::TicketRequest::new_stop(ticket, 0, 0);
         self.client
             .post(&self.ticket_rest_url)
             .json(&ticket_request)

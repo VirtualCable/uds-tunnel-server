@@ -32,9 +32,13 @@ use std::net::SocketAddr;
 
 use shared::protocol::ticket::Ticket;
 
+// Wire JSON body sent to the broker ticket endpoint.
+//
+// Authentication is carried on the `Authorization: Bearer sk-<token>` header
+// (see `broker/mod.rs`); the body deliberately does NOT carry the auth
+// token anymore. The broker keys on the header exclusively.
 #[derive(serde::Serialize)]
 pub(super) struct TicketRequest {
-    token: String,
     ticket: String,
     command: String,
     ip: String,
@@ -44,14 +48,8 @@ pub(super) struct TicketRequest {
 }
 
 impl TicketRequest {
-    pub fn new_start(
-        ticket: &Ticket,
-        ip: &SocketAddr,
-        auth_token: &str,
-        kem_kyber_key: String,
-    ) -> Self {
+    pub fn new_start(ticket: &Ticket, ip: &SocketAddr, kem_kyber_key: String) -> Self {
         TicketRequest {
-            token: auth_token.to_string(),
             ticket: ticket.as_str().to_string(),
             command: "start".to_string(),
             ip: ip.ip().to_string(),
@@ -61,9 +59,8 @@ impl TicketRequest {
         }
     }
 
-    pub fn new_stop(ticket: &Ticket, auth_token: &str, sent: u64, recv: u64) -> Self {
+    pub fn new_stop(ticket: &Ticket, sent: u64, recv: u64) -> Self {
         TicketRequest {
-            token: auth_token.to_string(),
             ticket: ticket.as_str().to_string(),
             command: "stop".to_string(),
             ip: "".to_string(),
