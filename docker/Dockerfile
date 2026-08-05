@@ -13,6 +13,7 @@
 #
 # Run:
 #   docker run -d -p 4443:4443 \
+#     --ulimit nofile=262144:262144 \
 #     -v /path/to/udstunnel.conf:/etc/udstunnel.conf:ro \
 #     -v /path/to/logs:/var/log/udstunnel \
 #     udstunnel
