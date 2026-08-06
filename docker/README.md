@@ -62,9 +62,37 @@ Edit `udstunnel.conf` with your broker details and token.
 docker run -d \
   --name udstunnel \
   -p 4443:4443 \
+  --ulimit nofile=262144:262144 \
   -v $(pwd)/udstunnel.conf:/etc/udstunnel.conf:ro \
   -v /path/to/logs:/var/log/udstunnel \
   udstunnel
+```
+
+## Open Files Limit (`nofile`)
+
+Every live tunnel holds **two** sockets, so the descriptor limit is what really caps
+concurrency. Docker starts containers with a **soft limit of 1024** (verified on
+Docker 29.1.3: `soft=1024`, `hard=524288`), which is about **480 concurrent tunnels** —
+well below the 8192 sessions the server allows. Past that, `accept()` fails with
+`EMFILE: Too many open files`.
+
+The entrypoint raises the soft limit to the hard limit before starting the server and
+reports the result:
+
+```
+[entrypoint] Open files limit: 524288 (hard 524288)
+```
+
+If the **hard** limit is also low, there is nothing to raise — always run with:
+
+```
+--ulimit nofile=262144:262144
+```
+
+Check what a container actually got:
+
+```bash
+docker exec udstunnel sh -c 'ulimit -Sn; ulimit -Hn'
 ```
 
 ## Configuration Reference

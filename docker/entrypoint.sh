@@ -24,6 +24,12 @@ if [ ! -d "$UDSTUNNEL_TUNNEL_LOG_PATH" ]; then
     mkdir -p "$UDSTUNNEL_TUNNEL_LOG_PATH"
 fi
 
+# --- Open files limit ---
+# Docker caps the container soft limit at 1024 whatever the host allows, and every live
+# session holds two sockets, so this is what really limits concurrency.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+echo "[entrypoint] Open files limit: $(ulimit -Sn) (hard $(ulimit -Hn))"
+
 # --- Validate configuration file ---
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[entrypoint] WARNING: Configuration file not found at ${CONFIG_FILE}"
