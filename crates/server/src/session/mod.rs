@@ -120,7 +120,37 @@ pub struct Session {
     rx: PayloadWithChannelReceiver,
 
     // seq numbers for crypto part
-    // only updated on server side killed. (the one receives/sends data from client)
+    //
+    // Convention: `seq.0`/`seq.1` start at `(0, 0)` and are **not** a
+    // reflection of crypt state. The session is constructed in `new()`
+    // without crypts; whoever builds the first pair of crypts (only
+    // `connection::connect` in production) does so via
+    // `server_tunnel_crypts()`, which reads these values, then issues
+    // the handshake that consumes one seq each direction. After the
+    // handshake completes, `connect` calls `set_seqs(1, 1)` to bring
+    // the session's seqs in line with what the crypts actually
+    // consumed.
+    //
+    // Any code reading `session.seqs()` (or calling `fetch_add_seqs`)
+    // BEFORE that explicit sync must assume `(0, 0)` is *by design* —
+    // not a missing update. This is fine because the only producer is
+    // `connect`, which is the sole owner of the just-created session
+    // for the brief window between `Session::new` and the handshake.
+    // (Recover uses an existing session whose seqs are already past
+    // the initial handshake.)
+    //
+    // **Why `(0, 0)` and not `(1, 1)`**: this is the initial value the
+    // tunnel client (udstunnel in `openuds/client`) expects when it
+    // builds its first pair of crypts for the handshake. Both sides
+    // MUST start at the same number, otherwise the crypt anti-replay
+    // check (`seq < current_seq` in `crypt::Crypt::decrypt`) rejects
+    // the very first encrypted packet and the handshake fails. The
+    // contract is "both sides, `(0, 0)`"; bumping it to `(1, 1)` here
+    // without coordinating with the client would silently break every
+    // inbound connection. The integration tests in
+    // `connection/tests.rs::create_out_int_crypts` pin this contract
+    // (they build the client-side crypt with `Crypt::new(&key, 0)`),
+    // so any change here must update them in lockstep.
     seq: RwLock<(u64, u64)>,
 
     // External (equiv) session id the client uses to talk to us. `None`
