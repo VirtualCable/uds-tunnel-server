@@ -118,10 +118,24 @@ async fn test_session_sequence_numbers() {
     let session = new_session_for_test("127.0.0.1:1234");
     let seq = session.seqs();
     assert_eq!(seq, (0, 0));
-    session.set_inbound_seq(5);
-    session.set_outbound_seq(10);
+    session.set_seqs(5, 10);
     let seq = session.seqs();
     assert_eq!(seq, (5, 10));
+}
+
+/// `set_seqs` overwrites both halves of the pair in one critical
+/// section. Two consecutive calls produce the latest value (not a
+/// stacked write) and asymmetric pairs are accepted (e.g. `(7, 11)`)
+/// because inbound and outbound seqs are tracked independently.
+#[tokio::test]
+async fn test_set_seqs_assigns_atomically() {
+    let session = new_session_for_test("127.0.0.1:1234");
+
+    session.set_seqs(7, 11);
+    assert_eq!(session.seqs(), (7, 11));
+
+    session.set_seqs(0, 0);
+    assert_eq!(session.seqs(), (0, 0));
 }
 
 #[serial_test::serial(manager)]

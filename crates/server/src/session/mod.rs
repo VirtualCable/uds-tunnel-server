@@ -226,14 +226,18 @@ impl Session {
         self.session_proxy.stop_server().await;
     }
 
-    pub fn set_inbound_seq(&self, seq_rx: u64) {
+    /// Atomically assign the (inbound, outbound) sequence numbers in a
+    /// single critical section. Use this whenever a session ends up
+    /// with both seqs known at the same time (initial handshake, server
+    /// stream teardown, recover), so the two halves of the pair cannot
+    /// drift apart under a concurrent observer.
+    ///
+    /// When only the relative advance is known (e.g. "advance both by 1
+    /// to allocate the next seq pair"), prefer [`Self::fetch_add_seqs`]
+    /// which returns the pre-increment values for an `OpenResponse`.
+    pub fn set_seqs(&self, seq_rx: u64, seq_tx: u64) {
         if let Ok(mut seq_lock) = self.seq.write() {
             seq_lock.0 = seq_rx;
-        }
-    }
-
-    pub fn set_outbound_seq(&self, seq_tx: u64) {
-        if let Ok(mut seq_lock) = self.seq.write() {
             seq_lock.1 = seq_tx;
         }
     }

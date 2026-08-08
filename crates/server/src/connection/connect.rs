@@ -121,8 +121,7 @@ where
             // So next expected seq is 2 on both sides.
             // Note: This is because we "spent" seq 0 just on the sent of the equiv session id
             //       on response
-            session.set_inbound_seq(1);
-            session.set_outbound_seq(1);
+            session.set_seqs(1, 1);
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(*session.id(), reader, writer);

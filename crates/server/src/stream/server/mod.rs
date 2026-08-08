@@ -370,8 +370,7 @@ where
 
         // Store back seqs on session, so if client recovers, it can continue with correct seq numbers
         if let Some(session) = session_manager.get_session(&session_id) {
-            session.set_inbound_seq(inbound_seq);
-            session.set_outbound_seq(outbound_seq);
+            session.set_seqs(inbound_seq, outbound_seq);
         }
 
         if session_manager.is_close_notified(&session_id) {
