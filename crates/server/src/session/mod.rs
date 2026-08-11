@@ -266,19 +266,19 @@ impl Session {
     /// to allocate the next seq pair"), prefer [`Self::fetch_add_seqs`]
     /// which returns the pre-increment values for an `OpenResponse`.
     pub fn set_seqs(&self, seq_rx: u64, seq_tx: u64) {
-        if let Ok(mut seq_lock) = self.seq.write() {
-            seq_lock.0 = seq_rx;
-            seq_lock.1 = seq_tx;
-        }
+        let mut seq_lock = self.seq.write().unwrap_or_else(|e| e.into_inner());
+        seq_lock.0 = seq_rx;
+        seq_lock.1 = seq_tx;
     }
 
     // Returns the (inbound, outbound) seq numbers
+    //
+    // A poisoned lock must not be reported as `(0, 0)`: that is the
+    // legitimate pre-handshake value, so the caller cannot tell a real
+    // seq pair from a failed read, and `server_tunnel_crypts()` would
+    // silently build the crypts at seq 0 and trip the anti-replay check.
     pub fn seqs(&self) -> (u64, u64) {
-        if let Ok(seq_lock) = self.seq.read() {
-            *seq_lock
-        } else {
-            (0, 0)
-        }
+        *self.seq.read().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Atomically read the current (inbound, outbound) sequence numbers
@@ -371,6 +371,82 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             vec![],
         )
+    }
+
+    /// Regression guard for the split-setter pair that `set_seqs`
+    /// replaced: assigning the two halves in separate critical sections
+    /// lets a concurrent observer read a **torn** pair (new inbound,
+    /// stale outbound). Both phases write symmetric pairs, so any
+    /// observed `(a, b)` with `a != b` is a torn read.
+    ///
+    /// The split phase is kept deliberately: it is what makes the
+    /// assertion on `set_seqs` meaningful instead of vacuous, and it
+    /// fails loudly if anyone splits the assignment again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn set_seqs_is_never_observed_torn() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // The pre-`b0d8e37` implementation, kept only as the control
+        // group: set_inbound_seq followed by set_outbound_seq, each
+        // taking the lock on its own.
+        fn set_split(session: &Session, seq_rx: u64, seq_tx: u64) {
+            session.seq.write().unwrap_or_else(|e| e.into_inner()).0 = seq_rx;
+            session.seq.write().unwrap_or_else(|e| e.into_inner()).1 = seq_tx;
+        }
+
+        async fn count_torn_reads(split: bool) -> usize {
+            const READS: usize = 2_000_000;
+
+            let session = Arc::new(new_test_session().await);
+            let stop = Arc::new(AtomicBool::new(false));
+
+            let writer = {
+                let session = session.clone();
+                let stop = stop.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut n = 1u64;
+                    while !stop.load(Ordering::Relaxed) {
+                        if split {
+                            set_split(&session, n, n);
+                        } else {
+                            session.set_seqs(n, n);
+                        }
+                        n = n.wrapping_add(1);
+                    }
+                })
+            };
+
+            let reader = {
+                let session = session.clone();
+                tokio::task::spawn_blocking(move || {
+                    (0..READS)
+                        .filter(|_| {
+                            let (inbound, outbound) = session.seqs();
+                            inbound != outbound
+                        })
+                        .count()
+                })
+            };
+
+            let torn = reader.await.expect("reader panicked");
+            stop.store(true, Ordering::Relaxed);
+            writer.await.expect("writer panicked");
+            torn
+        }
+
+        let torn_split = count_torn_reads(true).await;
+        let torn_atomic = count_torn_reads(false).await;
+
+        log::debug!("torn reads -- split: {torn_split}, set_seqs: {torn_atomic}");
+
+        assert!(
+            torn_split > 0,
+            "control group observed no torn read, so the set_seqs assertion proves nothing"
+        );
+        assert_eq!(
+            torn_atomic, 0,
+            "set_seqs exposed a half-updated pair {torn_atomic} time(s)"
+        );
     }
 
     /// `fetch_add_seqs` must return the **pre-increment** values, so the
