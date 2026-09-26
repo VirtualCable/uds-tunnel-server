@@ -33,14 +33,19 @@ use std::{
     net::SocketAddr,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, AtomicUsize},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize},
     },
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 
 use shared::{
-    crypt::{self, types::SharedSecret},
+    crypt::{
+        self,
+        datagram::{DatagramCrypt, UdpToken},
+        types::SharedSecret,
+    },
     log,
     protocol::{
         PayloadWithChannelReceiver, PayloadWithChannelSender, payload_with_channel_pair, ticket,
@@ -60,6 +65,102 @@ pub use {
 
 // Alias, internal SessionId is a Ticket
 pub type SessionId = ticket::Ticket;
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Per-session state for the UDP relay leg. Owned by the `Session`, dies
+/// with it (or earlier, if the relay's inactivity reaper clears it; the
+/// TCP session survives that).
+///
+/// Lock poisoning is recovered with `unwrap_or_else(|e| e.into_inner())`
+/// everywhere, mirroring the session seq lock: the critical sections are
+/// short and non-recursive, so a poisoned lock still holds a usable value.
+pub struct UdpState {
+    pub token: UdpToken,
+    pub inbound: Mutex<DatagramCrypt>, // client -> server (decrypt)
+    pub outbound: Mutex<DatagramCrypt>, // server -> client (encrypt)
+    pub client_addr: RwLock<Option<SocketAddr>>,
+    pub last_activity: AtomicU64, // secs since unix epoch
+    // Per-session socket towards the UDP remote (the RDP host), created
+    // on demand by the relay on the first authenticated datagram.
+    remote_socket: RwLock<Option<Arc<tokio::net::UdpSocket>>>,
+}
+
+// DatagramCrypt has no Debug impl; show the useful bits instead.
+impl std::fmt::Debug for UdpState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpState")
+            .field("token", &self.token)
+            .field("client_addr", &self.client_addr())
+            .field("last_activity", &self.last_activity())
+            .finish()
+    }
+}
+
+impl UdpState {
+    pub fn new(token: UdpToken, inbound: DatagramCrypt, outbound: DatagramCrypt) -> Self {
+        UdpState {
+            token,
+            inbound: Mutex::new(inbound),
+            outbound: Mutex::new(outbound),
+            client_addr: RwLock::new(None),
+            last_activity: AtomicU64::new(unix_now_secs()),
+            remote_socket: RwLock::new(None),
+        }
+    }
+
+    pub fn lock_inbound(&self) -> std::sync::MutexGuard<'_, DatagramCrypt> {
+        self.inbound.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn lock_outbound(&self) -> std::sync::MutexGuard<'_, DatagramCrypt> {
+        self.outbound.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Address of the authenticated UDP peer, if any datagram has
+    /// already decrypted correctly (anti-amplification gate).
+    pub fn client_addr(&self) -> Option<SocketAddr> {
+        *self.client_addr.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Update the client address after a successful decrypt. Safe for
+    /// NAT rebinding: only authenticated datagrams reach this point.
+    pub fn set_client_addr(&self, addr: SocketAddr) {
+        let mut lock = self.client_addr.write().unwrap_or_else(|e| e.into_inner());
+        if *lock != Some(addr) {
+            *lock = Some(addr);
+        }
+    }
+
+    pub fn touch(&self) {
+        self.last_activity
+            .store(unix_now_secs(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn last_activity(&self) -> u64 {
+        self.last_activity
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn remote_socket(&self) -> Option<Arc<tokio::net::UdpSocket>> {
+        self.remote_socket
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_remote_socket(&self, socket: Arc<tokio::net::UdpSocket>) {
+        *self
+            .remote_socket
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(socket);
+    }
+}
 
 pub static RECOVERY_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(64 * 1024); // Default to 64 KB, can be configured at runtime
 
@@ -160,6 +261,11 @@ pub struct Session {
 
     // Ip of the client connected
     src_ip: RwLock<SocketAddr>,
+
+    // UDP relay leg state, `Some` only when both the broker flag and the
+    // server config allowed it at connect time. Cleared by the relay's
+    // inactivity reaper; the TCP session survives that.
+    udp: RwLock<Option<Arc<UdpState>>>,
 }
 
 impl Session {
@@ -198,6 +304,7 @@ impl Session {
             current_equiv_id: RwLock::new(None),
             src_ip: RwLock::new(src_ip),
             remotes,
+            udp: RwLock::new(None),
         }
     }
 
@@ -316,6 +423,31 @@ impl Session {
 
     pub fn ticket(&self) -> &ticket::Ticket {
         &self.ticket
+    }
+
+    /// Remotes reported by the broker for this session ("host:port").
+    /// The UDP relay forwards to `remotes[0]`, the same endpoint as TCP
+    /// channel 1.
+    pub fn remotes(&self) -> &[String] {
+        &self.remotes
+    }
+
+    /// Install the UDP leg state. Must happen before the session is
+    /// handed to `SessionManager::add_session`, which is what registers
+    /// the token with the relay.
+    pub fn set_udp(&self, udp: UdpState) {
+        *self.udp.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(udp));
+    }
+
+    pub fn udp(&self) -> Option<Arc<UdpState>> {
+        self.udp.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Drop the UDP leg state (relay inactivity reaper). Returns the
+    /// removed state so the caller can unregister the token. The TCP
+    /// session keeps running unaffected.
+    pub fn clear_udp(&self) -> Option<Arc<UdpState>> {
+        self.udp.write().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     pub fn shared_secret(&self) -> &SharedSecret {
@@ -559,6 +691,42 @@ mod tests {
         assert_eq!(final_out, N * 4);
     }
 
+    /// `udp` starts as `None` on a fresh session, accepts a `UdpState`,
+    /// and `clear_udp` removes it again while the session keeps running.
+    #[tokio::test]
+    async fn udp_state_lifecycle_on_session() {
+        let session = new_test_session().await;
+        assert!(session.udp().is_none());
+
+        let token = [0x55u8; 16];
+        let key = SharedSecret::new([9u8; 32]);
+        let (inbound, outbound) = (
+            crypt::datagram::DatagramCrypt::new(&key),
+            crypt::datagram::DatagramCrypt::new(&key),
+        );
+        session.set_udp(UdpState::new(token, inbound, outbound));
+
+        let udp = session.udp().expect("udp state must be present");
+        assert_eq!(udp.token, token);
+        assert!(udp.client_addr().is_none());
+
+        let addr: SocketAddr = "127.0.0.1:5555".parse().unwrap();
+        udp.set_client_addr(addr);
+        assert_eq!(udp.client_addr(), Some(addr));
+
+        let before = udp.last_activity();
+        udp.touch();
+        assert!(udp.last_activity() >= before);
+
+        let removed = session.clear_udp().expect("clear must return the state");
+        assert_eq!(removed.token, token);
+        assert!(
+            session.udp().is_none(),
+            "udp state must be gone after clear"
+        );
+        // Clearing twice is a no-op
+        assert!(session.clear_udp().is_none());
+    }
     /// `current_equiv_id` starts as `None` on a fresh session, accepts
     /// arbitrary `Some(_)` writes, and accepts a clear back to `None`.
     /// This is the atomicity guarantee of the unit backing

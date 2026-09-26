@@ -12,6 +12,8 @@ pub struct ServerConfig {
     pub log_level: Option<String>,   // Log level for the server, default: "info"
     pub listen_port: Option<u16>,    // Port to listen on, default: 443
     pub use_proxy_protocol: Option<bool>, // Whether to expect PROXY protocol v2 headers, default: false
+    pub udp_listen_port: Option<u16>, // Port for the shared UDP relay socket, default: same as listen_port
+    pub udp_enabled: Option<bool>, // Master switch for the UDP relay leg, default: true (the real gate is the broker flag)
     pub ticket_api_url: String, // URL of the broker API, e.g., https://broker.example.com/uds/rest/ticket
     // SECURITY: setting this to `true` disables TLS certificate validation
     // on the broker API client. Useful for diagnostics against
@@ -31,6 +33,21 @@ impl ServerConfig {
     /// Effective session cap, falling back to the default when unset.
     pub fn max_sessions(&self) -> usize {
         self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
+    }
+
+    /// Whether the UDP relay leg is allowed at all on this server.
+    /// Default `true`; the per-session gate is the broker's
+    /// `enable_udp` flag (checked in `connection::connect`).
+    pub fn udp_enabled(&self) -> bool {
+        self.udp_enabled.unwrap_or(true)
+    }
+
+    /// UDP relay bind address: same interface as TCP, UDP port falls
+    /// back to `listen_port` when `udp_listen_port` is unset.
+    pub fn udp_sockaddr(&self) -> SocketAddr {
+        let mut addr = self.listen_sockaddr();
+        addr.set_port(self.udp_listen_port.unwrap_or(addr.port()));
+        addr
     }
 
     /// Logs `warn!` entries for any configuration knobs that materially weaken
@@ -80,6 +97,8 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     listen_addr: None,
                     listen_port: None,
                     use_proxy_protocol: None,
+                    udp_listen_port: None,
+                    udp_enabled: None,
                     ticket_api_url: "".to_string(),
                     dangerous_disable_ssl_verify: None,
                     broker_auth_token: "".to_string(),
@@ -97,6 +116,11 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                 && let Ok(port) = port_str.parse::<u16>()
             {
                 config.listen_port = Some(port);
+            }
+            if let Ok(port_str) = std::env::var("UDSTUNNEL_UDP_LISTEN_PORT")
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                config.udp_listen_port = Some(port);
             }
 
             Arc::new(RwLock::new(config))
@@ -128,5 +152,25 @@ mod tests {
         );
         assert_eq!(config.dangerous_disable_ssl_verify, Some(true));
         assert_eq!(config.broker_auth_token, "test_token".to_string());
+        // UDP knobs unset: relay enabled by default, port follows listen_port
+        assert_eq!(config.udp_listen_port, None);
+        assert!(config.udp_enabled());
+        assert_eq!(config.udp_sockaddr(), "127.0.0.1:443".parse().unwrap());
+    }
+
+    #[test]
+    fn test_parse_config_udp_overrides() {
+        let toml_str = r#"
+            listen_addr = "*"
+            listen_port = 443
+            udp_listen_port = 8443
+            udp_enabled = false
+            ticket_api_url = "https://broker.example.com/uds/rest/ticket"
+            broker_auth_token = "test_token"
+        "#;
+        let config = ServerConfig::from_toml_str(toml_str).unwrap();
+        assert_eq!(config.udp_listen_port, Some(8443));
+        assert!(!config.udp_enabled());
+        assert_eq!(config.udp_sockaddr(), "0.0.0.0:8443".parse().unwrap());
     }
 }

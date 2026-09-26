@@ -39,6 +39,8 @@ use crate::log;
 
 // Comms related
 pub mod consts;
+pub mod datagram;
+pub mod replay;
 pub mod stream;
 pub mod tunnel;
 pub mod types;
@@ -200,6 +202,22 @@ impl Crypt {
         cipher
             .decrypt(nonce, data)
             .map_err(|_| anyhow::format_err!("AES-256-GCM decryption failed"))
+    }
+
+    /// Symmetric counterpart of [`Crypt::simple_decrypt`]: encrypts with a
+    /// derived key + explicit nonce, outside the internal seq machinery.
+    /// Used by the broker side of the ticket exchange (and by tests that
+    /// need to build a broker-shaped encrypted payload).
+    pub fn simple_encrypt(
+        key: &types::SharedSecret,
+        nonce: &[u8; 12],
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
+        let nonce: &Nonce<<Aes256Gcm as AeadCore>::NonceSize> = &Nonce::from(*nonce);
+        let cipher = Aes256Gcm::new(key.as_ref().into());
+        cipher
+            .encrypt(nonce, data)
+            .map_err(|_| anyhow::format_err!("AES-256-GCM encryption failed"))
     }
 }
 

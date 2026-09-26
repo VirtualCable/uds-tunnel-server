@@ -24,6 +24,7 @@ configuration file is read; later edits to the file still win.
 |----------------------------|----------------------------|
 | `UDSTUNNEL_LISTEN_ADDR`    | `listen_addr`              |
 | `UDSTUNNEL_LISTEN_PORT`    | `listen_port` (must parse) |
+| `UDSTUNNEL_UDP_LISTEN_PORT`| `udp_listen_port` (must parse) |
 
 ## Fields
 
@@ -51,6 +52,28 @@ configuration file is read; later edits to the file still win.
   incoming TCP connection before the UDS handshake. The header's
   source address is then used as the session `src_ip`. Leave `false`
   when the server is exposed directly to clients.
+
+### UDP relay
+
+#### `udp_enabled`
+
+- Type: boolean
+- Default: `true`
+- Master switch for the UDP relay leg (used for RDP UDP redirection).
+  The per-session gate is the broker's `enable_udp` flag on the ticket
+  response; this field only controls whether the shared UDP socket is
+  bound at all. If the bind fails, the server logs an error and keeps
+  serving TCP only (RDP falls back to the TCP leg transparently).
+
+#### `udp_listen_port`
+
+- Type: unsigned 16-bit integer
+- Default: same as `listen_port`
+- Port of the shared UDP socket every session's UDP leg multiplexes on.
+  The bind address always follows `listen_addr`. The resolved port is
+  advertised to the client in the `OpenResponse` (`udp_port` field), so
+  the launcher reaches the relay even when it is split from the TCP
+  listener.
 
 ### Broker API
 
@@ -128,6 +151,7 @@ configuration file is read; later edits to the file still win.
 | Concern                          | Knob                          | Default      |
 |----------------------------------|-------------------------------|--------------|
 | Bind                             | `listen_addr` / `listen_port` | `*` / 443    |
+| UDP relay                        | `udp_enabled` / `udp_listen_port` | `true` / `listen_port` |
 | PROXY v2 source IP               | `use_proxy_protocol`          | `false`      |
 | Broker endpoint                  | `ticket_api_url`              | empty        |
 | Broker auth                      | `broker_auth_token`           | empty        |

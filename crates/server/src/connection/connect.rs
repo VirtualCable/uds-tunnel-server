@@ -3,12 +3,17 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger};
+use shared::{
+    crypt::{datagram::random_token, tunnel::get_udp_crypts, types::PacketBuffer},
+    log,
+    protocol::ticket::Ticket,
+    system::trigger::Trigger,
+};
 
 use crate::{
     broker::{self, BrokerApi},
     config,
-    session::{Session, SessionManager},
+    session::{Session, SessionManager, UdpState},
     stream::server::TunnelServerStream,
 };
 
@@ -57,13 +62,35 @@ where
             }
 
             let stop = Trigger::new();
-            let session = session_manager.add_session(Session::new(
-                ticket_info.get_shared_secret()?,
+            let shared_secret = ticket_info.get_shared_secret()?;
+            let session = Session::new(
+                shared_secret.clone(),
                 *ticket,
                 stop.clone(),
                 src_ip,
                 ticket_info.channels_remotes(),
-            ))?;
+            );
+
+            // UDP relay leg: only when both the broker flag and the server
+            // config allow it. Keys derive from the same ticket shared
+            // secret (dedicated HKDF label), so no extra handshake is
+            // needed; a zero token on the OpenResponse means "disabled".
+            let udp_enabled = config::get().read().unwrap().udp_enabled();
+            let (udp_token, udp_port) = if ticket_info.enable_udp() && udp_enabled {
+                let token = random_token();
+                let (inbound, outbound) = get_udp_crypts(&shared_secret, ticket)?;
+                session.set_udp(UdpState::new(token, inbound, outbound));
+                log::debug!("UDP relay leg enabled for ticket {:?}", ticket);
+                // Advertise the resolved UDP port so the client can reach
+                // the relay even when it is split from the TCP listener.
+                (token, config::get().read().unwrap().udp_sockaddr().port())
+            } else {
+                // A zeroed token means "UDP disabled"; the port is ignored.
+                ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0)
+            };
+
+            // add_session also publishes the UDP token in the relay map.
+            let session = session_manager.add_session(session)?;
 
             // Check that the first crypted packet is the ticket again
             let (mut crypt_reader, mut crypt_writer) = session.server_tunnel_crypts()?;
@@ -103,7 +130,14 @@ where
             // `remotes_count <= MAX_CHANNEL_ID` and `> 0`, so the channel
             // count we advertise here matches the broker's value one-to-one
             // and the client's view of the world matches ours.
-            let response = OpenResponse::new(equiv_id, ticket_info.remotes_count() as u16, 1, 1);
+            let response = OpenResponse::with_udp(
+                equiv_id,
+                ticket_info.remotes_count() as u16,
+                1,
+                1,
+                udp_token,
+                udp_port,
+            );
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer

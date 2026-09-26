@@ -126,7 +126,17 @@ where
             // updates, which would desync the loser's crypt from the
             // server's view of the sequence window.
             let (in_seq, out_seq) = session.fetch_add_seqs(1, 1);
-            let response = OpenResponse::new(equiv_id, 0, in_seq, out_seq); // On recover, no new streams are created
+            // The UDP leg survives recovery: keys derive from the ticket
+            // and do not change, so the same token goes back out. A zero
+            // token means the session never had UDP enabled.
+            let (udp_token, udp_port) = match session.udp() {
+                Some(udp) => (
+                    udp.token,
+                    crate::config::get().read().unwrap().udp_sockaddr().port(),
+                ),
+                None => ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0),
+            };
+            let response = OpenResponse::with_udp(equiv_id, 0, in_seq, out_seq, udp_token, udp_port); // On recover, no new streams are created
             let response_data = response.as_vec();
             log::debug!(
                 "Recovering session {:?} for client {:?}, sending OpenResponse {:?}",

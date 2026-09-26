@@ -56,6 +56,10 @@ pub struct TicketResponse {
     pub remotes: Vec<TicketRemote>,
     pub notify: String, // Stop notification ticket
     pub shared_secret: Option<String>,
+    // Whether the broker allows the UDP relay leg for this transport.
+    // Top-level in the broker JSON; absent on brokers that predate it.
+    #[serde(default)]
+    pub enable_udp: bool,
 }
 
 impl TicketResponse {
@@ -65,6 +69,10 @@ impl TicketResponse {
         } else {
             Err(anyhow::anyhow!("Missing or invalid shared secret"))
         }
+    }
+
+    pub fn enable_udp(&self) -> bool {
+        self.enable_udp
     }
 
     pub fn channels_remotes(&self) -> Vec<String> {
@@ -162,7 +170,22 @@ mod tests {
             remotes,
             notify: String::new(),
             shared_secret: None,
+            enable_udp: false,
         }
+    }
+
+    #[test]
+    fn enable_udp_defaults_to_false_when_absent() {
+        let resp: TicketResponse =
+            serde_json::from_str(r#"{"remotes": [], "notify": "", "shared_secret": null}"#)
+                .unwrap();
+        assert!(!resp.enable_udp());
+
+        let resp: TicketResponse = serde_json::from_str(
+            r#"{"remotes": [], "notify": "", "shared_secret": null, "enable_udp": true}"#,
+        )
+        .unwrap();
+        assert!(resp.enable_udp());
     }
 
     #[test]

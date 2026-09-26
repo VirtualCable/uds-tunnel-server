@@ -9,6 +9,7 @@ The UDS Tunnel Server is a high-performance tunneling service written in Rust th
 - **Secure Tunneling**: Establishes encrypted tunnels between clients and target servers
 - **Ticket-Based Authentication**: Uses broker-validated tickets for connection authorization
 - **TLS Support**: Built-in TLS encryption for secure communications
+- **UDP Relay**: Optional parallel UDP leg (e.g. RDPUDP redirection) with per-datagram AEAD encryption
 - **Proxy Protocol Support**: Optional PROXY protocol v2 support for load balancers
 - **Asynchronous I/O**: High-performance async Rust implementation using Tokio
 - **Graceful Shutdown**: Proper signal handling for clean shutdowns
@@ -76,6 +77,16 @@ cargo run --bin tunnel-server
 - HTTPS communication with broker API
 - Tunnel is encrypted using a pre-shared key, used with the ticket to derive session keys
 - The pre-shared key has been shared previously between the broker/client using ml-kyber and using TLS with tunnel.
+
+### UDP leg
+
+When the broker flags a ticket with `enable_udp` (tunneled RDP transports), the server accepts a parallel UDP relay leg on `udp_listen_port` (defaults to the TCP port):
+
+- Each datagram is AEAD-encrypted (AES-256-GCM) with dedicated keys derived via HKDF (`openuds-ticket-crypt-udp` label) from the same ML-KEM ticket secret — domain-separated from the TCP leg keys, keeping the post-quantum property end to end.
+- Datagrams are demultiplexed to sessions by a random 128-bit per-session token assigned at `Open` time.
+- Anti-replay uses a 1024-entry sliding-window bitmap (IPsec/DTLS style) instead of the strict counter of the TCP leg, tolerating reordering and loss; sequence numbers start at 2^63 so they cannot wrap.
+- The relay is deliberately unreliable (no reordering, no retransmission): RDPUDP implements its own reliability, and the session falls back to TCP-only (`E_ABORT`) if UDP never establishes.
+- Anti-amplification: no UDP traffic is ever sent to a client address that has not first sent an AEAD-authenticated datagram.
 
 ## Version
 

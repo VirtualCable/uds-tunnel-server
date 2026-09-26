@@ -95,6 +95,12 @@ impl SessionManager {
         }
         let session = Arc::new(session);
         sessions.insert(session.id, session.clone());
+        // If the session carries a UDP leg, publish its token in the
+        // relay map so the shared UDP socket can demultiplex to it.
+        // No-op when the relay is not running (e.g. tests, udp_enabled=false).
+        if session.udp().is_some() {
+            crate::udp::register_session(&session);
+        }
         Ok(session)
     }
 
@@ -107,6 +113,10 @@ impl SessionManager {
         let mut sessions = self.sessions.write().unwrap();
         if let Some(session) = sessions.get(id) {
             session.stop.trigger();
+            // Drop the UDP leg from the relay token map, if any.
+            if let Some(udp) = session.udp() {
+                crate::udp::unregister_token(&udp.token);
+            }
             sessions.remove(id);
         }
         // The session's `current_equiv_id` lives inside the Session and

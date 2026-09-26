@@ -38,6 +38,7 @@ pub mod connection;
 pub mod consts;
 pub mod session;
 pub mod stream;
+pub mod udp;
 
 use shared::{log, system::trigger::Trigger};
 
@@ -74,6 +75,27 @@ async fn main() {
     log::info!("Listening on {}", listen_sock_addr);
 
     let stop = Trigger::new();
+
+    // UDP relay leg: same bind address as TCP, its own (configurable)
+    // port. If the bind fails we keep serving TCP only — RDP falls back
+    // to the TCP leg transparently, so this must not abort startup.
+    {
+        let (udp_enabled, udp_addr) = {
+            let config_guard = config::get();
+            let config = config_guard.read().unwrap();
+            (config.udp_enabled(), config.udp_sockaddr())
+        };
+        if udp_enabled {
+            match udp::UdpRelay::start(udp_addr, stop.clone()).await {
+                Ok(_) => log::info!("UDP relay listening on {}", udp_addr),
+                Err(e) => log::error!(
+                    "Failed to bind UDP relay on {}: {:?}. Continuing with TCP only.",
+                    udp_addr,
+                    e
+                ),
+            }
+        }
+    }
 
     // Spawn the signal handler
     {
