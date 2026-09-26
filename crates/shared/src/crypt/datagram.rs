@@ -85,10 +85,17 @@ pub const INITIAL_SEQ: u64 = 1 << 63;
 /// `rand::rng()` as `Ticket::new_random`. A zero token is reserved for
 /// "UDP disabled" and is never produced here (128 random bits; the
 /// all-zero value is a measure-zero event, but we guarantee it anyway).
+///
+/// The low nibble is always zero: those 4 bits are reserved as a channel
+/// index for the future multi-destination extension (channel `i` uses
+/// token `base + i`, max 16 channels), which makes collisions between a
+/// derived channel token and another session's base token impossible by
+/// construction.
 pub fn random_token() -> UdpToken {
     use rand::RngExt as _;
     let mut token = [0u8; TOKEN_LENGTH];
     rand::rng().fill(&mut token);
+    token[TOKEN_LENGTH - 1] &= 0xF0;
     token
 }
 
@@ -207,6 +214,18 @@ mod tests {
     fn crypt_pair() -> (DatagramCrypt, DatagramCrypt) {
         let key = SharedSecret::new([7u8; 32]);
         (DatagramCrypt::new(&key), DatagramCrypt::new(&key))
+    }
+
+    #[test]
+    fn test_random_token_has_zero_channel_nibble() {
+        // The low 4 bits are reserved as the channel index for the future
+        // multi-destination extension; base tokens must always have them
+        // clear so `base + i` (i < 16) can never collide with another
+        // session's base token.
+        for _ in 0..64 {
+            let token = random_token();
+            assert_eq!(token[TOKEN_LENGTH - 1] & 0x0F, 0);
+        }
     }
 
     #[test]
