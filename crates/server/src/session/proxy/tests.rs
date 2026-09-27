@@ -436,3 +436,94 @@ async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
     assert_eq!(channels.slots_len(), 0);
     Ok(())
 }
+
+// Regression tests for `close_client` bounds. Channel 0 is the control
+// channel: `CloseChannel { channel_id: 0 }` from an authenticated peer
+// used to index `clients_senders[(0 - 1) as usize]`, panicking (debug
+// overflow / release out-of-bounds). The panic aborts the spawned proxy
+// task before its `stop.trigger()` + `remove_session` cleanup runs, so
+// the session leaks in the SessionManager indefinitely.
+#[tokio::test]
+async fn close_client_channel_zero_is_noop() {
+    use super::channels::ClientChannels;
+
+    let mut channels = ClientChannels::new();
+    // Must not panic and must not touch any slot.
+    channels.close_client(0);
+    assert_eq!(channels.slots_len(), 0);
+}
+
+#[tokio::test]
+async fn close_client_rejects_out_of_range_ids() {
+    use super::channels::ClientChannels;
+
+    let mut channels = ClientChannels::new();
+    // No client ever created: any id is out of range, must not panic.
+    channels.close_client(1);
+    channels.close_client(u16::MAX);
+    assert_eq!(channels.slots_len(), 0);
+}
+
+// Full proxy-level regression: the client channel of an established
+// session sends `CloseChannel { channel_id: 0 }` on the control channel
+// (exactly the PoC of the leak). The proxy must survive the command
+// (the guard turns it into a no-op); before the fix the panic aborted
+// the proxy task and bypassed its session cleanup, leaking the session.
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn proxy_survives_close_channel_zero_and_reaps_session() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (host_port, stop_server, _server_tx, _server_rx) = create_test_server().await;
+
+    let stop = Trigger::new();
+    let (proxy, handle) = Proxy::new(stop.clone());
+    let session = SessionManager::get_instance().add_session(Session::new(
+        SharedSecret::new([0u8; 32]),
+        Ticket::new_random(),
+        stop.clone(),
+        "127.1.2.3:1234".parse().unwrap(),
+        vec![host_port],
+    ))?;
+    let task = proxy.run(*session.id());
+
+    let server = handle.start_server().await?;
+
+    // Open a legitimate channel, then close channel 0 from the client side
+    server
+        .tx
+        .send_async(
+            protocol::Command::OpenChannel {
+                channel_id: TEST_CHANNEL_ID,
+            }
+            .to_message(),
+        )
+        .await?;
+    server
+        .tx
+        .send_async(protocol::PayloadWithChannel::new(
+            0,
+            protocol::Command::CloseChannel { channel_id: 0 }
+                .to_bytes()
+                .as_slice(),
+        ))
+        .await?;
+
+    // Give the proxy time to process the command. On the unfixed code the
+    // panic here aborts the task and the session never leaves the manager.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // The proxy task must be alive (the command was a no-op).
+    assert!(
+        !task.is_finished(),
+        "proxy task aborted: CloseChannel(0) panicked inside the session proxy"
+    );
+
+    // On clean shutdown, the proxy must reap the session it leaked before
+    // the fix (the panic path skipped this cleanup).
+    handle.stop_server().await;
+    wait_for_session_existence(session.id(), false).await?;
+    stop_server.trigger();
+
+    Ok(())
+}

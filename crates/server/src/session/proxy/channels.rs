@@ -181,8 +181,14 @@ impl ClientChannels {
 
     /// Closes the client for the given stream_channel_id
     pub fn close_client(&mut self, stream_channel_id: u16) {
-        if self.clients_senders.len() >= stream_channel_id as usize {
-            self.clients_senders[(stream_channel_id - 1) as usize] = None;
+        // Channel 0 is the control channel and there is no client slot for
+        // it; without this guard `(stream_channel_id - 1)` underflows
+        // (panic in debug, index 65535 out of bounds in release) and the
+        // resulting panic aborts the spawned proxy task before its
+        // `stop.trigger()` + `remove_session` cleanup, leaking the session.
+        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+            return;
         }
+        self.clients_senders[(stream_channel_id - 1) as usize] = None;
     }
 }
