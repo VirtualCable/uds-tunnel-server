@@ -54,7 +54,7 @@ pub trait BrokerApi {
         ticket: &Ticket,
         ip: SocketAddr,
     ) -> Result<response::TicketResponse>;
-    async fn stop_connection(&self, ticket: &Ticket) -> Result<()>;
+    async fn stop_connection(&self, ticket: &Ticket, sent: u64, recv: u64) -> Result<()>;
 }
 
 pub struct HttpBrokerApi {
@@ -173,16 +173,19 @@ impl BrokerApi for HttpBrokerApi {
             })?
     }
 
-    async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
+    async fn stop_connection(&self, ticket: &Ticket, sent: u64, recv: u64) -> Result<()> {
         log::debug!(
-            "Stopping connection with broker for ticket: {}",
-            ticket.redacted()
+            "Stopping connection with broker for ticket: {} (sent: {}, recv: {})",
+            ticket.redacted(),
+            sent,
+            recv
         );
         // No response body expected
-        let ticket_request = request::TicketRequest::new_stop(ticket, 0, 0);
+        let ticket_request = request::TicketRequest::new_stop(ticket, sent, recv);
         self.client
             .post(&self.ticket_rest_url)
             .json(&ticket_request)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await?
             .error_for_status()
@@ -195,6 +198,32 @@ impl BrokerApi for HttpBrokerApi {
             })?;
 
         Ok(())
+    }
+}
+
+/// Best-effort broker stop notification from synchronous contexts
+/// (session teardown). Detaches the request on the current runtime so a
+/// slow or dead broker cannot block the Drop path; without a runtime,
+/// log and skip — the broker's own validity window bounds the damage.
+pub fn spawn_stop_notification(ticket: Ticket, sent: u64, recv: u64) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                if let Err(e) = get().stop_connection(&ticket, sent, recv).await {
+                    log::warn!(
+                        "Broker stop notification failed for notify ticket {}: {}",
+                        ticket.redacted(),
+                        e
+                    );
+                }
+            });
+        }
+        Err(_) => {
+            log::warn!(
+                "No tokio runtime on this thread; broker stop notification for ticket {} skipped",
+                ticket.redacted()
+            );
+        }
     }
 }
 

@@ -44,7 +44,7 @@ use shared::{
     },
     log,
     protocol::{
-        Command, consts::HANDSHAKE_V2_SIGNATURE, consts::TICKET_LENGTH,
+        Command, consts::HANDSHAKE_V2_SIGNATURE, consts::TICKET_LENGTH, consts::TUNNEL_AUTH_HEADER,
         handshake::HandshakeCommand, ticket::Ticket,
     },
     system::trigger::Trigger,
@@ -316,6 +316,114 @@ async fn test_connection_no_proxy_working() -> anyhow::Result<()> {
     // tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     client_stream.shutdown().await?;
     wait_for_session_manager_empty().await?;
+    Ok(())
+}
+
+/// End-to-end guard for the broker session-stop report: after a full
+/// tunnel with traffic, closing the session must make the server POST a
+/// `command: stop` with the notify ticket the broker handed out at start.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn test_connection_notifies_broker_stop_on_close() -> anyhow::Result<()> {
+    let (mut server, _mock, mut client_stream, _stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // Send a handshake with Open action
+    let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
+    signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    signature_buf.extend_from_slice(ticket.as_ref());
+    client_stream.write_all(&signature_buf).await?;
+
+    let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
+    out_crypt
+        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .await?;
+    let mut buffer: PacketBuffer = PacketBuffer::new();
+    let (session_response_data, _channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
+    let session_response = OpenResponse::from_slice(session_response_data)?;
+
+    let session_manager = crate::session::SessionManager::get_instance();
+    let session = session_manager
+        .get_equiv_session(&session_response.session_id)
+        .expect("Session not found");
+
+    // Open the remote channel (1) and relay some traffic so the stop
+    // report carries a real snapshot instead of zeros.
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
+        )
+        .await?;
+
+    let get_request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        TEST_REMOTE_SERVER
+    );
+    out_crypt
+        .write(
+            &mut client_stream,
+            TEST_STREAM_CHANNEL_ID,
+            get_request.as_bytes(),
+        )
+        .await?;
+    let response =
+        read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID).await?;
+    assert!(response.contains("HTTP/1.1 200 OK"));
+
+    assert!(session.traffic().snapshot().0 > 0, "upload not counted");
+    assert!(session.traffic().snapshot().1 > 0, "download not counted");
+
+    // The stop report fires from `Session::Drop`, i.e. when the *last* Arc
+    // goes away; this test holds an extra reference, so drop it here.
+    drop(session);
+
+    // Register the stop matcher only now: mockito prefers the most
+    // recently created matching mock, so the handshake's start POST (a
+    // different body) could not have consumed this expectation.
+    let stop_mock = server
+        .mock("POST", "/")
+        .match_header(
+            TUNNEL_AUTH_HEADER,
+            mockito::Matcher::Regex("Bearer sk-".into()),
+        )
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "command": "stop",
+            "ticket": "B".repeat(TICKET_LENGTH),
+        })))
+        .with_status(200)
+        .create();
+
+    // Close the session definitively.
+    let close_msg = Command::Close.to_message();
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            close_msg.payload.as_ref(),
+        )
+        .await?;
+    client_stream.shutdown().await?;
+    wait_for_session_manager_empty().await?;
+
+    // The stop report is spawned detached from the session teardown; poll
+    // briefly for the mock to be hit.
+    let mut notified = false;
+    for _ in 0..50 {
+        if stop_mock.matched() {
+            notified = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        notified,
+        "broker never received the stop notification for the closed session"
+    );
+
+    stop_mock.assert();
     Ok(())
 }
 

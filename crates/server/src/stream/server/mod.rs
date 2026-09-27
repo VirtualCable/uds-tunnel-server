@@ -29,6 +29,8 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -41,7 +43,7 @@ use shared::{
 
 use crate::{
     consts::SERVER_RECOVERY_GRACE_SECS, // global crate consts
-    session::{SessionId, SessionManager},
+    session::{SessionId, SessionManager, TrafficCounters},
 };
 
 struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
@@ -50,6 +52,7 @@ struct TunnelServerInboundStream<R: AsyncReadExt + Unpin> {
     sender: PayloadWithChannelSender,
     buffer: PacketBuffer,
     crypt: Crypt,
+    traffic: Arc<TrafficCounters>,
 
     reader: R,
 }
@@ -61,6 +64,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
         sender: PayloadWithChannelSender,
         stop: Trigger,
         session_id: SessionId,
+        traffic: Arc<TrafficCounters>,
     ) -> Self {
         TunnelServerInboundStream {
             session_id,
@@ -68,6 +72,7 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
             sender,
             crypt,
             buffer: PacketBuffer::new(),
+            traffic,
             reader,
         }
     }
@@ -103,6 +108,12 @@ impl<R: AsyncReadExt + Unpin> TunnelServerInboundStream<R> {
                             }
                         }
                         // Channels are processed on the proxy side, so just forward data
+                        if stream_channel_id != 0 {
+                            // Client upload: count payload bytes for the
+                            // broker stop report. Channel 0 is control
+                            // traffic and is not tunnel payload.
+                            self.traffic.add_sent(decrypted_data.len() as u64);
+                        }
                         self.sender
                             .send_async(PayloadWithChannel::new(stream_channel_id, decrypted_data))
                             .await?;
@@ -120,6 +131,7 @@ struct TunnelServerOutboundStream<W: AsyncWriteExt + Unpin> {
     receiver: PayloadWithChannelReceiver,
     crypt: Crypt,
     session_id: SessionId,
+    traffic: Arc<TrafficCounters>,
 
     writer: W,
 }
@@ -131,12 +143,14 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         receiver: PayloadWithChannelReceiver,
         stop: Trigger,
         session_id: SessionId,
+        traffic: Arc<TrafficCounters>,
     ) -> Self {
         TunnelServerOutboundStream {
             server_stop: stop,
             receiver,
             crypt,
             session_id,
+            traffic,
             writer,
         }
     }
@@ -218,6 +232,16 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                                 stored.clone()
                             };
                             self.send_data(&to_send).await?;
+                            if to_send.channel_id != 0 {
+                                // Download to the launcher: payload bytes
+                                // only (channel 0 is control traffic), and
+                                // only counted here — recovery re-sends are
+                                // not re-counted, at the cost of undercounting
+                                // the rare packet that first lands through
+                                // `recover_buffer`. Fine for informational
+                                // broker stats.
+                                self.traffic.add_recv(to_send.payload.len() as u64);
+                            }
                         }
                         Err(e) => {
                             // Maybe the receiver "won" the select! but stop is already set. This is fine
@@ -303,6 +327,7 @@ where
         };
 
         let server_stop = Trigger::new();
+        let traffic = session.traffic();
 
         let inbound = TunnelServerInboundStream::new(
             reader,
@@ -310,6 +335,7 @@ where
             channels.tx,
             server_stop.clone(),
             session_id,
+            traffic.clone(),
         );
 
         let outbound = TunnelServerOutboundStream::new(
@@ -318,6 +344,7 @@ where
             channels.rx,
             server_stop.clone(),
             session_id,
+            traffic,
         );
 
         tokio::spawn({

@@ -151,8 +151,14 @@ async fn test_server_inbound_basic() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone(), SessionId::new_random());
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt_in,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     tokio::spawn(async move {
         encrypted.write(&mut client).await.unwrap_or_else(|e| {
@@ -183,7 +189,14 @@ async fn test_server_inbound_remote_close_before_header() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), session_id);
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        session_id,
+        Arc::new(TrafficCounters::default()),
+    );
 
     drop(client);
 
@@ -208,6 +221,7 @@ async fn test_server_inbound_read_error() {
         tx,
         stop.clone(),
         SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
     );
 
     let res = inbound.run().await;
@@ -226,8 +240,14 @@ async fn test_server_inbound_stop_before_read() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), SessionId::new_random());
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     stop.trigger();
 
@@ -247,8 +267,14 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
     let stop = Trigger::new();
     let (tx, rx) = flume::bounded(10);
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(FailingStream, crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        FailingStream,
+        crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     // Send a message to the outbound stream, which will cause it to attempt to write and fail
 
@@ -292,8 +318,14 @@ async fn test_outbound_server_recovers_with_empty_buffer() -> Result<()> {
     let (_tx, rx) = flume::bounded(10);
     let (_client, server) = tokio::io::duplex(1024);
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     let errored = Arc::new(AtomicBool::new(false));
     let outbound_handle = tokio::spawn({
@@ -358,8 +390,14 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
         )?;
     }
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     // Must not fail, so run on ea task to allow check
     let errored = Arc::new(AtomicBool::new(false));
@@ -429,8 +467,14 @@ async fn test_outbound_server_recover_buffer_requeues_on_send_failure() -> Resul
     }
 
     // Writer that fails on the very first write.
-    let mut outbound =
-        TunnelServerOutboundStream::new(FailingStream, out_crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        FailingStream,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     let res = outbound.recover_buffer().await;
     assert!(res.is_err(), "recover_buffer must surface the send error");
@@ -475,6 +519,7 @@ async fn test_server_stream_with_invalid_packet() {
         tx,
         stop.clone(),
         SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
     );
 
     // Run the inbound stream in the background

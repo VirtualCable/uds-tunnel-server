@@ -37,6 +37,7 @@ use anyhow::Result;
 use shared::log;
 use shared::protocol::{PayloadWithChannelReceiver, PayloadWithChannelSender};
 
+use crate::broker::BrokerApi;
 use crate::config;
 use crate::session::SessionRecoveryBuffer;
 
@@ -125,9 +126,49 @@ impl SessionManager {
     }
 
     pub async fn finish_all_sessions(&self) {
-        // Just drop session, will set the stop trigger
-        let mut sessions = self.sessions.write().unwrap();
-        sessions.clear();
+        // Take the sessions out of the map but keep them alive until the
+        // final stop reports are delivered: dropping the Arcs earlier
+        // would stop the streams (and the traffic counters) mid-drain,
+        // and the detached notifications spawned by `Session::Drop`
+        // could be killed before the runtime shuts down.
+        let sessions: Vec<Arc<Session>> = {
+            let mut sessions = self.sessions.write().unwrap();
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+
+        // Stop the streams first so the traffic counters freeze, then
+        // snapshot them for the report (in-flight adds after this point
+        // are at most one packet per leg, which is acceptable for
+        // informational stats).
+        for session in &sessions {
+            session.stopper().trigger();
+        }
+
+        // Claim the one-shot broker notifications up front (`take_broker_stop`
+        // is idempotent, so the `Session::Drop` below will not re-send).
+        // Await the reports concurrently; each has its own request timeout.
+        let reports: Vec<_> = sessions
+            .iter()
+            .filter_map(|session| session.take_broker_stop())
+            .map(|(notify, sent, recv)| {
+                tokio::spawn(async move {
+                    if let Err(e) =
+                        crate::broker::get().stop_connection(&notify, sent, recv).await
+                    {
+                        log::warn!(
+                            "Broker stop notification failed on shutdown for notify ticket {:?}: {:?}",
+                            notify.redacted(),
+                            e
+                        );
+                    }
+                })
+            })
+            .collect();
+        futures::future::join_all(reports).await;
+
+        // Dropping the Arcs triggers each session's `Drop`, stopping the
+        // proxy/streams just as `sessions.clear()` used to.
+        drop(sessions);
     }
 
     pub fn count(&self) -> usize {

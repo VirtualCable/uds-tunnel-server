@@ -166,6 +166,36 @@ impl UdpState {
 
 pub static RECOVERY_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(64 * 1024); // Default to 64 KB, can be configured at runtime
 
+/// Bytes relayed through a session, counted at the launcher-facing legs
+/// of the tunnel: `sent` is client upload (launcher -> remote), `recv` is
+/// download (remote -> launcher). Payload bytes (post-decrypt /
+/// pre-encrypt), not wire bytes, and control-channel traffic is excluded.
+/// Reported to the broker on session stop.
+#[derive(Debug, Default)]
+pub struct TrafficCounters {
+    sent: AtomicU64,
+    recv: AtomicU64,
+}
+
+impl TrafficCounters {
+    pub fn add_sent(&self, bytes: u64) {
+        self.sent
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn add_recv(&self, bytes: u64) {
+        self.recv
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> (u64, u64) {
+        (
+            self.sent.load(std::sync::atomic::Ordering::Relaxed),
+            self.recv.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionRecoveryBuffer(Arc<Mutex<RecoverySendBuffer>>);
 
@@ -268,6 +298,23 @@ pub struct Session {
     // server config allowed it at connect time. Cleared by the relay's
     // inactivity reaper; the TCP session survives that.
     udp: RwLock<Option<Arc<UdpState>>>,
+
+    // Stop-notification ticket issued by the broker at `start_connection`
+    // time. When present, the session tells the broker the tunnel is over
+    // (and reports traffic stats) exactly once, on teardown. `None` for
+    // sessions built without a broker round-trip (tests, recover-only
+    // plumbing) or when the broker's notify ticket is malformed.
+    broker_stop_ticket: Option<ticket::Ticket>,
+
+    /// Bytes relayed through this session, for the stop report. Shared
+    /// with every launcher-facing stream/relay task so counts accumulate
+    /// across reconnects (a recover reuses the same session).
+    traffic: Arc<TrafficCounters>,
+
+    /// Claims the one-shot broker stop notification. `Session::Drop` is
+    /// the only teardown choke-point (close, cap-reject, proxy exit,
+    /// shutdown all funnel here), and the flag makes it idempotent.
+    broker_notified: AtomicBool,
 }
 
 impl Session {
@@ -277,6 +324,24 @@ impl Session {
         stop: Trigger,
         src_ip: SocketAddr,
         remotes: Vec<String>, // List of remote addresses that can be used on this session
+    ) -> Self {
+        Self::with_broker_stop_ticket(shared_secret, ticket, stop, src_ip, remotes, None)
+    }
+
+    /// Build a session that must notify the broker when it ends.
+    ///
+    /// `broker_stop_ticket` is the notify ticket the broker returned at
+    /// `start_connection` time; on teardown the session sends the stop
+    /// command with it (once) so the broker closes the tunnel record and
+    /// receives the traffic stats. Pass `None` (or use `new`) for
+    /// sessions that never went through a broker start.
+    pub fn with_broker_stop_ticket(
+        shared_secret: SharedSecret,
+        ticket: ticket::Ticket,
+        stop: Trigger,
+        src_ip: SocketAddr,
+        remotes: Vec<String>,
+        broker_stop_ticket: Option<ticket::Ticket>,
     ) -> Self {
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         let id = SessionId::new_random();
@@ -307,6 +372,9 @@ impl Session {
             src_ip: RwLock::new(src_ip),
             remotes,
             udp: RwLock::new(None),
+            broker_stop_ticket,
+            traffic: Arc::new(TrafficCounters::default()),
+            broker_notified: AtomicBool::new(false),
         }
     }
 
@@ -456,6 +524,29 @@ impl Session {
         &self.shared_secret
     }
 
+    /// Launcher-side traffic counters for this session. Streams and the
+    /// UDP relay add payload bytes here as they forward them; the
+    /// snapshot goes out with the broker stop notification.
+    pub fn traffic(&self) -> Arc<TrafficCounters> {
+        self.traffic.clone()
+    }
+
+    /// Claim the one-shot broker stop notification for this session.
+    /// Returns the notify ticket plus the traffic snapshot on the first
+    /// call for a session that has one; `None` afterwards or for
+    /// sessions that never went through a broker start.
+    pub fn take_broker_stop(&self) -> Option<(ticket::Ticket, u64, u64)> {
+        let notify = self.broker_stop_ticket?;
+        if self
+            .broker_notified
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return None;
+        }
+        let (sent, recv) = self.traffic.snapshot();
+        Some((notify, sent, recv))
+    }
+
     pub fn stopper(&self) -> Trigger {
         self.stop.clone()
     }
@@ -488,6 +579,14 @@ impl Drop for Session {
     fn drop(&mut self) {
         log::info!("Session dropped, stopping streams");
         self.stop.trigger();
+
+        // Last chance to tell the broker this tunnel is over. By the time
+        // the last Arc<Session> dies every launcher-facing task has
+        // finished (they all hold clones or stop on `stop`), so the
+        // traffic snapshot is complete.
+        if let Some((notify, sent, recv)) = self.take_broker_stop() {
+            crate::broker::spawn_stop_notification(notify, sent, recv);
+        }
     }
 }
 
@@ -779,5 +878,42 @@ mod tests {
             Some(first),
             "old equiv id must not leak through after overwrite"
         );
+    }
+
+    #[tokio::test]
+    async fn traffic_counters_accumulate_payload_bytes() {
+        let session = new_test_session().await;
+        let traffic = session.traffic();
+
+        assert_eq!(traffic.snapshot(), (0, 0));
+        traffic.add_sent(10);
+        traffic.add_recv(4);
+        traffic.add_sent(1);
+        assert_eq!(traffic.snapshot(), (11, 4));
+    }
+
+    #[tokio::test]
+    async fn take_broker_stop_is_one_shot_and_snapshots_traffic() {
+        let notify = ticket::Ticket::new_random();
+        let session = Session::with_broker_stop_ticket(
+            SharedSecret::new([0u8; 32]),
+            ticket::Ticket::new_random(),
+            Trigger::new(),
+            "127.0.0.1:0".parse().unwrap(),
+            vec![],
+            Some(notify),
+        );
+
+        session.traffic().add_sent(7);
+        session.traffic().add_recv(3);
+
+        assert_eq!(session.take_broker_stop(), Some((notify, 7, 3)));
+        // Second claim must be a no-op: the broker stop report is
+        // exactly-once per session, even with Drop + shutdown racing.
+        assert!(session.take_broker_stop().is_none());
+
+        // Sessions without a notify ticket never report.
+        let plain = new_test_session().await;
+        assert!(plain.take_broker_stop().is_none());
     }
 }

@@ -69,6 +69,54 @@ impl Drop for PendingSession {
     }
 }
 
+/// RAII guard for the broker tunnel allocation created by
+/// `start_connection`.
+///
+/// A successful start reserves a tunnel record on the broker (keyed by
+/// the notify ticket, valid until its TTL expires). Every path that
+/// abandons the tunnel before a `Session` exists to own the notify
+/// ticket — ticket validation failure, per-IP cap rejection, shared
+/// secret decode failure — must release that reservation explicitly, or
+/// the broker keeps an open tunnel that never carries traffic.
+///
+/// Once the `Session` is built with the notify ticket, it owns the stop
+/// responsibility (its `Drop` reports the real traffic stats) and the
+/// guard is committed, so the (0, 0) stop below cannot fire twice.
+struct BrokerAllocation {
+    notify: Option<Ticket>,
+    committed: bool,
+}
+
+impl BrokerAllocation {
+    fn new(notify: Option<Ticket>) -> Self {
+        Self {
+            notify,
+            committed: false,
+        }
+    }
+
+    /// Hand the stop responsibility to the session: marks the guard
+    /// committed and returns the notify ticket to install on the new
+    /// `Session`. From now on this guard stays silent on drop, and the
+    /// session's own teardown reports the stop (with real stats, even if
+    /// registration later fails and the session is dropped immediately).
+    fn handoff(&mut self) -> Option<Ticket> {
+        self.committed = true;
+        self.notify.take()
+    }
+}
+
+impl Drop for BrokerAllocation {
+    fn drop(&mut self) {
+        if !self.committed
+            && let Some(notify) = self.notify
+        {
+            // No session ever relayed traffic on this allocation.
+            crate::broker::spawn_stop_notification(notify, 0, 0);
+        }
+    }
+}
+
 pub(super) async fn connect<R, W>(
     mut reader: R,
     mut writer: W,
@@ -86,6 +134,11 @@ where
         // But currently, only one is supported, althout it's prepared to be extended later
         Ok(ticket_info) => {
             log::debug!("Received ticket info from broker: {:?}", ticket_info);
+            // The broker reserved a tunnel for us; the notify ticket is
+            // its handle. Keep it guarded until a `Session` exists to own
+            // the stop responsibility, so every early exit below releases
+            // the reservation (see `BrokerAllocation`).
+            let mut broker_alloc = BrokerAllocation::new(ticket_info.notify_ticket());
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             // Optional per-remote-IP cap: when the config sets
@@ -114,8 +167,11 @@ where
                 && session_manager.count_by_remote(src_ip) >= per_remote
             {
                 log::warn!(
-                    "Per-remote-IP session cap hit for {} (cap {}); stalling",
+                    "Per-remote-IP session cap hit for {} ({} sessions at cap {}); \
+                     raise `max_sessions_per_remote` in the server config if this is \
+                     legitimate load; stalling",
                     src_ip,
+                    session_manager.count_by_remote(src_ip),
                     per_remote
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -124,12 +180,13 @@ where
 
             let stop = Trigger::new();
             let shared_secret = ticket_info.get_shared_secret()?;
-            let session = Session::new(
+            let session = Session::with_broker_stop_ticket(
                 shared_secret.clone(),
                 *ticket,
                 stop.clone(),
                 src_ip,
                 ticket_info.channels_remotes(),
+                broker_alloc.handoff(),
             );
 
             // UDP relay leg: only when both the broker flag and the server

@@ -95,6 +95,15 @@ impl TicketResponse {
         self.enable_udp
     }
 
+    /// The stop-notification ticket as a `Ticket`, if the broker provided
+    /// one with the expected length. The `Ticket` conversion is a pure
+    /// length check; the notify string is opaque protocol data, not a
+    /// credential this tunnel derives keys from, so no alphanumeric
+    /// validation is applied here.
+    pub fn notify_ticket(&self) -> Option<Ticket> {
+        Ticket::try_from(self.notify.as_bytes()).ok()
+    }
+
     pub fn channels_remotes(&self) -> Vec<String> {
         self.remotes
             .iter()

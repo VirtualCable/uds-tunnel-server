@@ -273,7 +273,14 @@ impl UdpRelay {
         };
 
         match remote_sock.send(&payload).await {
-            Ok(_) => Counters::bump(&c.forwarded),
+            Ok(_) => {
+                Counters::bump(&c.forwarded);
+                // Client upload towards the remote: payload bytes, on a
+                // successful forward (same rule as the TCP streams).
+                session
+                    .traffic()
+                    .add_sent(payload.len().try_into().unwrap_or(u64::MAX));
+            }
             Err(e) => log::error!("UDP relay send to remote failed: {:?}", e),
         }
     }
@@ -317,6 +324,7 @@ impl UdpRelay {
         let relay = self.clone();
         let session_weak = Arc::downgrade(session);
         let stop = session.stopper();
+        let traffic = session.traffic();
         tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_DATAGRAM_PAYLOAD];
             let mut alive_check =
@@ -358,7 +366,12 @@ impl UdpRelay {
                             }
                         };
                         match relay.socket.send_to(&datagram, client_addr).await {
-                            Ok(_) => Counters::bump(&relay.counters.sent),
+                            Ok(_) => {
+                                Counters::bump(&relay.counters.sent);
+                                // Download towards the client: the payload
+                                // length, same rule as the upload above.
+                                traffic.add_recv(len as u64);
+                            }
                             Err(e) => log::error!("UDP relay send to client failed: {:?}", e),
                         }
                     }
