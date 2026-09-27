@@ -161,7 +161,13 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
             drained
         };
 
-        for (unsent_packet, old_seq) in unsent {
+        // Send in buffer (FIFO) order. If any send fails, re-queue the failed
+        // item and everything still pending behind it, mirroring the
+        // steady-state invariant in `run` (push-then-send: a send failure
+        // leaves the packet buffered for the next recovery attempt). The
+        // buffer was just drained empty, so these pushes cannot evict or fail.
+        let mut iter = unsent.into_iter();
+        while let Some((unsent_packet, old_seq)) = iter.next() {
             log::debug!(
                 "Resend old seq {} len {}: {:?}..{:?}",
                 old_seq,
@@ -171,7 +177,14 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 unsent_packet.payload.as_ref()[unsent_packet.payload.len().saturating_sub(8)..]
                     .to_vec(),
             );
-            self.send_data(&unsent_packet).await?;
+            if let Err(e) = self.send_data(&unsent_packet).await {
+                let mut buf = recovery_buffer.lock();
+                let _ = buf.push(old_seq, unsent_packet); // drained buffer: cannot fail
+                for (pending, pending_seq) in iter.by_ref() {
+                    let _ = buf.push(pending_seq, pending);
+                }
+                return Err(e);
+            }
         }
         log::debug!(
             "Finished resending unsent packets for session {:?} in server outbound stream",

@@ -395,6 +395,68 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
 
 #[serial_test::serial(manager)]
 #[tokio::test]
+async fn test_outbound_server_recover_buffer_requeues_on_send_failure() -> Result<()> {
+    // Regression test: when a replayed packet fails to send, the failed
+    // item AND all remaining drained items must go back into the recovery
+    // buffer, in FIFO order, so the next recovery attempt can retry them.
+    // Before the fix, drain-then-send dropped everything not yet sent.
+    log::setup_logging("debug", log::LogType::Test);
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, out_crypt) = make_test_crypts();
+    let stop = Trigger::new();
+    let (_tx, rx) = flume::bounded(10);
+
+    // Simulate three previous failed sends queued for replay.
+    {
+        let rec_buf = session.recovery_buffer();
+        let mut buffer = rec_buf.lock();
+        for (seq, payload) in [
+            (1u64, "one".as_bytes()),
+            (2, "two".as_bytes()),
+            (3, "three".as_bytes()),
+        ] {
+            buffer.push(
+                seq,
+                PayloadWithChannel {
+                    channel_id: 0,
+                    payload: payload.into(),
+                },
+            )?;
+        }
+        assert_eq!(buffer.len(), 3);
+    }
+
+    // Writer that fails on the very first write.
+    let mut outbound =
+        TunnelServerOutboundStream::new(FailingStream, out_crypt, rx, stop.clone(), *session.id());
+
+    let res = outbound.recover_buffer().await;
+    assert!(res.is_err(), "recover_buffer must surface the send error");
+
+    // All three packets (the failed one plus the two not yet attempted)
+    // must be back in the buffer, in the original FIFO order.
+    let rec_buf = session.recovery_buffer();
+    let mut buffer = rec_buf.lock();
+    assert_eq!(
+        buffer.len(),
+        3,
+        "recover_buffer lost packets on send failure"
+    );
+    for (expected_seq, expected_payload) in [(1u64, "one".as_bytes()), (2, b"two"), (3, b"three")] {
+        let (item, old_seq) = buffer
+            .take_unsent_packet()
+            .expect("packet should still be buffered");
+        assert_eq!(old_seq, expected_seq);
+        assert_eq!(item.payload.as_ref(), expected_payload);
+    }
+
+    Ok(())
+}
+
+#[serial_test::serial(manager)]
+#[tokio::test]
 async fn test_server_stream_with_invalid_packet() {
     log::setup_logging("debug", log::LogType::Test);
 
