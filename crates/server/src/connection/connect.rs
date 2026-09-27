@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -13,11 +14,60 @@ use shared::{
 use crate::{
     broker::{self, BrokerApi},
     config,
-    session::{Session, SessionManager, UdpState},
+    session::{Session, SessionId, SessionManager, UdpState},
     stream::server::TunnelServerStream,
 };
 
 use super::types::OpenResponse;
+
+/// RAII guard for a session that has been registered in the
+/// [`SessionManager`] but whose connect handshake has not completed yet.
+///
+/// Between `add_session` and the moment the client's ticket echo is
+/// validated and the `OpenResponse` is written, every early return
+/// (confirm timeout, read error, invalid ticket length, content mismatch,
+/// response write failure, ...) would otherwise leak a session that has
+/// no owner: the proxy task never observes a stop, nothing reaps it, and
+/// it occupies a slot of the `max_sessions` cap indefinitely. Half-open
+/// handshakes are trivially reachable (connect, handshake, close), so a
+/// leak on any of these paths is a slow resource-exhaustion DoS.
+///
+/// The guard removes the session on `Drop` unless [`commit`] has been
+/// called, so cleanup is automatic for the current and all future error
+/// paths in the handshake.
+///
+/// [`commit`]: PendingSession::commit
+struct PendingSession {
+    session: Arc<Session>,
+    committed: bool,
+}
+
+impl PendingSession {
+    fn new(session: Arc<Session>) -> Self {
+        Self {
+            session,
+            committed: false,
+        }
+    }
+
+    fn id(&self) -> &SessionId {
+        self.session.id()
+    }
+
+    /// Mark the handshake as completed: from now on the session belongs
+    /// to a validated client and must not be reaped by this guard.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        if !self.committed {
+            SessionManager::get_instance().remove_session(self.id());
+        }
+    }
+}
 
 pub(super) async fn connect<R, W>(
     mut reader: R,
@@ -92,6 +142,11 @@ where
             // add_session also publishes the UDP token in the relay map.
             let session = session_manager.add_session(session)?;
 
+            // From this point on, the registered session is owned by this
+            // guard until the handshake completes; any early return below
+            // removes it automatically (see `PendingSession`).
+            let mut pending = PendingSession::new(session.clone());
+
             // Check that the first crypted packet is the ticket again
             let (mut crypt_reader, mut crypt_writer) = session.server_tunnel_crypts()?;
 
@@ -143,6 +198,10 @@ where
             crypt_writer
                 .write(&mut writer, ticket_channel_id, &response_data)
                 .await?;
+
+            // Handshake completed: the session is now owned by the client
+            // connection, detach it from the cleanup guard.
+            pending.commit();
 
             log::debug!(
                 "Sent OpenResponse to client with session_id: {:?}",

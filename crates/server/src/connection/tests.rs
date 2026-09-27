@@ -411,6 +411,30 @@ async fn test_connection_ticket_invalid_ticket_crypt() -> anyhow::Result<()> {
 
 #[serial_test::serial(config, manager)]
 #[tokio::test]
+async fn test_connection_ticket_confirm_timeout_no_leak() -> anyhow::Result<()> {
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // Complete the plain handshake, but never send the crypted ticket
+    // confirmation: the connect handshake times out after one second.
+    let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
+    signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len() + 1..].copy_from_slice(ticket.as_ref());
+    client_stream.write_all(&signature_buf).await?;
+
+    // Wait past the ticket-confirm timeout so the error path runs
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+
+    // The session registered before the timeout must not leak
+    let session_manager = crate::session::SessionManager::get_instance();
+    assert_eq!(session_manager.count(), 0);
+
+    Ok(())
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) =
         setup_testing_connection(true, true).await;
