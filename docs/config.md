@@ -145,6 +145,12 @@ configuration file is read; later edits to the file still win.
   transient broker hiccup.
 - The O(N) count runs only when this field is configured; the
   default config pays nothing for the check.
+- **Choose a large value.** Behind NAT / CGNAT a single source IP is
+  many users, not one: too low a cap silently locks out legitimate
+  tenants that happen to share an egress address. The rejection log
+  names the offending IP, the current count, the cap, and the
+  `max_sessions_per_remote` knob to raise, so an operator can see at a
+  glance whether it is abuse or legitimate shared load.
 
 ## Behaviour summary
 
