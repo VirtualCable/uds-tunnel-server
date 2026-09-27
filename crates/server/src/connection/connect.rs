@@ -95,6 +95,17 @@ where
             // network hiccup". No O(N) scan runs when the cap is
             // disabled (the default).
             //
+            // Trust boundary: with `use_proxy_protocol` enabled, `src_ip`
+            // comes from the PROXY v2 header and is only as trustworthy as
+            // the peer that wrote it. Who may reach the server (and who
+            // may speak PROXY v2 to it) is a deployment decision enforced
+            // at the firewall/routing layer, exactly as for any
+            // PROXY-speaking service (HAProxy, nginx, Envoy); the per-IP
+            // cap is defense-in-depth, not a network boundary. Keying the
+            // cap on the raw TCP peer instead would break the intended
+            // posture: behind a frontend, every legitimate client shares
+            // the frontend's address.
+            //
             // Compute the predicate synchronously and drop the config
             // read-lock before any `.await` so the guard does not
             // cross an await point (which would break `tokio::spawn`).
