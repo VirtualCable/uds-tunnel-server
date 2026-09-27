@@ -51,7 +51,7 @@ pub struct TicketRemote {
     // pub extra: Option<serde_json::Value>,
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize)]
 pub struct TicketResponse {
     pub remotes: Vec<TicketRemote>,
     pub notify: String, // Stop notification ticket
@@ -60,6 +60,26 @@ pub struct TicketResponse {
     // Top-level in the broker JSON; absent on brokers that predate it.
     #[serde(default)]
     pub enable_udp: bool,
+}
+
+// Manual Debug: the derived form would print the shared secret (32-byte
+// session key material, hex) and the notify stop ticket verbatim. Both
+// are credentials, so they are redacted to a short correlation prefix.
+impl std::fmt::Debug for TicketResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TicketResponse")
+            .field("remotes", &self.remotes)
+            .field("notify", &shared::log::redact_secret(&self.notify))
+            .field(
+                "shared_secret",
+                &self
+                    .shared_secret
+                    .as_deref()
+                    .map(shared::log::redact_secret),
+            )
+            .field("enable_udp", &self.enable_udp)
+            .finish()
+    }
 }
 
 impl TicketResponse {

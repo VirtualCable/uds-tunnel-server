@@ -97,13 +97,22 @@ where
                 anyhow::anyhow!("Timeout waiting for recover session id from client: {}", e)
             })?;
 
-            // If reading ticket data failed, ensure session is removed and return error
+            // If reading ticket data failed, ensure session is removed and return error.
+            // This teardown is DELIBERATE, not an oversight: the leg is AEAD-sealed, so
+            // a frame that fails to decrypt cannot be a transient network artifact — it
+            // comes from a malicious peer (one that captured the equiv ticket but has
+            // no way to produce a valid crypt) or from a buggy client, and both cases
+            // are treated the same. A merely slow client takes the timeout path above,
+            // which leaves the session intact. Killing the session is the safe response
+            // to a cryptographically invalid packet; do not relax it into a plain early
+            // return.
             let (data, stream_channel_id): (Ticket, u16) =
                 if let Ok((bytes, channel_id)) = rec_sessid_confirm {
                     (bytes.try_into()?, channel_id)
                 } else {
                     log::error!("Failed to read ticket data from client");
-                    // Remove the session, that has not been used properly
+                    // Remove the session: a malformed crypted packet here proves the
+                    // peer is not the legitimate client (see rationale above).
                     session_manager.remove_session(session_id);
                     return Err(anyhow::anyhow!("Failed to read ticket data from client"));
                 };
@@ -136,7 +145,8 @@ where
                 ),
                 None => ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0),
             };
-            let response = OpenResponse::with_udp(equiv_id, 0, in_seq, out_seq, udp_token, udp_port); // On recover, no new streams are created
+            let response =
+                OpenResponse::with_udp(equiv_id, 0, in_seq, out_seq, udp_token, udp_port); // On recover, no new streams are created
             let response_data = response.as_vec();
             log::debug!(
                 "Recovering session {:?} for client {:?}, sending OpenResponse {:?}",

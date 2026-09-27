@@ -47,7 +47,7 @@ use super::consts;
 // `Zeroize` + `ZeroizeOnDrop` wipe the buffer when the value goes out
 // of scope, so a leaked core dump / VM snapshot does not retain the
 // key any longer than strictly necessary.
-#[derive(Debug, Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SharedSecret([u8; 32]);
 
 /// This code block is implementing functionality for the `SharedSecret` struct in Rust. Here's a
@@ -60,6 +60,19 @@ impl SharedSecret {
     pub fn from_hex(hex_str: &str) -> Result<Self> {
         let bytes = hex_to_bytes::<32>(hex_str)?;
         Ok(SharedSecret(bytes))
+    }
+}
+
+// Manual Debug: the derived form would print the raw 32-byte key. Show a
+// redacted hex so the value can be correlated across log lines without
+// being disclosed.
+impl std::fmt::Debug for SharedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SharedSecret({})",
+            crate::log::redact_secret_bytes(&self.0)
+        )
     }
 }
 

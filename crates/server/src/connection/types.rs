@@ -15,7 +15,6 @@ const RESERVED_LENGTH: usize = 6;
 /// `udp_port` is the port the server's UDP relay is actually bound to,
 /// letting a deployment split TCP and UDP onto different ports. 0 means
 /// "same port as the TCP connection" (the default).
-#[derive(Debug)]
 pub struct OpenResponse {
     pub session_id: Ticket,
     pub channel_count: u16,
@@ -33,7 +32,14 @@ impl OpenResponse {
         inbound_seq: u64,
         outbound_seq: u64,
     ) -> Self {
-        Self::with_udp(session_id, channel_count, inbound_seq, outbound_seq, [0u8; TOKEN_LENGTH], 0)
+        Self::with_udp(
+            session_id,
+            channel_count,
+            inbound_seq,
+            outbound_seq,
+            [0u8; TOKEN_LENGTH],
+            0,
+        )
     }
 
     pub fn with_udp(
@@ -112,6 +118,24 @@ impl TryFrom<&[u8]> for OpenResponse {
 
     fn try_from(data: &[u8]) -> Result<Self, Self::Error> {
         OpenResponse::from_slice(data)
+    }
+}
+
+// Manual Debug: session_id (the equiv-session credential) and the UDP
+// relay token must never appear in full in logs.
+impl std::fmt::Debug for OpenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenResponse")
+            .field("session_id", &self.session_id)
+            .field("channel_count", &self.channel_count)
+            .field("inbound_seq", &self.inbound_seq)
+            .field("outbound_seq", &self.outbound_seq)
+            .field(
+                "udp_token",
+                &shared::log::redact_secret_bytes(&self.udp_token),
+            )
+            .field("udp_port", &self.udp_port)
+            .finish()
     }
 }
 

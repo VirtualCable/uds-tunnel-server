@@ -65,12 +65,20 @@ impl Ticket {
     pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.0).unwrap_or("NOT_REPRESENTABLE_TICKET")
     }
+
+    /// Redacted form for logs: keeps the first and last chars, masks the
+    /// middle half. Enough to correlate a ticket across log lines, never
+    /// enough to reconstruct the credential.
+    pub fn redacted(&self) -> String {
+        crate::log::redact_secret(self.as_str())
+    }
 }
 
-// Implement Debug for better logging
+// Implement Debug for better logging. Tickets are credentials (and the
+// same type doubles as the equiv-session id), so Debug redacts the value.
 impl std::fmt::Debug for Ticket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Ticket({})", self.as_str())
+        write!(f, "Ticket({})", self.redacted())
     }
 }
 

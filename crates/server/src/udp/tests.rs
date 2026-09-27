@@ -473,9 +473,8 @@ mod e2e {
         // The advertised UDP port must be the resolved relay port (the
         // config leaves `udp_listen_port` unset, so it falls back to the
         // TCP listen port), never zero.
-        let udp_port = u16::from_be_bytes(
-            response[PORT_OFFSET..PORT_OFFSET + 2].try_into().unwrap(),
-        );
+        let udp_port =
+            u16::from_be_bytes(response[PORT_OFFSET..PORT_OFFSET + 2].try_into().unwrap());
         assert_eq!(
             udp_port,
             config::get().read().unwrap().udp_sockaddr().port(),
@@ -550,9 +549,8 @@ mod e2e {
             token, [0u8; TOKEN_LENGTH],
             "enable_udp=false must yield a zero token"
         );
-        let udp_port = u16::from_be_bytes(
-            response[PORT_OFFSET..PORT_OFFSET + 2].try_into().unwrap(),
-        );
+        let udp_port =
+            u16::from_be_bytes(response[PORT_OFFSET..PORT_OFFSET + 2].try_into().unwrap());
         assert_eq!(udp_port, 0, "disabled UDP must advertise port 0");
 
         let session_id: Ticket = response[..TICKET_LENGTH].try_into().unwrap();

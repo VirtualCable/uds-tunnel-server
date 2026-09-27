@@ -92,10 +92,12 @@ pub struct UdpState {
 }
 
 // DatagramCrypt has no Debug impl; show the useful bits instead.
+// The relay token is a credential: redact its middle so it never lands
+// in logs in full.
 impl std::fmt::Debug for UdpState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UdpState")
-            .field("token", &self.token)
+            .field("token", &shared::log::redact_secret_bytes(&self.token))
             .field("client_addr", &self.client_addr())
             .field("last_activity", &self.last_activity())
             .finish()
