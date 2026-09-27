@@ -230,9 +230,9 @@ pub struct Session {
     // `connection::connect` in production) does so via
     // `server_tunnel_crypts()`, which reads these values, then issues
     // the handshake that consumes one seq each direction. After the
-    // handshake completes, `connect` calls `set_seqs(1, 1)` to bring
-    // the session's seqs in line with what the crypts actually
-    // consumed.
+    // handshake completes, `connect` syncs the session's seqs to what the
+    // crypts actually consumed (`current_seq()` of each), which lands on
+    // the client's live post-handshake state.
     //
     // Any code reading `session.seqs()` (or calling `fetch_add_seqs`)
     // BEFORE that explicit sync must assume `(0, 0)` is *by design* —

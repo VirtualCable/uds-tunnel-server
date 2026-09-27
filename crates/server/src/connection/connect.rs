@@ -208,13 +208,18 @@ where
                 response
             );
 
-            // Now the recv/send seq should be set to 1 for next crypt managers
-            // (we already spent seq 0 for ticket exchange)
-            // In fact, we spent seq 1, because the crypt is pre-incrementing before use
-            // So next expected seq is 2 on both sides.
-            // Note: This is because we "spent" seq 0 just on the sent of the equiv session id
-            //       on response
-            session.set_seqs(1, 1);
+            // Sync the session seq numbers with what the handshake crypts
+            // actually consumed: the inbound crypt used seq 1 for the ticket
+            // echo (decrypt advances to last-used + 1, so current_seq is 2),
+            // while the outbound crypt used seq 1 for the OpenResponse but
+            // encrypt pre-increments (current_seq stays 1). Seeding the next
+            // pair with anything less than (2, 1) on the inbound side would
+            // let the anti-replay check admit a replayed copy of the
+            // handshake ticket packet as the first post-handshake read;
+            // keeping the outbound at 1 makes the next send seq 2, which is
+            // exactly what the client expects after decrypting the
+            // OpenResponse.
+            session.set_seqs(crypt_reader.current_seq(), crypt_writer.current_seq());
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(*session.id(), reader, writer);

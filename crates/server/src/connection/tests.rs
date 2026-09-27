@@ -435,6 +435,88 @@ async fn test_connection_ticket_confirm_timeout_no_leak() -> anyhow::Result<()> 
 
 #[serial_test::serial(config, manager)]
 #[tokio::test]
+async fn test_connection_handshake_seq_matches_client_state() -> anyhow::Result<()> {
+    let (server, mock, mut client_stream, stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // Send a handshake with Open action
+    let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
+    signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len() + 1..].copy_from_slice(ticket.as_ref());
+    client_stream.write_all(&signature_buf).await?;
+
+    // Drive the handshake exactly like the real tunnel client does
+    // (client v5 proxy::connect): crypts seeded at (0, 0), the encrypted
+    // ticket echo sent on channel 0 (its seq=1 frame captured for the
+    // replay check below), then the OpenResponse read back (the server
+    // reflects the echo channel). The client REUSES these same crypts for
+    // the rest of the connection, so their post-handshake current_seq is
+    // the wire contract the server must sync to.
+    let shared_secret =
+        SharedSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")?;
+    let material = derive_tunnel_material(&shared_secret, &ticket)?;
+    let mut client_outbound = Crypt::new(&material.key_receive, 0);
+    let mut client_inbound = Crypt::new(&material.key_send, 0);
+
+    let mut echo = PacketBuffer::new();
+    echo.set_data(ticket.as_ref())?;
+    client_outbound.encrypt(0, ticket.as_ref().len(), &mut echo)?;
+    let echo_frame = echo.clone(); // the exact bytes that went on the wire
+    echo.write(&mut client_stream).await?;
+
+    let mut buffer: PacketBuffer = PacketBuffer::new();
+    let (resp_data, resp_channel) = client_inbound.read(&mut client_stream, &mut buffer).await?;
+    let response = OpenResponse::from_slice(resp_data)?;
+    assert_eq!(resp_channel, 0);
+
+    // Let connect finish `set_seqs` after writing the response
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let session_manager = SessionManager::get_instance();
+    let session = session_manager
+        .get_equiv_session(&response.session_id)
+        .expect("Session not found");
+
+    // Contract assertion: the server-side session seqs must equal the live
+    // client crypt state after the handshake (inbound: decrypt left
+    // last_used + 1; outbound: encrypt pre-incremented, so last_used).
+    // Derived from the client side on purpose: this pins the wire contract
+    // instead of hardcoding a value that merely happens to match one impl.
+    let client_state = (client_inbound.current_seq(), client_outbound.current_seq());
+    assert_eq!(session.seqs(), client_state);
+
+    // Compatibility: the next legitimate frame from the client's live
+    // crypt (its seq=2, e.g. an OpenChannel on the control channel) must
+    // decrypt fine with a fresh server-side crypt built from the session
+    // seqs — the sync must never seed above what the client will send.
+    let payload = Command::OpenChannel { channel_id: 1 }.to_bytes();
+    let mut next = PacketBuffer::new();
+    next.set_data(payload.as_slice())?;
+    client_outbound.encrypt(0, payload.len(), &mut next)?;
+    let (mut server_inbound, _) = session.server_tunnel_crypts()?;
+    let mut next_buf = next.clone();
+    server_inbound.decrypt(&mut next_buf)?;
+    assert_eq!(next_buf.channel_id(), 0);
+    assert_eq!(next_buf.data(), payload.as_slice());
+
+    // Anti-replay: a captured copy of the seq=1 handshake echo must NOT be
+    // admitted as a post-handshake packet. (On the old `set_seqs(1, 1)` it
+    // passed the floor check and only died later as an unparsable
+    // control-channel command, tearing the session down anyway; the floor
+    // should still be the handshake end state, not one packet below it.)
+    let mut replay = echo_frame;
+    let (mut replay_crypt, _) = session.server_tunnel_crypts()?;
+    assert!(
+        replay_crypt.decrypt(&mut replay).is_err(),
+        "replayed handshake echo (seq 1) must be rejected after the handshake"
+    );
+
+    Ok(())
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
 async fn test_connection_proxy_working() -> anyhow::Result<()> {
     let (server, mock, mut client_stream, stop, ticket) =
         setup_testing_connection(true, true).await;
