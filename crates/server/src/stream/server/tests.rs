@@ -569,7 +569,15 @@ async fn test_tunnel_inbound() -> Result<()> {
     // Add session to manager
     let session = SessionManager::get_instance().add_session(session).unwrap();
     let stop = session.stopper();
-    let (mut out_crypt, mut in_crypt) = session.server_tunnel_crypts().unwrap();
+    // The test plays the launcher side: private counters seeded at (0, 0),
+    // exactly like the real launcher. Sharing the session's live counters
+    // would make the test's encrypts collide with the sequence numbers the
+    // server's own decrypts advance.
+    let material =
+        shared::crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())
+            .unwrap();
+    let mut out_crypt = Crypt::new(&material.key_receive, 0);
+    let mut in_crypt = Crypt::new(&material.key_send, 0);
 
     let (mut client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
@@ -603,4 +611,147 @@ async fn test_tunnel_inbound() -> Result<()> {
     // Stop the tunnel after some time to avoid hanging the test
     stop.trigger();
     Ok(())
+}
+
+// Keep-alive watchdog regressions. Virtual time (start_paused) makes the
+// deadlines deterministic: `tokio::time::advance` moves the tokio clock the
+// inbound stream's watchdog reads, with no wall-clock sleeping.
+
+/// A half-open leg (peer gone, no FIN/RST) that stops sending frames is torn
+/// down after KEEPALIVE_TIMEOUT_SECS, running the normal end-of-stream path
+/// (stop triggered so the outbound half ends too).
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_timeout_ends_stream() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    // Client half is kept alive but never writes, so the server read stays
+    // pending and the only thing that can move is the watchdog timer.
+    let (_client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+
+    let (tx, _rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    // Not expired yet.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+    assert!(
+        !handle.is_finished(),
+        "stream must not die before the deadline"
+    );
+
+    // Past the deadline: the watchdog fires and ends the stream cleanly.
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
+}
+
+/// Periodic `Nop` frames keep the leg alive across stretches longer than the
+/// deadline, and are consumed on the inbound half (never forwarded to the
+/// proxy, which would treat them as an unexpected command and kill the
+/// session).
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_nop_sustains_and_is_not_forwarded() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+    let mut client_crypt = Crypt::new(&SharedSecret::new(KEY1), 0);
+
+    let (tx, rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    // Several keep-alive cycles, each advancing just under the deadline and
+    // refreshing it with a `Nop`: total quiet time far exceeds the timeout,
+    // yet the stream must stay up.
+    for _ in 0..4 {
+        tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+        client_crypt
+            .write(&mut client, 0, Command::Nop.to_bytes().as_slice())
+            .await
+            .unwrap();
+        // Let the inbound drain the buffered frame and refresh its clock.
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(!handle.is_finished(), "Nop must keep the leg alive");
+        assert!(
+            rx.try_recv().is_err(),
+            "Nop must be consumed, not forwarded to the proxy"
+        );
+    }
+
+    // Stop the keep-alive and let the deadline lapse: now it dies.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS + 1)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
+}
+
+/// Any inbound frame — not just `Nop` — refreshes the deadline, so a launcher
+/// that predates the keep-alive (real tunnel traffic only) is not killed while
+/// it is actively carrying data, and its payload still reaches the proxy.
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_data_frame_sustains() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+    let mut client_crypt = Crypt::new(&SharedSecret::new(KEY1), 0);
+
+    let (tx, rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    for i in 0..3u8 {
+        tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+        let payload = format!("data-{i}");
+        client_crypt
+            .write(&mut client, TEST_CHANNEL_ID, payload.as_bytes())
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(
+            !handle.is_finished(),
+            "data traffic must keep the leg alive"
+        );
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.channel_id, TEST_CHANNEL_ID);
+        assert_eq!(got.payload.as_ref(), payload.as_bytes());
+    }
+
+    // Quiet past the deadline: the data-driven liveness does not exempt an
+    // idle connection from the timeout.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS + 1)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
 }

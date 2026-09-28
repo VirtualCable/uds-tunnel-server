@@ -166,6 +166,44 @@ impl UdpState {
 
 pub static RECOVERY_BUFFER_SIZE: AtomicUsize = AtomicUsize::new(64 * 1024); // Default to 64 KB, can be configured at runtime
 
+/// Handle identifying the launcher-facing server stream that currently
+/// owns the session's server side.
+///
+/// One is created per attach (`Session::start_server`) and stored in the
+/// session slot. Its identity is the `Arc` itself: a stream may only run
+/// the proxy teardown path while it is still the slot owner (`Arc::ptr_eq`
+/// through `Session::is_current_server_stream`), so a stream replaced by a
+/// recovery cannot `fail_server`/`stop_server` the attachment that took
+/// over (the proxy keeps a single server-side channel set).
+///
+/// `stop` is fired when a newer stream replaces this one, so a stale
+/// stream cannot keep pumping frames into the proxy or hold its socket
+/// read half forever.
+///
+/// Sequence numbers need no coordination between streams: the session's
+/// per-direction counters are shared with every crypt the session hands
+/// out, so an outgoing stream's last in-flight frame and the new stream's
+/// first frame can never collide on a `(key, seq)` AES-GCM nonce.
+#[derive(Debug)]
+pub struct ServerStreamOwner {
+    stop: Trigger,
+}
+
+impl ServerStreamOwner {
+    fn new() -> Self {
+        Self {
+            stop: Trigger::new(),
+        }
+    }
+
+    /// Stop trigger the attached stream must use for its tasks. Firing it
+    /// (through `Session::start_server` replacing this owner) kills the
+    /// stream immediately.
+    pub fn stopper(&self) -> Trigger {
+        self.stop.clone()
+    }
+}
+
 /// Bytes relayed through a session, counted at the launcher-facing legs
 /// of the tunnel: `sent` is client upload (launcher -> remote), `recv` is
 /// download (remote -> launcher). Payload bytes (post-decrypt /
@@ -233,6 +271,22 @@ pub struct Session {
     proxy_task: tokio::task::JoinHandle<()>,
     // Server side status
     server_running: AtomicBool,
+    // Attach coordination for the launcher-facing server stream. Exactly one
+    // such stream may be live per session:
+    //   - `server_stream_slot` holds the attached stream's owner record. The
+    //     record's identity is the `Arc` itself: ownership is decided with
+    //     `Arc::ptr_eq`, so no counter/generation is needed. A replacement
+    //     (`start_server`) kills the previous owner instantly: it takes the
+    //     slot and fires the owner stop trigger under the slot write lock,
+    //     then installs the new record. The dying stream's teardown must not
+    //     touch the proxy state of its replacement, which the slot owner
+    //     check (under the attach lock) guarantees.
+    //   - `server_attach_lock` serializes [kill -> attach] with the dying
+    //     stream's proxy teardown path, so two concurrent Recover handshakes
+    //     cannot interleave and the replacement always happens while no
+    //     teardown half-runs.
+    server_stream_slot: RwLock<Option<Arc<ServerStreamOwner>>>,
+    server_attach_lock: tokio::sync::Mutex<()>,
     // If the server side has error on exit
     close_notified: AtomicBool,
 
@@ -252,25 +306,16 @@ pub struct Session {
     tx_server: PayloadWithChannelSender,
     rx: PayloadWithChannelReceiver,
 
-    // seq numbers for crypto part
+    // Live per-direction sequence counters for the launcher leg crypts.
     //
-    // Convention: `seq.0`/`seq.1` start at `(0, 0)` and are **not** a
-    // reflection of crypt state. The session is constructed in `new()`
-    // without crypts; whoever builds the first pair of crypts (only
-    // `connection::connect` in production) does so via
-    // `server_tunnel_crypts()`, which reads these values, then issues
-    // the handshake that consumes one seq each direction. After the
-    // handshake completes, `connect` syncs the session's seqs to what the
-    // crypts actually consumed (`current_seq()` of each), which lands on
-    // the client's live post-handshake state.
-    //
-    // Any code reading `session.seqs()` (or calling `fetch_add_seqs`)
-    // BEFORE that explicit sync must assume `(0, 0)` is *by design* —
-    // not a missing update. This is fine because the only producer is
-    // `connect`, which is the sole owner of the just-created session
-    // for the brief window between `Session::new` and the handshake.
-    // (Recover uses an existing session whose seqs are already past
-    // the initial handshake.)
+    // These are the *authoritative* counters: every `Crypt` the session
+    // hands out (the `connect` handshake, each launcher-facing stream, each
+    // recovery handshake) shares them via `Crypt::with_counter`, instead of
+    // being seeded from a snapshot. The counter only ever moves when a frame
+    // is actually encrypted (fetch_add, pre-increment) or authenticated
+    // (fetch_max on decrypt), so no two crypts can use the same `(key, seq)`
+    // AES-GCM nonce pair — not even while a killed/replaced stream and its
+    // replacement overlap for the few frames still in flight.
     //
     // **Why `(0, 0)` and not `(1, 1)`**: this is the initial value the
     // tunnel client (udstunnel in `openuds/client`) expects when it
@@ -284,7 +329,8 @@ pub struct Session {
     // `connection/tests.rs::create_out_int_crypts` pin this contract
     // (they build the client-side crypt with `Crypt::new(&key, 0)`),
     // so any change here must update them in lockstep.
-    seq: RwLock<(u64, u64)>,
+    seq_in: Arc<AtomicU64>,
+    seq_out: Arc<AtomicU64>,
 
     // External (equiv) session id the client uses to talk to us. `None`
     // until the first Recover mints one, after which it is the only
@@ -367,11 +413,14 @@ impl Session {
             rx_server,
             tx_server,
             rx,
-            seq: RwLock::new((0, 0)),
+            seq_in: Arc::new(AtomicU64::new(0)),
+            seq_out: Arc::new(AtomicU64::new(0)),
             current_equiv_id: RwLock::new(None),
             src_ip: RwLock::new(src_ip),
             remotes,
             udp: RwLock::new(None),
+            server_stream_slot: RwLock::new(None),
+            server_attach_lock: tokio::sync::Mutex::new(()),
             broker_stop_ticket,
             traffic: Arc::new(TrafficCounters::default()),
             broker_notified: AtomicBool::new(false),
@@ -420,11 +469,67 @@ impl Session {
         *self.src_ip.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub async fn start_server(&self) -> Result<ServerEndpoints> {
+    pub async fn start_server(&self) -> Result<(ServerEndpoints, Arc<ServerStreamOwner>)> {
+        // A fresh launcher connection replaces any still-live server stream
+        // before taking over the proxy channel set: kill the previous owner
+        // instantly (no drain wait) and swap the slot under the write lock,
+        // so a dying stream's teardown can never observe itself as current
+        // after the replacement attached. Sequence safety does not need a
+        // drain: the replacement's crypts share the session counters, so the
+        // replaced stream's last in-flight frames and the new stream's first
+        // ones use disjoint `(key, seq)` nonce pairs by construction.
+        // (In practice a second launcher cannot attach while the first holds
+        // the connection, so this is free on the normal first-attach path
+        // where the slot is empty.)
+        self.kill_current_server_stream();
         self.server_running
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        self.session_proxy.start_server().await
+        let endpoints = self.session_proxy.start_server().await?;
+        let owner = Arc::new(ServerStreamOwner::new());
+        *self
+            .server_stream_slot
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some(owner.clone());
+        Ok((endpoints, owner))
+    }
+
+    /// Instantly kills the current server stream (if any): takes it out of
+    /// the attach slot and fires its stop trigger, so its pump tasks unwind
+    /// without ever being able to run the proxy teardown path (the slot no
+    /// longer points at it). No drain/publish wait: with the crypts sharing
+    /// the session counters, a killed stream's remaining in-flight frames
+    /// cannot collide with the replacement stream's sequence numbers.
+    pub(crate) fn kill_current_server_stream(&self) {
+        let previous = self
+            .server_stream_slot
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(previous) = previous {
+            previous.stopper().trigger();
+        }
+    }
+
+    /// Serialize the attach critical section ([kill previous owner ->
+    /// allocate proxy channel set -> swap slot]) with the dying stream's
+    /// proxy teardown path. Two concurrent Recover handshakes on the same
+    /// session cannot interleave either.
+    pub(crate) async fn lock_server_attach(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.server_attach_lock.lock().await
+    }
+
+    /// True when `owner` is the stream currently registered in the attach
+    /// slot. A stream that died naturally may still have been replaced by a
+    /// recovery between its last check and its teardown; ownership is only
+    /// meaningful under the attach lock, which the replacement's `start_server`
+    /// also runs under.
+    pub(crate) fn is_current_server_stream(&self, owner: &Arc<ServerStreamOwner>) -> bool {
+        let slot = self
+            .server_stream_slot
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        slot.as_ref().is_some_and(|cur| Arc::ptr_eq(cur, owner))
     }
 
     pub(super) async fn stop_server(&self) {
@@ -433,46 +538,16 @@ impl Session {
         self.session_proxy.stop_server().await;
     }
 
-    /// Atomically assign the (inbound, outbound) sequence numbers in a
-    /// single critical section. Use this whenever a session ends up
-    /// with both seqs known at the same time (initial handshake, server
-    /// stream teardown, recover), so the two halves of the pair cannot
-    /// drift apart under a concurrent observer.
+    /// Returns the (inbound, outbound) seq numbers.
     ///
-    /// When only the relative advance is known (e.g. "advance both by 1
-    /// to allocate the next seq pair"), prefer [`Self::fetch_add_seqs`]
-    /// which returns the pre-increment values for an `OpenResponse`.
-    pub fn set_seqs(&self, seq_rx: u64, seq_tx: u64) {
-        let mut seq_lock = self.seq.write().unwrap_or_else(|e| e.into_inner());
-        seq_lock.0 = seq_rx;
-        seq_lock.1 = seq_tx;
-    }
-
-    // Returns the (inbound, outbound) seq numbers
-    //
-    // A poisoned lock must not be reported as `(0, 0)`: that is the
-    // legitimate pre-handshake value, so the caller cannot tell a real
-    // seq pair from a failed read, and `server_tunnel_crypts()` would
-    // silently build the crypts at seq 0 and trip the anti-replay check.
+    /// These are the live shared counters: the values are whatever the
+    /// session's crypts last consumed/advanced, with no separate "published"
+    /// state to keep in sync.
     pub fn seqs(&self) -> (u64, u64) {
-        *self.seq.read().unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Atomically read the current (inbound, outbound) sequence numbers
-    /// and add the given deltas in a single critical section. Returns the
-    /// **pre-increment** values so the caller can attach them to an
-    /// `OpenResponse` and the next expected seq is `prev + delta`.
-    ///
-    /// Use this instead of `seqs()` + `set_*_seq()` whenever the read and
-    /// the write must not be split across concurrent callers (for example
-    /// the Recover handler, which used to TOCTOU-race itself when two
-    /// recovery attempts on the same session interleaved).
-    pub fn fetch_add_seqs(&self, in_delta: u64, out_delta: u64) -> (u64, u64) {
-        let mut seq_lock = self.seq.write().unwrap_or_else(|e| e.into_inner());
-        let prev = *seq_lock;
-        seq_lock.0 = prev.0.wrapping_add(in_delta);
-        seq_lock.1 = prev.1.wrapping_add(out_delta);
-        prev
+        (
+            self.seq_in.load(std::sync::atomic::Ordering::SeqCst),
+            self.seq_out.load(std::sync::atomic::Ordering::SeqCst),
+        )
     }
 
     /// Set or clear the external (equiv) session id that the client uses
@@ -560,8 +635,18 @@ impl Session {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Builds the launcher-leg crypt pair sharing the session's live
+    /// per-direction counters. Every caller (connect handshake, each
+    /// launcher-facing stream, each recovery handshake) gets crypts whose
+    /// nonce counters are the *same* atomics, so sequence numbers advance
+    /// once per direction across stream replacements with no coordination.
     pub fn server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
-        crypt::tunnel::get_tunnel_crypts(&self.shared_secret, self.ticket(), self.seqs())
+        crypt::tunnel::get_tunnel_crypts(
+            &self.shared_secret,
+            self.ticket(),
+            self.seq_in.clone(),
+            self.seq_out.clone(),
+        )
     }
 
     pub(super) async fn fail_server(&self) {
@@ -606,194 +691,148 @@ mod tests {
         )
     }
 
-    /// Regression guard for the split-setter pair that `set_seqs`
-    /// replaced: assigning the two halves in separate critical sections
-    /// lets a concurrent observer read a **torn** pair (new inbound,
-    /// stale outbound). Both phases write symmetric pairs, so any
-    /// observed `(a, b)` with `a != b` is a torn read.
-    ///
-    /// The split phase is kept deliberately: it is what makes the
-    /// assertion on `set_seqs` meaningful instead of vacuous, and it
-    /// fails loudly if anyone splits the assignment again.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn set_seqs_is_never_observed_torn() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        // The pre-`b0d8e37` implementation, kept only as the control
-        // group: set_inbound_seq followed by set_outbound_seq, each
-        // taking the lock on its own.
-        fn set_split(session: &Session, seq_rx: u64, seq_tx: u64) {
-            session.seq.write().unwrap_or_else(|e| e.into_inner()).0 = seq_rx;
-            session.seq.write().unwrap_or_else(|e| e.into_inner()).1 = seq_tx;
-        }
-
-        async fn count_torn_reads(split: bool) -> usize {
-            const READS: usize = 2_000_000;
-
-            let session = Arc::new(new_test_session().await);
-            let stop = Arc::new(AtomicBool::new(false));
-
-            let writer = {
-                let session = session.clone();
-                let stop = stop.clone();
-                tokio::task::spawn_blocking(move || {
-                    let mut n = 1u64;
-                    while !stop.load(Ordering::Relaxed) {
-                        if split {
-                            set_split(&session, n, n);
-                        } else {
-                            session.set_seqs(n, n);
-                        }
-                        n = n.wrapping_add(1);
-                    }
-                })
-            };
-
-            let reader = {
-                let session = session.clone();
-                tokio::task::spawn_blocking(move || {
-                    (0..READS)
-                        .filter(|_| {
-                            let (inbound, outbound) = session.seqs();
-                            inbound != outbound
-                        })
-                        .count()
-                })
-            };
-
-            let torn = reader.await.expect("reader panicked");
-            stop.store(true, Ordering::Relaxed);
-            writer.await.expect("writer panicked");
-            torn
-        }
-
-        let torn_split = count_torn_reads(true).await;
-        let torn_atomic = count_torn_reads(false).await;
-
-        log::debug!("torn reads -- split: {torn_split}, set_seqs: {torn_atomic}");
-
-        assert!(
-            torn_split > 0,
-            "control group observed no torn read, so the set_seqs assertion proves nothing"
-        );
-        assert_eq!(
-            torn_atomic, 0,
-            "set_seqs exposed a half-updated pair {torn_atomic} time(s)"
-        );
+    /// Simulates the launcher side of the tunnel leg: a crypt with the key
+    /// the session's *inbound* crypt decrypts with, and its own private
+    /// sequence counter (the launcher's counters are independent of the
+    /// session's by construction; only the server-side holders share them).
+    fn launcher_side_crypt(session: &Session, seq: u64) -> crypt::Crypt {
+        let material =
+            crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())
+                .unwrap();
+        crypt::Crypt::new(&material.key_receive, seq)
     }
 
-    /// `fetch_add_seqs` must return the **pre-increment** values, so the
-    /// caller can attach them straight to an `OpenResponse` and the seqs
-    /// stored in the session already reflect `prev + delta`. This is the
-    /// exact pattern used by `connection::recover::recover`.
-    #[tokio::test]
-    async fn fetch_add_seqs_returns_pre_increment_and_advances_in_one_step() {
-        let session = new_test_session().await;
-
-        // First recover handshake: seqs start at (0, 0). The caller will
-        // build an OpenResponse carrying (0, 0) and the session must end
-        // up at (1, 1) afterwards.
-        let (in_seq, out_seq) = session.fetch_add_seqs(1, 1);
-        assert_eq!((in_seq, out_seq), (0, 0));
-        assert_eq!(session.seqs(), (1, 1));
-
-        // Second recover on the same session: must observe (1, 1) as the
-        // pre-increment and leave the session at (2, 2). This is the
-        // property that the original TOCTOU pattern failed to provide.
-        let (in_seq, out_seq) = session.fetch_add_seqs(1, 1);
-        assert_eq!((in_seq, out_seq), (1, 1));
-        assert_eq!(session.seqs(), (2, 2));
-    }
-
-    /// Zero-delta fetch is a pure read: returns current and does not move
-    /// the counters.
-    #[tokio::test]
-    async fn fetch_add_seqs_with_zero_delta_is_pure_read() {
-        let session = new_test_session().await;
-        session.fetch_add_seqs(7, 11);
-
-        let (in_seq, out_seq) = session.fetch_add_seqs(0, 0);
-        assert_eq!((in_seq, out_seq), (7, 11));
-        assert_eq!(session.seqs(), (7, 11));
-    }
-
-    /// Asymmetric deltas work: the caller can advance only one side if
-    /// needed (recover always uses 1, 1 but the helper should be general).
-    #[tokio::test]
-    async fn fetch_add_seqs_supports_asymmetric_deltas() {
-        let session = new_test_session().await;
-        let (in_seq, out_seq) = session.fetch_add_seqs(3, 0);
-        assert_eq!((in_seq, out_seq), (0, 0));
-        assert_eq!(session.seqs(), (3, 0));
-
-        let (in_seq, out_seq) = session.fetch_add_seqs(0, 5);
-        assert_eq!((in_seq, out_seq), (3, 0));
-        assert_eq!(session.seqs(), (3, 5));
-    }
-
-    /// Concurrent fetches must each observe a unique pre-increment pair.
-    /// This is the regression test for the TOCTOU race in the Recover
-    /// handler: before the atomic helper was added, two parallel recovers
-    /// on the same session could both read the same pre-increment value
-    /// and overwrite each other's `set_*_seq` updates.
+    /// The session's crypts share the session's live counters: every holder
+    /// returned by `server_tunnel_crypts` moves the same `seq_in`/`seq_out`
+    /// atomics when it encrypts/decrypts, so `seqs()` always reflects the
+    /// true cryptographic state with no write-back step in between.
     #[serial_test::serial(manager)]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn fetch_add_seqs_is_atomic_under_concurrency() {
-        use crate::session::SessionManager;
-
+    #[tokio::test]
+    async fn seqs_are_the_shared_crypt_counters() {
         let session = new_test_session().await;
-        let session = SessionManager::get_instance()
-            .add_session(session)
-            .expect("session id collision unlikely with random ticket");
-        let session: Arc<Session> = session;
+        assert_eq!(session.seqs(), (0, 0));
 
-        const N: u64 = 500;
-        let mut handles = Vec::new();
-        for _ in 0..4 {
-            let s = session.clone();
-            handles.push(tokio::task::spawn_blocking(move || {
-                let mut observed = Vec::with_capacity(N as usize);
-                for _ in 0..N {
-                    observed.push(s.fetch_add_seqs(1, 1));
-                }
-                observed
-            }));
-        }
+        let (mut inbound, mut outbound) = session.server_tunnel_crypts().unwrap();
 
-        let mut all: Vec<(u64, u64)> = futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .flat_map(|h| h.expect("task panicked"))
-            .collect();
+        // encrypt pre-increments the shared outbound counter
+        let mut buf = crypt::types::PacketBuffer::new();
+        buf.set_data(b"abcd").unwrap();
+        outbound.encrypt(1, 4, &mut buf).unwrap();
+        assert_eq!(buf.seq().unwrap(), 1);
+        assert_eq!(session.seqs().1, 1);
 
-        // Every observation must be unique — no two callers saw the same
-        // (inbound, outbound) pair, which is what the old TOCTOU code
-        // would have produced.
-        all.sort();
-        let original_len = all.len();
-        all.dedup();
-        assert_eq!(
-            all.len(),
-            original_len,
-            "fetch_add_seqs returned duplicate pairs (TOCTOU race)"
+        // a *second* outbound holder continues from the shared state, it
+        // cannot reuse the sequence number the first one consumed
+        let (_, mut outbound2) = session.server_tunnel_crypts().unwrap();
+        let mut buf2 = crypt::types::PacketBuffer::new();
+        buf2.set_data(b"efgh").unwrap();
+        outbound2.encrypt(1, 4, &mut buf2).unwrap();
+        assert_eq!(buf2.seq().unwrap(), 2);
+        assert_eq!(session.seqs().1, 2);
+
+        // a launcher frame (encrypted with the key the session's inbound
+        // decrypts) advances the shared inbound counter when decrypted
+        let mut launcher = launcher_side_crypt(&session, 0);
+        let mut frame = crypt::types::PacketBuffer::new();
+        frame.set_data(b"ijkl").unwrap();
+        launcher.encrypt(1, 4, &mut frame).unwrap();
+
+        let mut inbound2 = session.server_tunnel_crypts().unwrap().0;
+        let mut frame_copy = frame.clone();
+        inbound2.decrypt(&mut frame_copy).unwrap();
+        assert_eq!(session.seqs().0, 2); // fetch_max(last-used + 1)
+        assert_eq!(inbound.current_seq(), 2);
+
+        // the first holder sees the replay rejection through the shared
+        // counter: the already-consumed frame is stale for *both* holders
+        let mut frame_copy2 = frame;
+        assert!(
+            inbound
+                .decrypt(&mut frame_copy2)
+                .unwrap_err()
+                .to_string()
+                .contains("replay attack detected"),
+            "shared counter must reject replays for every holder"
         );
+    }
 
-        // The observed pre-increment pairs must form a contiguous range
-        // [0, N*4) with no gaps. A gap would indicate that some caller
-        // saw a duplicate pre-increment and skipped a value.
-        let min = *all.first().expect("at least one observation");
-        let max = *all.last().expect("at least one observation");
-        assert_eq!(min, (0, 0));
-        assert_eq!(max, (N * 4 - 1, N * 4 - 1));
+    /// `seqs()` exposes the two per-direction counters independently: a
+    /// decrypt advances only `seq_in` and an encrypt only `seq_out`, so
+    /// asymmetric pairs are the normal state, not corruption.
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn seqs_tracks_advances_per_direction_independently() {
+        let session = new_test_session().await;
 
-        // And the final seqs must equal the number of increments.
-        let (final_in, final_out) = session.seqs();
-        assert_eq!(final_in, N * 4);
-        assert_eq!(final_out, N * 4);
+        let (mut inbound, mut outbound) = session.server_tunnel_crypts().unwrap();
+
+        // outbound: one encrypt -> seq_out 1
+        let mut buf = crypt::types::PacketBuffer::new();
+        buf.set_data(b"xy").unwrap();
+        outbound.encrypt(1, 2, &mut buf).unwrap();
+
+        // inbound: decrypt one launcher frame at seq 1 -> seq_in 2
+        let mut launcher = launcher_side_crypt(&session, 0);
+        let mut frame = crypt::types::PacketBuffer::new();
+        frame.set_data(b"zw").unwrap();
+        launcher.encrypt(1, 2, &mut frame).unwrap();
+        let mut frame_copy = frame.clone();
+        inbound.decrypt(&mut frame_copy).unwrap();
+        // the launcher frame consumed seq 1 and the decrypt advanced to 2;
+        // the *inbound* side of the session is the server's receive side,
+        // which is independent of the server's outbound counter.
+        assert_eq!(
+            session.seqs(),
+            (2, 1),
+            "inbound and outbound counters advance independently"
+        );
+    }
+
+    /// Replacing the server stream must kill the previous owner instantly:
+    /// `start_server` takes the slot and fires the old owner's stop trigger
+    /// before returning, with no drain wait.
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn start_server_kills_previous_owner_immediately() {
+        let session_ref = SessionManager::get_instance()
+            .add_session(new_test_session().await)
+            .expect("session id collision unlikely with random ticket");
+
+        let (_endpoints, first) = session_ref.start_server().await.unwrap();
+        assert!(session_ref.is_current_server_stream(&first));
+        assert!(!first.stopper().is_triggered());
+
+        let (_endpoints, second) = session_ref.start_server().await.unwrap();
+
+        // the previous owner was killed and replaced; the new one owns the slot
+        assert!(first.stopper().is_triggered());
+        assert!(!session_ref.is_current_server_stream(&first));
+        assert!(session_ref.is_current_server_stream(&second));
+    }
+
+    /// `kill_current_server_stream` empties the slot and triggers the stop,
+    /// so a killed stream can never pass the `is_current_server_stream`
+    /// teardown gate.
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn kill_current_server_stream_detaches_owner() {
+        let session_ref = SessionManager::get_instance()
+            .add_session(new_test_session().await)
+            .expect("session id collision unlikely with random ticket");
+
+        let (_endpoints, owner) = session_ref.start_server().await.unwrap();
+        session_ref.kill_current_server_stream();
+
+        assert!(owner.stopper().is_triggered());
+        assert!(!session_ref.is_current_server_stream(&owner));
+
+        // killing an empty slot is a no-op
+        session_ref.kill_current_server_stream();
     }
 
     /// `udp` starts as `None` on a fresh session, accepts a `UdpState`,
     /// and `clear_udp` removes it again while the session keeps running.
+    #[serial_test::serial(manager)]
     #[tokio::test]
     async fn udp_state_lifecycle_on_session() {
         let session = new_test_session().await;
@@ -832,6 +871,7 @@ mod tests {
     /// arbitrary `Some(_)` writes, and accepts a clear back to `None`.
     /// This is the atomicity guarantee of the unit backing
     /// `SessionManager::get_equiv_session` / `create_equiv_session`.
+    #[serial_test::serial(manager)]
     #[tokio::test]
     async fn current_equiv_id_starts_none_and_round_trips() {
         let session = new_test_session().await;
@@ -856,6 +896,7 @@ mod tests {
     /// phase 2 drop the old `HashMap<SessionId, SessionId>`: the
     /// session itself owns the slot, so a new write is implicitly a
     /// drop of the previous one.
+    #[serial_test::serial(manager)]
     #[tokio::test]
     async fn set_current_equiv_id_overwrites_previous_value() {
         let session = new_test_session().await;
@@ -880,6 +921,7 @@ mod tests {
         );
     }
 
+    #[serial_test::serial(manager)]
     #[tokio::test]
     async fn traffic_counters_accumulate_payload_bytes() {
         let session = new_test_session().await;
@@ -892,6 +934,7 @@ mod tests {
         assert_eq!(traffic.snapshot(), (11, 4));
     }
 
+    #[serial_test::serial(manager)]
     #[tokio::test]
     async fn take_broker_stop_is_one_shot_and_snapshots_traffic() {
         let notify = ticket::Ticket::new_random();

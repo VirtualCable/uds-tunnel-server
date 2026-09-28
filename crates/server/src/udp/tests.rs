@@ -76,8 +76,28 @@ fn launcher_crypts(
     (send, recv)
 }
 
+/// Bind + spawn the relay as the process-global instance. Required by the
+/// e2e tests: the handshake path registers each new session's token through
+/// `SessionManager` -> `udp::register_session`, which resolves the
+/// process-global relay.
 async fn run_relay() -> (Arc<UdpRelay>, Trigger, SocketAddr) {
     let relay = UdpRelay::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let addr = relay.local_addr().unwrap();
+    let stop = Trigger::new();
+    let task_relay = relay.clone();
+    let task_stop = stop.clone();
+    tokio::spawn(async move { task_relay.run(task_stop).await });
+    (relay, stop, addr)
+}
+
+/// Hermetic variant of [`run_relay`]: drives its own relay without installing
+/// the process-global `UDP_RELAY`, so the relay unit tests cannot clobber the
+/// instance the e2e tests depend on. Those tests register sessions directly on
+/// the returned relay, so they never need the global.
+async fn run_relay_for_test() -> (Arc<UdpRelay>, Trigger, SocketAddr) {
+    let relay = UdpRelay::bind_for_test("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
     let addr = relay.local_addr().unwrap();
@@ -91,6 +111,7 @@ async fn run_relay() -> (Arc<UdpRelay>, Trigger, SocketAddr) {
 /// End to end: an encrypted datagram from the simulated launcher reaches
 /// the simulated RDP host in cleartext, and the host's reply comes back
 /// encrypted and decryptable by the launcher.
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn relay_roundtrip_client_remote_client() {
     log::setup_logging("debug", log::LogType::Test);
@@ -106,7 +127,7 @@ async fn relay_roundtrip_client_remote_client() {
         received
     });
 
-    let (relay, stop, relay_addr) = run_relay().await;
+    let (relay, stop, relay_addr) = run_relay_for_test().await;
     let (session, token, secret, ticket) = new_udp_session(&rdp_addr.to_string()).await;
     relay.register(&session);
 
@@ -145,6 +166,7 @@ async fn relay_roundtrip_client_remote_client() {
 
 /// A datagram carrying a token that no session owns must be discarded
 /// without reaching any remote.
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn relay_discards_unknown_token() {
     log::setup_logging("debug", log::LogType::Test);
@@ -152,7 +174,7 @@ async fn relay_discards_unknown_token() {
     let rdp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let rdp_addr = rdp.local_addr().unwrap();
 
-    let (relay, stop, relay_addr) = run_relay().await;
+    let (relay, stop, relay_addr) = run_relay_for_test().await;
     let (_session, _token, secret, ticket) = new_udp_session(&rdp_addr.to_string()).await;
     // Note: session deliberately NOT registered — its token is unknown.
 
@@ -180,11 +202,12 @@ async fn relay_discards_unknown_token() {
 /// Anti-amplification: while the client address is not authenticated,
 /// data from the remote must never be sent anywhere. Once a client
 /// address exists, the same path delivers.
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn relay_never_sends_to_unauthenticated_client_addr() {
     log::setup_logging("debug", log::LogType::Test);
 
-    let (relay, stop, _relay_addr) = run_relay().await;
+    let (relay, stop, _relay_addr) = run_relay_for_test().await;
     let (session, token, secret, ticket) = new_udp_session("127.0.0.1:9").await;
     let udp = session.udp().unwrap();
 
@@ -234,11 +257,12 @@ async fn relay_never_sends_to_unauthenticated_client_addr() {
 
 /// The reaper tears down UDP legs idle for more than the timeout while
 /// the owning TCP session stays alive, and drops tokens of dead sessions.
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn reaper_clears_idle_udp_leg() {
     log::setup_logging("debug", log::LogType::Test);
 
-    let relay = UdpRelay::bind("127.0.0.1:0".parse().unwrap())
+    let relay = UdpRelay::bind_for_test("127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
     let (session, token, _secret, _ticket) = new_udp_session("127.0.0.1:9").await;

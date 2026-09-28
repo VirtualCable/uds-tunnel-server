@@ -82,6 +82,7 @@ fn new_session_for_test(remote: &str) -> Session {
     )
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_session_manager_add_and_get() {
     log::setup_logging("debug", log::LogType::Test);
@@ -111,6 +112,7 @@ async fn test_session_running() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_session_sequence_numbers() {
     log::setup_logging("debug", log::LogType::Test);
@@ -118,24 +120,15 @@ async fn test_session_sequence_numbers() {
     let session = new_session_for_test("127.0.0.1:1234");
     let seq = session.seqs();
     assert_eq!(seq, (0, 0));
-    session.set_seqs(5, 10);
-    let seq = session.seqs();
-    assert_eq!(seq, (5, 10));
-}
 
-/// `set_seqs` overwrites both halves of the pair in one critical
-/// section. Two consecutive calls produce the latest value (not a
-/// stacked write) and asymmetric pairs are accepted (e.g. `(7, 11)`)
-/// because inbound and outbound seqs are tracked independently.
-#[tokio::test]
-async fn test_set_seqs_assigns_atomically() {
-    let session = new_session_for_test("127.0.0.1:1234");
-
-    session.set_seqs(7, 11);
-    assert_eq!(session.seqs(), (7, 11));
-
-    session.set_seqs(0, 0);
-    assert_eq!(session.seqs(), (0, 0));
+    // The counters are moved only by the crypts themselves: a holder built
+    // from `server_tunnel_crypts` advancing the outbound counter is visible
+    // through `seqs()` with no explicit set path.
+    let (_, mut outbound) = session.server_tunnel_crypts().unwrap();
+    let mut buf = shared::crypt::types::PacketBuffer::new();
+    buf.set_data(b"abcd").unwrap();
+    outbound.encrypt(1, 4, &mut buf).unwrap();
+    assert_eq!(session.seqs(), (0, 1));
 }
 
 #[serial_test::serial(manager)]
@@ -215,6 +208,7 @@ async fn test_session_removed_exactly_once() {
     manager.stop_client(session.id(), 1).await;
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_get_session_returns_arc_clone() {
     log::setup_logging("debug", log::LogType::Test);
@@ -230,6 +224,7 @@ async fn test_get_session_returns_arc_clone() {
     assert!(Arc::ptr_eq(&s1, &s2));
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_get_equiv_session_default() {
     log::setup_logging("debug", log::LogType::Test);
@@ -248,6 +243,7 @@ async fn test_get_equiv_session_default() {
     assert!(manager.get_session(session.id()).is_some());
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_add_equiv_session() {
     let manager = SessionManager::new();
@@ -261,6 +257,7 @@ async fn test_add_equiv_session() {
     assert!(Arc::ptr_eq(&equiv_session, &direct_session));
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_session_removes_equiv_session() {
     let manager = SessionManager::new();
@@ -275,6 +272,7 @@ async fn test_remove_session_removes_equiv_session() {
     assert!(manager.get_session(session.id()).is_none());
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_equiv_session() {
     let manager = SessionManager::new();
@@ -295,6 +293,7 @@ async fn test_remove_equiv_session() {
 /// stops resolving once the session is gone. The equiv id lives
 /// inside the `Session` (one slot per session), so removing the
 /// session from the manager is enough to retire the equiv entry.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_session_clears_current_equiv_id() {
     let manager = SessionManager::new();
@@ -315,6 +314,7 @@ async fn test_remove_session_clears_current_equiv_id() {
 /// accumulate entries. Simulating the loop directly on the manager
 /// (no broker / handshake needed) verifies that the invariant holds
 /// no matter how many recovers happen.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_equivs_do_not_accumulate_across_recoveries() {
     let manager = SessionManager::new();
@@ -360,6 +360,7 @@ async fn test_equivs_do_not_accumulate_across_recoveries() {
 /// A recover that removes its old equiv id and mints a new one must
 /// leave exactly one live equiv for the session, and the old equiv
 /// must no longer resolve.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_recover_invalidates_old_equiv_id() {
     let manager = SessionManager::new();
@@ -384,6 +385,7 @@ async fn test_recover_invalidates_old_equiv_id() {
 /// a second one. This is the property that lets the manager drop its
 /// global `HashMap<SessionId, SessionId>`: any "second mint" implicitly
 /// supersedes the first, so no cleanup pass is needed.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_create_equiv_session_twice_overwrites_previous() {
     let manager = SessionManager::new();
@@ -423,6 +425,7 @@ async fn test_create_equiv_session_twice_overwrites_previous() {
 /// perspective. This guards against any future regression that, say,
 /// stores the equiv in a flat map keyed only by equiv id without
 /// verifying the owning session.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_equiv_id_is_session_scoped() {
     let manager = SessionManager::new();
@@ -458,7 +461,7 @@ async fn test_equiv_id_is_session_scoped() {
 /// config so the O(n) lookup paths in `get_equiv_session` /
 /// `remove_equiv_session` cannot be made to degrade indefinitely by
 /// flooding the manager with sessions.
-#[serial_test::serial(manager)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_add_session_respects_max_sessions_cap() {
     let manager = SessionManager::new();
@@ -497,7 +500,7 @@ async fn test_add_session_respects_max_sessions_cap() {
 /// sessions whose `src_ip` matches the given address. Used by the
 /// per-remote-IP cap in `connection::connect` (when enabled via
 /// `ServerConfig::max_sessions_per_remote`).
-#[serial_test::serial(manager)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_count_by_remote() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};

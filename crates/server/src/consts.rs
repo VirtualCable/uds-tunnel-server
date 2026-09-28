@@ -38,6 +38,12 @@ pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
 // Timeout constants
 pub const SERVER_RECOVERY_GRACE_SECS: u64 = 5; // Time given to recover server connection
 
+// Launcher keep-alive: the launcher sends a `Nop` on the control channel
+// periodically; the server tears the launcher leg down when it sees no frame
+// at all for `KEEPALIVE_TIMEOUT_SECS` (any inbound frame, data or keep-alive,
+// refreshes the deadline).
+pub const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+
 #[cfg(debug_assertions)]
 pub const CONFIGFILE_PATH: &str = "udstunnel.conf";
 #[cfg(not(debug_assertions))]

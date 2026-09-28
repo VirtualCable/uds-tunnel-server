@@ -29,6 +29,11 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use aes_gcm::{
     AeadInOut, Aes256Gcm, Nonce, Tag,
     aead::{Aead, AeadCore, KeyInit},
@@ -48,14 +53,39 @@ pub mod types;
 // PQC related
 pub mod kem;
 
+/// AEAD stream crypt with a monotonically increasing sequence number used as
+/// the AES-GCM nonce (and bound as AAD).
+///
+/// The sequence counter lives behind an [`Arc<AtomicU64>`] so that several
+/// `Crypt` instances can *share* one counter. The server session uses this to
+/// keep a single authoritative counter per direction: every crypt it hands
+/// out (handshake, each launcher-facing stream, each recovery handshake)
+/// encrypts/decrypts through the same atomic, so two streams that overlap
+/// for a short window (e.g. a recovery replacing a live stream while a
+/// socket write is in flight) can never reuse a `(key, seq)` nonce pair —
+/// AES-GCM nonce reuse is prevented by construction, not by coordination
+/// between the streams.
 pub struct Crypt {
     cipher: Aes256Gcm,
-    seq: u64,
+    seq: Arc<AtomicU64>,
 }
 
 impl Crypt {
+    /// Creates a crypt with its own private counter seeded at `seq`.
     pub fn new(key: &types::SharedSecret, seq: u64) -> Self {
         log::debug!("Creating Crypt with initial seq: {}", seq);
+        let cipher = Aes256Gcm::new(key.as_ref().into());
+        Crypt {
+            cipher,
+            seq: Arc::new(AtomicU64::new(seq)),
+        }
+    }
+
+    /// Creates a crypt that *shares* `seq` as its counter. Encrypting or
+    /// decrypting through this instance advances the same atomic every other
+    /// holder sees. See the [`Crypt`] docs for why the server session builds
+    /// all its crypts this way.
+    pub fn with_counter(key: &types::SharedSecret, seq: Arc<AtomicU64>) -> Self {
         let cipher = Aes256Gcm::new(key.as_ref().into());
         Crypt { cipher, seq }
     }
@@ -65,13 +95,12 @@ impl Crypt {
     /// (so it is pre increment, that is, if seq is 0, first packet will have seq 1, and then seq will be 1 after the call also).
     /// Returns the incremented seq value.
     pub fn next_seq(&mut self) -> u64 {
-        self.seq += 1;
-        self.seq
+        self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Returns the current seq value without incrementing it.
     pub fn current_seq(&self) -> u64 {
-        self.seq
+        self.seq.load(Ordering::SeqCst)
     }
 
     /// Encrypts the given plaintext using AES-GCM with a unique nonce derived from an internal seq.
@@ -170,7 +199,9 @@ impl Crypt {
             .decrypt_inout_detached(&nonce, &aad, ciphertext.into(), tag)
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
 
-        self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
+        // Update to last used seq + 1 (max, so a shared counter never moves
+        // backwards if another holder already advanced it past this packet).
+        self.seq.fetch_max(seq + 1, Ordering::SeqCst);
 
         // Fix data length to remove ending tag, so only channel + data is left
         buffer.set_length(len)?;
@@ -265,6 +296,53 @@ mod tests {
         assert_eq!(crypt.next_seq(), 1);
         assert_eq!(crypt.next_seq(), 2);
         assert_eq!(crypt.current_seq(), 2);
+    }
+
+    /// Two crypts built with `with_counter` over the same atomic share one
+    /// sequence space: what one encrypts with seq N, the other observes as
+    /// already used and skips on its own encrypt. This is the property the
+    /// server session relies on to make stream replacement nonce-safe.
+    #[test]
+    fn test_shared_counter_across_crypts() {
+        let key = SharedSecret::new([5u8; 32]);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut crypt_a = Crypt::with_counter(&key, counter.clone());
+        let mut crypt_b = Crypt::with_counter(&key, counter.clone());
+
+        let mut buf_a = types::PacketBuffer::new();
+        buf_a.set_data(b"aaaa").unwrap();
+        crypt_a.encrypt(1, 4, &mut buf_a).unwrap();
+        assert_eq!(buf_a.seq().unwrap(), 1);
+        assert_eq!(crypt_b.current_seq(), 1); // shared state, visible everywhere
+
+        // crypt_b must not reuse seq 1: its next encrypt gets seq 2
+        let mut buf_b = types::PacketBuffer::new();
+        buf_b.set_data(b"bbbb").unwrap();
+        crypt_b.encrypt(1, 4, &mut buf_b).unwrap();
+        assert_eq!(buf_b.seq().unwrap(), 2);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+
+        let mut buf_c = types::PacketBuffer::new();
+        buf_c.set_data(b"cccc").unwrap();
+        crypt_a.encrypt(1, 4, &mut buf_c).unwrap();
+        assert_eq!(buf_c.seq().unwrap(), 3);
+
+        // decrypt advances the counter for every holder (fetch_max on
+        // last-used + 1), never moving it backwards.
+        let mut buf_c2 = buf_c.clone();
+        crypt_b.decrypt(&mut buf_c2).unwrap();
+        assert_eq!(crypt_a.current_seq(), 4);
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+
+        // a replayed early frame is now rejected through either holder
+        let mut buf_a2 = buf_a.clone();
+        let err = crypt_b.decrypt(&mut buf_a2).unwrap_err();
+        assert!(
+            err.to_string().contains("replay attack detected"),
+            "{}",
+            err
+        );
     }
 
     #[test]

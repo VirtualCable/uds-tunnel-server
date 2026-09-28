@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger};
+use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket};
 
 use crate::{session::SessionManager, stream::server::TunnelServerStream};
 
@@ -82,10 +82,25 @@ where
                     buffer,
                 );
             }
-            let stop = Trigger::new();
+            // Enter the attach critical section *before* touching any cipher
+            // state: kill the still-live server stream (if any) instantly.
+            // No drain is needed for sequence safety — the recovered crypts
+            // below share the session's live per-direction counters, so even
+            // frames the killed stream may still have in flight cannot reuse
+            // a (key, seq) nonce pair the new stream will use.
+            let _attach_guard = session.lock_server_attach().await;
+            session.kill_current_server_stream();
+
             let session_id = session.id();
-            // Check that the first crypted packet is the ticket again
+            // Crypts sharing the session counters: decrypting the ticket
+            // confirm and encrypting the OpenResponse advance the session's
+            // authoritative seq numbers directly, atomically with their use.
             let (mut crypt_reader, mut crypt_writer) = session.server_tunnel_crypts()?;
+
+            // Snapshot the counters *before* reading the ticket confirm: the
+            // confirm is itself one inbound frame, so the sequence pair the
+            // launcher's new stream resumes from is the pre-confirm value.
+            let (in_seq, out_seq) = session.seqs();
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let rec_sessid_confirm = tokio::time::timeout(
@@ -128,13 +143,6 @@ where
             // and widen the recovery-credential attack surface).
             session_manager.remove_equiv_session(recover_session_id);
             let equiv_id = session_manager.create_equiv_session(session_id)?;
-            // Atomically fetch the current seqs and reserve the next ones for
-            // this recovery handshake. Doing this in a single critical
-            // section prevents two concurrent Recover attempts from reading
-            // the same pre-increment pair and overwriting each other's
-            // updates, which would desync the loser's crypt from the
-            // server's view of the sequence window.
-            let (in_seq, out_seq) = session.fetch_add_seqs(1, 1);
             // The UDP leg survives recovery: keys derive from the ticket
             // and do not change, so the same token goes back out. A zero
             // token means the session never had UDP enabled.
@@ -159,19 +167,22 @@ where
                 .write(&mut writer, stream_channel_id, &response_data)
                 .await?;
 
-            // The next expected seqs are already (in_seq + 1, out_seq + 1)
-            // because fetch_add_seqs reserved them. Both tunnel sides will
-            // create a crypt based on these seq numbers.
-            // Note: both tunnel sides will create a crypt based on these seq numbers
+            // The ticket confirm advanced the shared inbound counter past the
+            // confirm frame and the OpenResponse write consumed the next
+            // outbound seq, so the new stream's crypts (rebuilt from the
+            // session counters) resume strictly after the handshake without
+            // any explicit reservation.
+            //
+            // Attach the new launcher-facing stream while still holding the
+            // attach lock: start_server allocates the proxy channel set and
+            // registers the new owner, and any later attach can only see the
+            // *new* stream, never the already-killed one. Doing this in the
+            // same critical section as the reseed is what prevents a second
+            // concurrent Recover from interleaving with this handshake.
+            let (endpoints, owner) = session.start_server().await?;
 
-            // Client stream should already be there, just create the server stream
             let server_stream = TunnelServerStream::new(*session_id, reader, writer);
-
-            tokio::spawn(async move {
-                if let Err(e) = server_stream.run().await {
-                    log::error!("Server stream error: {:?}", e);
-                }
-            });
+            server_stream.run_attached(session.clone(), endpoints, owner);
         }
         None => {
             log::error!("Failed to retrieve recover session id");

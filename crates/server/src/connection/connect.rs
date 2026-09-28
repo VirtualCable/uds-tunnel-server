@@ -276,18 +276,13 @@ where
                 response
             );
 
-            // Sync the session seq numbers with what the handshake crypts
-            // actually consumed: the inbound crypt used seq 1 for the ticket
-            // echo (decrypt advances to last-used + 1, so current_seq is 2),
-            // while the outbound crypt used seq 1 for the OpenResponse but
-            // encrypt pre-increments (current_seq stays 1). Seeding the next
-            // pair with anything less than (2, 1) on the inbound side would
-            // let the anti-replay check admit a replayed copy of the
-            // handshake ticket packet as the first post-handshake read;
-            // keeping the outbound at 1 makes the next send seq 2, which is
-            // exactly what the client expects after decrypting the
-            // OpenResponse.
-            session.set_seqs(crypt_reader.current_seq(), crypt_writer.current_seq());
+            // No seq sync is needed after the handshake: the crypts above
+            // share the session's live counters, so they already advanced
+            // the authoritative sequence state while consuming the ticket
+            // echo (inbound -> last-used + 1 via the anti-replay fetch_max,
+            // which admits a replayed handshake ticket only as a read at
+            // seq >= 2) and writing the OpenResponse (outbound -> 1 used,
+            // so the next send is 2, exactly what the client expects).
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(*session.id(), reader, writer);

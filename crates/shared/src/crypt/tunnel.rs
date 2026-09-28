@@ -29,6 +29,9 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
+
 use anyhow::Result;
 use hkdf::Hkdf;
 use sha2::Sha256;
@@ -95,17 +98,25 @@ pub fn derive_tunnel_material(
     Ok(material)
 }
 
-/// Returns (inbound, outbound) crypts
+/// Returns (inbound, outbound) crypts sharing the provided sequence counters.
 /// inbound: for reading from the tunnel (decrypting)
 /// outbound: for writing to the tunnel (encrypting)
+///
+/// The counters are `Arc<AtomicU64>` so a caller (the server session) can keep
+/// one authoritative counter per direction and hand it to *every* crypt it
+/// builds — initial stream, recovery handshake, live stream — guaranteeing no
+/// `(key, seq)` nonce pair is ever used twice, even while two streams overlap
+/// for a short window.
 /// # Arguments
 /// * `shared_secret` - Shared secret used for deriving the keys
 /// * `ticket` - Ticket used for deriving the keys
-/// * `seqs` - Initial sequence numbers for (inbound, outbound) crypts
+/// * `seq_in` - Sequence counter (shared) for the inbound crypt
+/// * `seq_out` - Sequence counter (shared) for the outbound crypt
 pub fn get_tunnel_crypts(
     shared_secret: &SharedSecret,
     ticket: &ticket::Ticket,
-    seqs: (u64, u64),
+    seq_in: Arc<AtomicU64>,
+    seq_out: Arc<AtomicU64>,
 ) -> Result<(Crypt, Crypt)> {
     let material = derive_tunnel_material(shared_secret, ticket)?;
     log::debug!(
@@ -114,8 +125,8 @@ pub fn get_tunnel_crypts(
         material.key_send
     );
 
-    let inbound = Crypt::new(&material.key_receive, seqs.0);
-    let outbound = Crypt::new(&material.key_send, seqs.1);
+    let inbound = Crypt::with_counter(&material.key_receive, seq_in);
+    let outbound = Crypt::with_counter(&material.key_send, seq_out);
 
     Ok((inbound, outbound))
 }
@@ -185,10 +196,24 @@ mod tests {
         let shared_secret = SharedSecret::new([1u8; 32]);
         let ticket: ticket::Ticket = [2u8; 48].into();
 
-        let (inbound, outbound) = get_tunnel_crypts(&shared_secret, &ticket, (0, 0)).unwrap();
+        let seq_in = Arc::new(AtomicU64::new(0));
+        let seq_out = Arc::new(AtomicU64::new(0));
+        let (inbound, outbound) =
+            get_tunnel_crypts(&shared_secret, &ticket, seq_in.clone(), seq_out.clone()).unwrap();
 
         assert_eq!(inbound.current_seq(), 0);
         assert_eq!(outbound.current_seq(), 0);
+
+        // The crypts hold the *same* atomics the caller passed in: advancing
+        // one through the crypt is visible through the caller's handle. This
+        // is how the server session keeps one authoritative counter per
+        // direction across stream replacements.
+        let mut inbound = inbound;
+        let mut outbound = outbound;
+        assert_eq!(outbound.next_seq(), 1);
+        assert_eq!(seq_out.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(inbound.next_seq(), 1);
+        assert_eq!(seq_in.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Known-answer test for the UDP leg key derivation. The exact same

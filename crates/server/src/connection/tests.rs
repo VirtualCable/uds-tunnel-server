@@ -32,9 +32,10 @@
 use super::*;
 
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use mockito::{Matcher, Server};
-use tokio::io::{AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use shared::{
     crypt::{
@@ -44,8 +45,8 @@ use shared::{
     },
     log,
     protocol::{
-        Command, consts::HANDSHAKE_V2_SIGNATURE, consts::TICKET_LENGTH, consts::TUNNEL_AUTH_HEADER,
-        handshake::HandshakeCommand, ticket::Ticket,
+        Command, PayloadWithChannel, consts::HANDSHAKE_V2_SIGNATURE, consts::TICKET_LENGTH,
+        consts::TUNNEL_AUTH_HEADER, handshake::HandshakeCommand, ticket::Ticket,
     },
     system::trigger::Trigger,
 };
@@ -96,6 +97,10 @@ async fn setup_testing_connection(
         config.broker_auth_token = auth_token.to_string();
         config.dangerous_disable_ssl_verify = Some(false);
         config.ticket_api_url = url.clone();
+        // The optional caps are exercised by dedicated tests that set them
+        // explicitly; never leak them from a previously-serialized test.
+        config.max_sessions = None;
+        config.max_sessions_per_remote = None;
     }
 
     let ticket_response_json = if !multi_channel {
@@ -197,6 +202,126 @@ async fn wait_for_session_manager_empty() -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     anyhow::bail!("Session manager not empty after waiting");
+}
+
+/// Poll until the stop matcher has captured at least one request body
+/// (detached notifications get a chance to run). Returns false after ~5s.
+async fn wait_for_stop_capture(captured: &StopCapture) -> bool {
+    for _ in 0..50 {
+        if captured.lock().unwrap().is_some() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Drive the client side of the Open handshake up to and including the
+/// encrypted ticket echo. The server answers with an `OpenResponse` on the
+/// happy path; on early rejections (caps) it just closes the stream, so
+/// callers that expect a response must read it themselves.
+async fn send_open_handshake(
+    client_stream: &mut DuplexStream,
+    ticket: &Ticket,
+    out_crypt: &mut Crypt,
+) -> anyhow::Result<()> {
+    let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
+    signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    signature_buf[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    signature_buf.extend_from_slice(ticket.as_ref());
+    client_stream.write_all(&signature_buf).await?;
+    out_crypt
+        .write(client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
+        .await?;
+    Ok(())
+}
+
+/// Broker stop matcher for the fixed test notify ticket ("B" * 48).
+///
+/// The `start` POST of the same flow never matches this body (`command`
+/// differs), so the mock can be registered up front without stealing the
+/// handshake's start response. When `captured` is given, the stop request
+/// body is recorded as JSON so the test can pin the reported stats after
+/// the fact (mockito exposes no public per-mock hit body query).
+type StopCapture = Arc<Mutex<Option<serde_json::Value>>>;
+
+fn broker_stop_mock(
+    server: &mut mockito::ServerGuard,
+    captured: Option<StopCapture>,
+) -> mockito::Mock {
+    let mock = server
+        .mock("POST", "/")
+        .match_header(
+            TUNNEL_AUTH_HEADER,
+            mockito::Matcher::Regex("Bearer sk-".into()),
+        )
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "command": "stop",
+            "ticket": "B".repeat(TICKET_LENGTH),
+        })));
+    let mock = if let Some(captured) = captured {
+        mock.with_body_from_request(move |request| {
+            if let Ok(body) = request.utf8_lossy_body()
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+            {
+                *captured.lock().unwrap() = Some(json);
+            }
+            b"{}".to_vec()
+        })
+    } else {
+        mock
+    };
+    // One and exactly one stop POST per closed session.
+    mock.expect(1).with_status(200).create()
+}
+
+/// Same matcher, for the negative contract: asserts that no second stop
+/// ever reaches the broker (e.g. after the shutdown path already claimed
+/// the notification and the `Session` Arc is dropped later).
+fn broker_no_extra_stop_mock(server: &mut mockito::ServerGuard) -> mockito::Mock {
+    server
+        .mock("POST", "/")
+        .match_header(
+            TUNNEL_AUTH_HEADER,
+            mockito::Matcher::Regex("Bearer sk-".into()),
+        )
+        .match_body(Matcher::PartialJson(serde_json::json!({
+            "command": "stop",
+            "ticket": "B".repeat(TICKET_LENGTH),
+        })))
+        .expect(0)
+        .with_status(200)
+        .create()
+}
+
+fn captured_json(captured: &StopCapture) -> serde_json::Value {
+    captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stop body never captured")
+}
+
+/// Snapshots the session-cap knobs of the global config and restores them
+/// on drop, so cap-exercising tests cannot leak `max_sessions = Some(0)`
+/// into the serialized manager tests that run next with this config.
+struct SessionCapRestore(Option<usize>, Option<usize>);
+
+impl SessionCapRestore {
+    fn snapshot() -> Self {
+        let config = config::get();
+        let config = config.read().unwrap();
+        Self(config.max_sessions, config.max_sessions_per_remote)
+    }
+}
+
+impl Drop for SessionCapRestore {
+    fn drop(&mut self) {
+        let config = config::get();
+        let mut config = config.write().unwrap();
+        config.max_sessions = self.0;
+        config.max_sessions_per_remote = self.1;
+    }
 }
 
 async fn read_until_close(
@@ -328,17 +453,14 @@ async fn test_connection_notifies_broker_stop_on_close() -> anyhow::Result<()> {
     let (mut server, _mock, mut client_stream, _stop, ticket) =
         setup_testing_connection(false, false).await;
 
-    // Send a handshake with Open action
-    let mut signature_buf = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1];
-    signature_buf[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
-    signature_buf[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
-    signature_buf.extend_from_slice(ticket.as_ref());
-    client_stream.write_all(&signature_buf).await?;
+    // Registered before the session can close: the cap-reject path
+    // notifies the broker the moment `start` returns and the connect
+    // guard drops, so waiting to install the matcher would race it.
+    let captured: StopCapture = Arc::new(Mutex::new(None));
+    let stop_mock = broker_stop_mock(&mut server, Some(captured.clone()));
 
     let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
-    out_crypt
-        .write(&mut client_stream, TEST_STREAM_CHANNEL_ID, ticket.as_ref())
-        .await?;
+    send_open_handshake(&mut client_stream, &ticket, &mut out_crypt).await?;
     let mut buffer: PacketBuffer = PacketBuffer::new();
     let (session_response_data, _channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
     let session_response = OpenResponse::from_slice(session_response_data)?;
@@ -373,30 +495,14 @@ async fn test_connection_notifies_broker_stop_on_close() -> anyhow::Result<()> {
         read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID).await?;
     assert!(response.contains("HTTP/1.1 200 OK"));
 
-    assert!(session.traffic().snapshot().0 > 0, "upload not counted");
-    assert!(session.traffic().snapshot().1 > 0, "download not counted");
+    let (sent, recv) = session.traffic().snapshot();
+    assert!(sent > 0, "upload not counted");
+    assert!(recv > 0, "download not counted");
 
-    // The stop report fires from `Session::Drop`, i.e. when the *last* Arc
-    // goes away; this test holds an extra reference, so drop it here.
+    // Close the session definitively. The stop fires from
+    // `Session::Drop`, i.e. only when the *last* Arc goes away — this
+    // test holds one extra reference, so release it first.
     drop(session);
-
-    // Register the stop matcher only now: mockito prefers the most
-    // recently created matching mock, so the handshake's start POST (a
-    // different body) could not have consumed this expectation.
-    let stop_mock = server
-        .mock("POST", "/")
-        .match_header(
-            TUNNEL_AUTH_HEADER,
-            mockito::Matcher::Regex("Bearer sk-".into()),
-        )
-        .match_body(Matcher::PartialJson(serde_json::json!({
-            "command": "stop",
-            "ticket": "B".repeat(TICKET_LENGTH),
-        })))
-        .with_status(200)
-        .create();
-
-    // Close the session definitively.
     let close_msg = Command::Close.to_message();
     out_crypt
         .write(
@@ -409,20 +515,164 @@ async fn test_connection_notifies_broker_stop_on_close() -> anyhow::Result<()> {
     wait_for_session_manager_empty().await?;
 
     // The stop report is spawned detached from the session teardown; poll
-    // briefly for the mock to be hit.
-    let mut notified = false;
-    for _ in 0..50 {
-        if stop_mock.matched() {
-            notified = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // briefly for the mock to be hit. `.expect(1)` + `assert()` then pin
+    // the exactly-once contract: no duplicate stop, none missing.
     assert!(
-        notified,
+        wait_for_stop_capture(&captured).await,
         "broker never received the stop notification for the closed session"
     );
+    let body = captured_json(&captured);
+    assert_eq!(body["sent"], serde_json::json!(sent), "reported sent");
+    assert_eq!(body["recv"], serde_json::json!(recv), "reported recv");
+    stop_mock.assert();
+    Ok(())
+}
 
+/// Contract test: when the per-IP cap rejects a connect, the broker
+/// reservation made by the successful `start` is still released — the RAII
+/// guard in `connect` reports a zero-traffic stop, so the ticket row does
+/// not linger until its TTL.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn test_connection_per_ip_cap_rejection_notifies_stop() -> anyhow::Result<()> {
+    let (mut server, _mock, mut client_stream, _stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // Every source IP already at cap: the first connect is rejected. The
+    // guard restores the global knobs on exit (even through a panic) so
+    // the serialized manager tests never inherit a zero cap.
+    let _cap_restore = SessionCapRestore::snapshot();
+    config::get().write().unwrap().max_sessions_per_remote = Some(0);
+
+    // The stop may arrive while the handshake is still being refused;
+    // the matcher must be live before the guard can drop.
+    let captured: StopCapture = Arc::new(Mutex::new(None));
+    let stop_mock = broker_stop_mock(&mut server, Some(captured.clone()));
+
+    let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
+    send_open_handshake(&mut client_stream, &ticket, &mut out_crypt).await?;
+    // The server rejects before creating a Session; the stream just dies.
+    let _ = client_stream.shutdown().await;
+
+    assert!(
+        wait_for_stop_capture(&captured).await,
+        "broker reservation from a cap-rejected start was never stopped"
+    );
+    let body = captured_json(&captured);
+    assert_eq!(body["sent"], serde_json::json!(0), "no traffic relayed");
+    assert_eq!(body["recv"], serde_json::json!(0), "no traffic relayed");
+    stop_mock.assert();
+    Ok(())
+}
+
+/// Contract test: when the global session cap refuses the registration,
+/// the Session — which already owns the notify ticket handed over by the
+/// connect guard — is dropped and its `Drop` reports the zero-traffic stop.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn test_connection_add_session_cap_rejection_notifies_stop() -> anyhow::Result<()> {
+    let (mut server, _mock, mut client_stream, _stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // add_session always refuses: registration happens after the
+    // guard has handed the notify ticket to the Session. Restored on
+    // exit via the RAII guard (see the per-IP cap test above).
+    let _cap_restore = SessionCapRestore::snapshot();
+    config::get().write().unwrap().max_sessions = Some(0);
+
+    let captured: StopCapture = Arc::new(Mutex::new(None));
+    let stop_mock = broker_stop_mock(&mut server, Some(captured.clone()));
+
+    let (mut out_crypt, _in_crypt) = create_out_int_crypts(&ticket)?;
+    send_open_handshake(&mut client_stream, &ticket, &mut out_crypt).await?;
+    let _ = client_stream.shutdown().await;
+
+    assert!(
+        wait_for_stop_capture(&captured).await,
+        "a session dropped by the global cap never told the broker"
+    );
+    let body = captured_json(&captured);
+    assert_eq!(body["sent"], serde_json::json!(0), "no traffic relayed");
+    assert_eq!(body["recv"], serde_json::json!(0), "no traffic relayed");
+    stop_mock.assert();
+    Ok(())
+}
+
+/// Contract test: server shutdown (`finish_all_sessions`) must deliver the
+/// stop reports with the final traffic snapshot, awaited (not detached),
+/// so the process can exit with the broker fully informed. Also pins that
+/// the shutdown claim suppresses the later `Session::Drop` notification.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn test_finish_all_sessions_reports_stop_with_stats() -> anyhow::Result<()> {
+    let (mut server, _mock, mut client_stream, _stop, ticket) =
+        setup_testing_connection(false, false).await;
+
+    let captured: StopCapture = Arc::new(Mutex::new(None));
+    let stop_mock = broker_stop_mock(&mut server, Some(captured.clone()));
+
+    let (mut out_crypt, mut in_crypt) = create_out_int_crypts(&ticket)?;
+    send_open_handshake(&mut client_stream, &ticket, &mut out_crypt).await?;
+    let mut buffer: PacketBuffer = PacketBuffer::new();
+    let (session_response_data, _channel) = in_crypt.read(&mut client_stream, &mut buffer).await?;
+    let session_response = OpenResponse::from_slice(session_response_data)?;
+
+    let session_manager = crate::session::SessionManager::get_instance();
+    let session = session_manager
+        .get_equiv_session(&session_response.session_id)
+        .expect("Session not found");
+
+    // Open the channel, send traffic, and wait until the server-side
+    // counters observe it: the stop snapshot must contain the bytes that
+    // were actually relayed, and the pump task adds them before any
+    // later claim of the notification can run.
+    out_crypt
+        .write(
+            &mut client_stream,
+            0, // Control channel
+            Command::OpenChannel { channel_id: 1 }.to_bytes().as_slice(),
+        )
+        .await?;
+
+    let get_request = format!(
+        "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        TEST_REMOTE_SERVER
+    );
+    out_crypt
+        .write(
+            &mut client_stream,
+            TEST_STREAM_CHANNEL_ID,
+            get_request.as_bytes(),
+        )
+        .await?;
+    let response =
+        read_until_close(&mut in_crypt, &mut client_stream, TEST_STREAM_CHANNEL_ID).await?;
+    assert!(response.contains("HTTP/1.1 200 OK"));
+
+    // No `Close` command: the session stays registered — the shutdown case.
+    let (sent, recv) = session.traffic().snapshot();
+    assert!(sent > 0, "upload not counted");
+    assert!(recv > 0, "download not counted");
+
+    // `finish_all_sessions` awaits every report, so once it returns the
+    // mock must already have its single hit — no polling needed.
+    session_manager.finish_all_sessions().await;
+    assert!(
+        stop_mock.matched(),
+        "shutdown did not deliver the broker stop report synchronously"
+    );
+    let body = captured_json(&captured);
+    assert_eq!(body["sent"], serde_json::json!(sent), "reported sent");
+    assert_eq!(body["recv"], serde_json::json!(recv), "reported recv");
+
+    // This test still holds the last Arc: dropping it now must NOT send a
+    // second stop (the shutdown path already claimed the notification).
+    // `expect(0)` asserts it: a stray second POST to this matcher exceeds
+    // the bound and the assert() below panics.
+    drop(session);
+    let after_drop = broker_no_extra_stop_mock(&mut server);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    after_drop.assert();
     stop_mock.assert();
     Ok(())
 }
@@ -578,7 +828,8 @@ async fn test_connection_handshake_seq_matches_client_state() -> anyhow::Result<
     let response = OpenResponse::from_slice(resp_data)?;
     assert_eq!(resp_channel, 0);
 
-    // Let connect finish `set_seqs` after writing the response
+    // Let `connect` spawn the live stream (its crypts share the session
+    // counters; the handshake already advanced them in place).
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     let session_manager = SessionManager::get_instance();
@@ -609,10 +860,9 @@ async fn test_connection_handshake_seq_matches_client_state() -> anyhow::Result<
     assert_eq!(next_buf.data(), payload.as_slice());
 
     // Anti-replay: a captured copy of the seq=1 handshake echo must NOT be
-    // admitted as a post-handshake packet. (On the old `set_seqs(1, 1)` it
-    // passed the floor check and only died later as an unparsable
-    // control-channel command, tearing the session down anyway; the floor
-    // should still be the handshake end state, not one packet below it.)
+    // admitted as a post-handshake packet. The shared inbound counter is at
+    // 2 after the handshake (decrypt set last-used + 1), so a replay of the
+    // handshake echo is rejected by the floor check, not merely by parsing.
     let mut replay = echo_frame;
     let (mut replay_crypt, _) = session.server_tunnel_crypts()?;
     assert!(
@@ -849,5 +1099,224 @@ async fn recover_validation_runs_before_network() -> Result<()> {
     .expect_err("recover must return an error for in_seq=0");
 
     drop(client);
+    Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Regression test: Recover must not hand the launcher leg a nonce that a
+// still-live server stream has already used.
+//
+// Drives the REAL code path (an Open that leaves a live `TunnelServerStream`
+// running, then a Recover over a second connection) and captures the exact
+// on-the-wire bytes of each leg. The server kills the live stream instantly
+// and every crypt it builds shares the session's live per-direction counters,
+// so the recovered crypts continue strictly past every nonce the replaced
+// stream actually emitted — without any drain/publish step. Two streams
+// encrypting different plaintexts under the same (key, seq) pair would be an
+// AES-GCM keystream reuse; the shared atomics make that impossible by
+// construction. The kill must also leave the replacement stream's proxy
+// attachment intact: exactly one server stream is launcher-facing at any
+// time, and proxy data flows over the new one after recovery.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Read one raw AEAD frame off the wire: 8-byte seq + 2-byte length header,
+/// followed by `length` bytes (ciphertext || 16-byte tag).
+async fn read_raw_frame<R: AsyncReadExt + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut header = [0u8; 10];
+    r.read_exact(&mut header).await?;
+    let length = u16::from_be_bytes([header[8], header[9]]) as usize;
+    let mut frame = header.to_vec();
+    frame.resize(10 + length, 0);
+    r.read_exact(&mut frame[10..]).await?;
+    Ok(frame)
+}
+
+fn frame_seq(f: &[u8]) -> u64 {
+    u64::from_be_bytes(f[0..8].try_into().unwrap())
+}
+
+/// Decrypt a captured raw frame with the provided crypt; returns
+/// (channel_id, payload).
+fn decrypt_raw(crypt: &mut Crypt, f: &[u8]) -> anyhow::Result<(u16, Vec<u8>)> {
+    let mut pb = PacketBuffer::new();
+    pb.full_buffer_mut()[..f.len()].copy_from_slice(f);
+    crypt.decrypt(&mut pb)?;
+    Ok((pb.channel_id(), pb.data().to_vec()))
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_kills_live_stream_and_continues_shared_counters() -> anyhow::Result<()> {
+    // ---- connection A: the real Open handshake, live stream left running ---
+    let (server, _mock, mut client_a, _stop_a, ticket) =
+        setup_testing_connection(false, false).await;
+
+    // Public handshake: signature + Open + ticket.
+    let mut sig = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
+    sig[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    sig[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    sig[HANDSHAKE_V2_SIGNATURE.len() + 1..].copy_from_slice(ticket.as_ref());
+    client_a.write_all(&sig).await?;
+
+    let shared_secret =
+        SharedSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")?;
+    let material = derive_tunnel_material(&shared_secret, &ticket)?;
+
+    // Client crypts seeded at (0,0), exactly like the real launcher.
+    let mut client_a_out = Crypt::new(&material.key_receive, 0);
+    let mut client_a_in = Crypt::new(&material.key_send, 0);
+
+    // Ticket echo on channel 0 (the real client does this over the AEAD leg).
+    let mut echo = PacketBuffer::new();
+    echo.set_data(ticket.as_ref())?;
+    client_a_out.encrypt(0, ticket.as_ref().len(), &mut echo)?;
+    echo.write(&mut client_a).await?;
+
+    // Capture + decrypt the OpenResponse (raw frame = on-the-wire bytes).
+    let open_frame = read_raw_frame(&mut client_a).await?;
+    assert_eq!(frame_seq(&open_frame), 1);
+    let (_, open_pt) = decrypt_raw(&mut client_a_in, &open_frame)?;
+    let response = OpenResponse::from_slice(&open_pt)?;
+
+    // Let `connect` spawn the live stream (the handshake crypts already
+    // advanced the shared session counters).
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let session = SessionManager::get_instance()
+        .get_equiv_session(&response.session_id)
+        .expect("session not found");
+    // Production post-connect state: (inbound, outbound) == (2, 1).
+    assert_eq!(session.seqs(), (2, 1));
+
+    // Drive the LIVE TunnelServerStream to emit two outbound frames
+    // (seq 2 and seq 3) by feeding the proxy->launcher channel it reads.
+    let (launcher_tx, _) = session.get_proxy_channels();
+    let p_live1 = vec![0xA1u8; 90];
+    let p_live2 = vec![0xB2u8; 90];
+    launcher_tx
+        .send_async(PayloadWithChannel::new(1, &p_live1))
+        .await?;
+    launcher_tx
+        .send_async(PayloadWithChannel::new(1, &p_live2))
+        .await?;
+
+    // What an on-path observer captures on connection A.
+    let live1 = read_raw_frame(&mut client_a).await?;
+    let live2 = read_raw_frame(&mut client_a).await?;
+    assert_eq!(frame_seq(&live1), 2, "live stream first frame");
+    assert_eq!(frame_seq(&live2), 3, "live stream second frame");
+
+    // ---- connection B: the REAL recover path via `handle_connection` ------
+    let (mut client_b, server_b) = tokio::io::duplex(8192);
+    let ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    tokio::spawn(async move {
+        let (r, w) = tokio::io::split(server_b);
+        let _ = handle_connection(r, w, ip).await;
+    });
+
+    // Recover handshake: signature + Recover + equiv id + in_seq + out_seq.
+    // in_seq=3 => requested = 2, inside the live stream's recovery window
+    // [2, 3] (frames at seq 2 and 3 are buffered for retransmission).
+    let mut rec = Vec::new();
+    rec.extend_from_slice(HANDSHAKE_V2_SIGNATURE);
+    rec.push(HandshakeCommand::Recover.into());
+    rec.extend_from_slice(response.session_id.as_ref());
+    rec.extend_from_slice(&3u64.to_be_bytes());
+    rec.extend_from_slice(&1u64.to_be_bytes());
+    client_b.write_all(&rec).await?;
+
+    // Echo the recover session id over the recovered AEAD leg. The server's
+    // inbound counter is at 2 after connect (the ticket echo on A was
+    // decrypted at seq 1), so the next inbound frame it accepts is seq 2 —
+    // the client's next encrypt must land on seq 2.
+    let mut client_b_out = Crypt::new(&material.key_receive, 1);
+    let mut echo2 = PacketBuffer::new();
+    echo2.set_data(response.session_id.as_ref())?;
+    client_b_out.encrypt(0, response.session_id.as_ref().len(), &mut echo2)?;
+    echo2.write(&mut client_b).await?;
+
+    // What an on-path observer captures on connection B (the OpenResponse).
+    // The live stream's last outbound seq is 3, and the recover handshake's
+    // shared outbound crypt writes the OpenResponse at seq 4 — strictly past
+    // every frame the killed stream emitted (2 and 3): no (key, seq)
+    // collision between the replaced and the recovering leg.
+    let rec_frame = read_raw_frame(&mut client_b).await?;
+    assert_eq!(
+        frame_seq(&rec_frame),
+        4,
+        "the OpenResponse must continue past the live stream's last seq (3), not reuse it"
+    );
+    let mut client_b_in = Crypt::new(&material.key_send, 3);
+    let (_, rec_pt) = decrypt_raw(&mut client_b_in, &rec_frame)?;
+    let rec_response = OpenResponse::from_slice(&rec_pt)?;
+    // Wire contract (unchanged for the launcher): the response carries the
+    // pre-confirm snapshot, and the session's shared counters already moved
+    // past it (the confirm decrypt and the OpenResponse encrypt advanced
+    // them). The pair is asserted deterministically once the retransmission
+    // and the fresh frame are captured below — mid-handshake it races with
+    // the new stream's first outbound seq.
+    assert_eq!(rec_response.inbound_seq, 2);
+    assert_eq!(rec_response.outbound_seq, 3);
+    assert!(frame_seq(&rec_frame) > frame_seq(&live1));
+    assert!(frame_seq(&rec_frame) > frame_seq(&live2));
+
+    // ---- post-recover liveness on connection B: the new stream owns the
+    // proxy data path, and the killed one cannot tear it down. ----
+    // The recover request (in_seq=3) asked for retransmission from the live
+    // stream's seq 3, so the new leg must first replay the buffered frame
+    // (the p_live2 payload, re-encrypted under the new nonce seq 5), and only
+    // then forward fresh proxy data over connection B. Connection A must
+    // receive nothing more (its stream was killed, its teardown skipped so
+    // it could not fail/stop the new attachment).
+    let retrans = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_raw_frame(&mut client_b),
+    )
+    .await
+    .expect("recovered leg must retransmit the buffered frame")?;
+    assert_eq!(frame_seq(&retrans), 5, "retransmission continues at seq 5");
+    let mut client_b_check = Crypt::new(&material.key_send, 4);
+    let (ch, payload) = decrypt_raw(&mut client_b_check, &retrans)?;
+    assert_eq!(ch, 1);
+    assert_eq!(
+        payload, p_live2,
+        "buffered live-stream frame is replayed first"
+    );
+
+    let p_new1 = vec![0xC3u8; 50];
+    launcher_tx
+        .send_async(PayloadWithChannel::new(1, &p_new1))
+        .await?;
+    let new_frame = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_raw_frame(&mut client_b),
+    )
+    .await
+    .expect("new server stream must deliver proxy data over connection B")?;
+    assert_eq!(frame_seq(&new_frame), 6, "new stream continues at seq 6");
+    let (_, payload) = decrypt_raw(&mut client_b_check, &new_frame)?;
+    assert_eq!(payload, p_new1);
+
+    // The session's shared counters landed exactly where the wire shows:
+    // inbound 3 (connect ticket echo 1 + recover confirm 2, each decrypt
+    // advancing to last-used + 1), outbound 6 (live frames 2-3, OpenResponse
+    // 4, retransmission 5, fresh payload 6 — every holder advanced the same
+    // atomic).
+    assert_eq!(session.seqs(), (3, 6));
+
+    if let Ok(Ok(f)) = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        read_raw_frame(&mut client_a),
+    )
+    .await
+    {
+        panic!(
+            "retired stream emitted seq={} after recovery",
+            frame_seq(&f)
+        );
+    }
+
+    // Keep the broker mock alive until the end of the test.
+    drop(server);
     Ok(())
 }

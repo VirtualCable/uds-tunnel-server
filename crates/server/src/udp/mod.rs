@@ -139,6 +139,19 @@ impl UdpRelay {
         Ok(relay)
     }
 
+    /// Test-only: bind a relay WITHOUT installing it as the process-global
+    /// instance, so unit tests drive their own relay directly and do not
+    /// race each other (or the e2e tests) through `UDP_RELAY`.
+    #[cfg(test)]
+    pub(crate) async fn bind_for_test(addr: SocketAddr) -> Result<Arc<Self>> {
+        let socket = UdpSocket::bind(addr).await?;
+        Ok(Arc::new(UdpRelay {
+            socket: Arc::new(socket),
+            sessions: RwLock::new(HashMap::new()),
+            counters: Counters::default(),
+        }))
+    }
+
     /// Bind + spawn the receive loop as a background task. Used by `main`.
     pub async fn start(addr: SocketAddr, stop: Trigger) -> Result<Arc<Self>> {
         let relay = Self::bind(addr).await?;
@@ -439,4 +452,9 @@ impl UdpRelay {
 }
 
 #[cfg(test)]
+mod audit;
+#[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_hostile;

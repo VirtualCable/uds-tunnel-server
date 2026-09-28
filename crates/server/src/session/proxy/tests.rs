@@ -366,6 +366,7 @@ async fn reattach_server_works() -> Result<()> {
 // these checks an attacker (or buggy client) holding a valid ticket
 // could either grow `clients_senders` up to `u16::MAX` (memory DoS)
 // or trigger an out-of-bounds index into `session.remotes` (panic).
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_channel_id_zero() -> Result<()> {
     use super::channels::ClientChannels;
@@ -383,6 +384,7 @@ async fn create_client_rejects_channel_id_zero() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
     use super::channels::ClientChannels;
@@ -415,6 +417,7 @@ async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
     use super::channels::ClientChannels;
