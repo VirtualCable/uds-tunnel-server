@@ -89,6 +89,12 @@ pub struct UdpState {
     // Per-session socket towards the UDP remote (the RDP host), created
     // on demand by the relay on the first authenticated datagram.
     remote_socket: RwLock<Option<Arc<tokio::net::UdpSocket>>>,
+    // Unix secs before which a *fresh* remote-leg creation attempt is skipped
+    // after a failure. Creating the leg resolves `remotes[0]`; repeating that
+    // inline on the shared relay loop for every datagram of a session whose
+    // remote does not resolve would stall every other session (and emit one
+    // error log per datagram).
+    leg_retry_not_before: AtomicU64,
 }
 
 // DatagramCrypt has no Debug impl; show the useful bits instead.
@@ -113,6 +119,7 @@ impl UdpState {
             client_addr: RwLock::new(None),
             last_activity: AtomicU64::new(unix_now_secs()),
             remote_socket: RwLock::new(None),
+            leg_retry_not_before: AtomicU64::new(0),
         }
     }
 
@@ -161,6 +168,36 @@ impl UdpState {
             .remote_socket
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Some(socket);
+    }
+
+    /// Cooldown between remote-leg creation attempts after a failure. Bounds
+    /// the per-session work (and log volume) a session whose remote cannot be
+    /// built can impose on the shared UDP relay loop.
+    const LEG_RETRY_BACKOFF_SECS: u64 = 30;
+
+    /// Record a failed remote-leg creation and arm the cooldown, so the next
+    /// datagram for this session does not repeat the (possibly slow) address
+    /// resolution inline on the shared relay loop.
+    pub fn note_leg_failure(&self) {
+        self.leg_retry_not_before.store(
+            unix_now_secs().saturating_add(Self::LEG_RETRY_BACKOFF_SECS),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// True when a fresh remote-leg creation attempt may be made.
+    pub fn leg_retry_allowed(&self) -> bool {
+        unix_now_secs()
+            >= self
+                .leg_retry_not_before
+                .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Test hook: the armed cooldown instant (0 when no failure was recorded).
+    #[cfg(test)]
+    pub(crate) fn leg_retry_not_before_for_test(&self) -> u64 {
+        self.leg_retry_not_before
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

@@ -82,10 +82,12 @@ struct Counters {
     forwarded: AtomicU64, // client -> remote, after successful decrypt
     sent: AtomicU64,      // remote -> client
     discarded_short: AtomicU64,
-    discarded_unknown: AtomicU64, // unknown/dead token
-    discarded_replay: AtomicU64,  // duplicate or outside replay window
-    auth_fail: AtomicU64,         // malformed or AEAD verification failure
-    not_sent_no_addr: AtomicU64,  // remote data with no authenticated client addr
+    discarded_unknown: AtomicU64,        // unknown/dead token
+    discarded_replay: AtomicU64,         // duplicate or outside replay window
+    auth_fail: AtomicU64,                // malformed or AEAD verification failure
+    discarded_foreign_source: AtomicU64, // authenticated but ip != tunnel peer
+    discarded_leg_backoff: AtomicU64,    // leg creation pending, cooldown active
+    not_sent_no_addr: AtomicU64,         // remote data with no authenticated client addr
 }
 
 impl Counters {
@@ -264,25 +266,50 @@ impl UdpRelay {
         };
 
         // Authentic datagram: the source address is now trusted for the
-        // return path (and tracks NAT rebinding safely).
-        udp.set_client_addr(src);
+        // return path. The *ip* must match the tunnel peer: UDP has no
+        // handshake, so a client holding the key can put any source address
+        // on the wire, and without this check the relay would aim the
+        // remote's reply stream at a third party it never talked to
+        // (reflection / amplification). Port changes (NAT rebinding) are
+        // still accepted. A datagram from a foreign ip authenticates — the
+        // key holds — but it is never made the return target.
+        if src.ip() == session.src_ip().ip() {
+            udp.set_client_addr(src);
+        } else {
+            Counters::bump(&c.discarded_foreign_source);
+            log::debug!(
+                "UDP datagram from {} does not match tunnel peer {}; return path not re-pointed",
+                src,
+                session.src_ip()
+            );
+        }
         udp.touch();
 
         // Lazily create the per-session socket towards the UDP remote and
-        // its return task on the first authenticated datagram.
+        // its return task on the first authenticated datagram. Building the
+        // leg resolves `remotes[0]`, and the relay's receive loop is shared
+        // by every session: when it keeps failing, do NOT repeat the work (or
+        // the error log) for every datagram.
         let remote_sock = match udp.remote_socket() {
             Some(sock) => sock,
-            None => match self.create_remote_leg(&session, &udp).await {
-                Ok(sock) => sock,
-                Err(e) => {
-                    log::error!(
-                        "Failed to create UDP remote leg for session {:?}: {:?}",
-                        session.id(),
-                        e
-                    );
+            None => {
+                if !udp.leg_retry_allowed() {
+                    Counters::bump(&c.discarded_leg_backoff);
                     return;
                 }
-            },
+                match self.create_remote_leg(&session, &udp).await {
+                    Ok(sock) => sock,
+                    Err(e) => {
+                        udp.note_leg_failure();
+                        log::error!(
+                            "Failed to create UDP remote leg for session {:?}: {:?}",
+                            session.id(),
+                            e
+                        );
+                        return;
+                    }
+                }
+            }
         };
 
         match remote_sock.send(&payload).await {
@@ -438,7 +465,7 @@ impl UdpRelay {
             return;
         }
         log::info!(
-            "UDP relay stats: received={} forwarded={} sent={} short={} unknown_token={} replay={} auth_fail={} no_addr_drops={}",
+            "UDP relay stats: received={} forwarded={} sent={} short={} unknown_token={} replay={} auth_fail={} foreign_source={} leg_backoff={} no_addr_drops={}",
             received,
             c.forwarded.load(Ordering::Relaxed),
             c.sent.load(Ordering::Relaxed),
@@ -446,6 +473,8 @@ impl UdpRelay {
             c.discarded_unknown.load(Ordering::Relaxed),
             c.discarded_replay.load(Ordering::Relaxed),
             c.auth_fail.load(Ordering::Relaxed),
+            c.discarded_foreign_source.load(Ordering::Relaxed),
+            c.discarded_leg_backoff.load(Ordering::Relaxed),
             c.not_sent_no_addr.load(Ordering::Relaxed),
         );
     }

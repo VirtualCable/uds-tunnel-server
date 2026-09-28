@@ -743,15 +743,15 @@ async fn return_path_aimed_at_the_relay_is_rejected_and_cannot_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Regression probe for the source-IP pinning fix (see the reflection
-//     report). On the current code `client_addr` is taken from the wire source
-//     with no check against the tunnel peer, so a spoofed source becomes the
-//     return target. Ignored until the fix is applied.
+// 13. Regression for the source-IP pinning fix (vuln-0011): `client_addr` is
+//     only adopted when the datagram's ip matches the tunnel peer, so a
+//     spoofed source can no longer become the return target. The datagram
+//     still authenticates and is still forwarded (the key holds) — only the
+//     repointing is refused.
 // ---------------------------------------------------------------------------
 
 #[serial_test::serial(config, manager)]
 #[tokio::test]
-#[ignore = "fails on the current code: client_addr is taken from the wire source without checking it against the TCP peer"]
 async fn source_ip_must_match_the_tcp_peer_before_repointing_the_return_path() {
     let rdp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let rdp_addr = rdp.local_addr().unwrap();
@@ -769,6 +769,119 @@ async fn source_ip_must_match_the_tcp_peer_before_repointing_the_return_path() {
         _s.udp().unwrap().client_addr(),
         None,
         "a source whose ip differs from the tunnel peer must not become the return target"
+    );
+    // The datagram itself was authenticated and forwarded; only the repoint
+    // was refused (counted separately).
+    assert_eq!(
+        relay
+            .counters
+            .discarded_foreign_source
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert!(
+        relay
+            .counters
+            .forwarded
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 1,
+        "an authenticated datagram from a foreign source is still forwarded to the remote"
+    );
+    stop.trigger();
+}
+
+// ---------------------------------------------------------------------------
+// 14. Regression for the leg-creation backoff fix (vuln-0010): after a
+//     remote-leg creation failure, the *next* datagrams of that session are
+//     skipped during the cooldown instead of repeating the (slow) address
+//     resolution inline on the shared relay loop. Only the first attempt may
+//     delay other sessions.
+// ---------------------------------------------------------------------------
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn a_failing_remote_leg_only_delays_the_shared_loop_once() {
+    let rdp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let rdp_addr = rdp.local_addr().unwrap();
+    let (relay, stop, relay_addr) = host_relay().await;
+
+    // Same never-resolving remote as probe 11, unique per run.
+    let uniq = format!(
+        "udp-backoff-{}.invalid",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let (_ok, ok_token, ok_secret, ok_ticket) = udp_session(vec![rdp_addr.to_string()], 7).await;
+    relay.register(&_ok);
+    let (bad, bad_token, bad_secret, bad_ticket) =
+        udp_session(vec![format!("{uniq}:3389")], 8).await;
+    relay.register(&bad);
+
+    let c = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let (mut osend, _) = launcher(&ok_secret, &ok_ticket);
+    let (mut bsend, _) = launcher(&bad_secret, &bad_ticket);
+    let mut buf = [0u8; 4096];
+
+    // Prime the healthy session's leg and measure its baseline latency.
+    let d = osend.encrypt(&ok_token, b"prime").unwrap();
+    c.send_to(&d, relay_addr).await.unwrap();
+    let _ = timeout(T, rdp.recv_from(&mut buf)).await.unwrap().unwrap();
+
+    async fn latency_to(c: &UdpSocket, rdp: &UdpSocket, d: &[u8], relay: SocketAddr) -> Duration {
+        let t0 = std::time::Instant::now();
+        c.send_to(d, relay).await.unwrap();
+        let mut b = [0u8; 4096];
+        let _ = timeout(T, rdp.recv_from(&mut b)).await.unwrap().unwrap();
+        t0.elapsed()
+    }
+
+    let mut base_min = Duration::from_secs(9);
+    for _ in 0..3 {
+        let d = osend.encrypt(&ok_token, b"base").unwrap();
+        base_min = base_min.min(latency_to(&c, &rdp, &d, relay_addr).await);
+    }
+
+    // The failing session may pay one lookup...
+    let bad_d = bsend.encrypt(&bad_token, b"boom").unwrap();
+    c.send_to(&bad_d, relay_addr).await.unwrap();
+    // ...and must be in cooldown for everything after that. Interleave
+    // healthy traffic and require the *backoff-skipped* datagrams to run at
+    // baseline: none of them may trigger a second lookup.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let mut post_worst = Duration::from_millis(0);
+    for _ in 0..5 {
+        let bd = bsend.encrypt(&bad_token, b"boom").unwrap();
+        c.send_to(&bd, relay_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(3)).await;
+        let d = osend.encrypt(&ok_token, b"after").unwrap();
+        post_worst = post_worst.max(latency_to(&c, &rdp, &d, relay_addr).await);
+    }
+    eprintln!(
+        "leg backoff: baseline_best={:?}, post_worst={:?}",
+        base_min, post_worst
+    );
+    assert!(
+        bad.udp().unwrap().leg_retry_not_before_for_test() > 0,
+        "the failed attempt must have armed the cooldown"
+    );
+    // Same absolute threshold as probe 11's control arm: skipped datagrams
+    // must cost like healthy ones, not like a resolver round-trip.
+    assert!(
+        post_worst < Duration::from_millis(50),
+        "datagrams skipped during the cooldown must not stall the shared loop \
+         (baseline {:?}, post-worst {:?})",
+        base_min,
+        post_worst
+    );
+    assert!(
+        relay
+            .counters
+            .discarded_leg_backoff
+            .load(std::sync::atomic::Ordering::Relaxed)
+            >= 5,
+        "each datagram during the cooldown is counted"
     );
     stop.trigger();
 }
