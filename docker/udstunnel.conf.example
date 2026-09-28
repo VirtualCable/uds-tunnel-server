@@ -17,6 +17,15 @@ listen_port = 4443
 # Whether to expect PROXY protocol v2 headers (if behind a proxy like HAProxy).
 use_proxy_protocol = false
 
+# Master switch for the encrypted UDP relay leg (RDPUDP). Default: true.
+# The per-session gate is the broker's `enable_udp` flag for the user service.
+udp_enabled = true
+
+# UDP relay bind port. Falls back to `listen_port` when unset. Set to 0 to
+# share the TCP socket; set explicitly to split TCP and UDP onto different
+# ports when the deployment needs it.
+# udp_listen_port = 4443
+
 
 # --- Broker API Settings ---
 
