@@ -82,14 +82,23 @@ where
                     buffer,
                 );
             }
-            // Enter the attach critical section *before* touching any cipher
-            // state: kill the still-live server stream (if any) instantly.
-            // No drain is needed for sequence safety — the recovered crypts
-            // below share the session's live per-direction counters, so even
-            // frames the killed stream may still have in flight cannot reuse
-            // a (key, seq) nonce pair the new stream will use.
+            // Enter the attach critical section for the rest of the handshake.
+            // The lock serializes this Recover against a second concurrent
+            // Recover, a fresh Open attach and the dying stream's teardown, so
+            // their `OpenResponse` writes and the
+            // [kill previous owner -> attach new one] swap below cannot
+            // interleave.
+            //
+            // The still-live stream is deliberately NOT killed here: the
+            // ticket confirm is read and validated first, so a Recover that
+            // times out (or carries a bad ticket) leaves the existing tunnel
+            // untouched. `start_server` performs the kill+attach atomically
+            // once the confirm has been accepted. An early kill is not needed
+            // for sequence safety: the handshake crypts below share the
+            // session's per-direction counters, so a replaced stream's
+            // in-flight frames can never reuse a (key, seq) pair the new
+            // stream will use.
             let _attach_guard = session.lock_server_attach().await;
-            session.kill_current_server_stream();
 
             let session_id = session.id();
             // Crypts sharing the session counters: decrypting the ticket
@@ -174,11 +183,11 @@ where
             // any explicit reservation.
             //
             // Attach the new launcher-facing stream while still holding the
-            // attach lock: start_server allocates the proxy channel set and
-            // registers the new owner, and any later attach can only see the
-            // *new* stream, never the already-killed one. Doing this in the
-            // same critical section as the reseed is what prevents a second
-            // concurrent Recover from interleaving with this handshake.
+            // attach lock: start_server kills the previous owner, allocates
+            // the proxy channel set and registers the new owner, and any
+            // later attach can only see the *new* stream. Keeping the kill
+            // and the attach in one critical section is what prevents a
+            // second concurrent Recover from interleaving with this handshake.
             let (endpoints, owner) = session.start_server().await?;
 
             let server_stream = TunnelServerStream::new(*session_id, reader, writer);

@@ -1320,3 +1320,139 @@ async fn recover_kills_live_stream_and_continues_shared_counters() -> anyhow::Re
     drop(server);
     Ok(())
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// Regression test: a Recover that is never completed (the launcher stalls
+// before the ticket-confirm frame) must NOT tear down the tunnel that is
+// already serving the session.
+//
+// `recover` used to kill the live server stream as soon as it entered the
+// attach critical section, before reading/validating the confirm. The 1 s
+// confirm timeout then returned `Err` with the stream already dead and no
+// replacement attached, so a merely slow Recover destroyed a working tunnel
+// (and anyone who knew the `equiv_session_id` could tear one down by opening
+// a Recover and sending nothing). The kill now happens only inside
+// `start_server` (after the confirm validates), so the timeout leaves the
+// live stream attached and forwarding.
+// ────────────────────────────────────────────────────────────────────────
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_timeout_leaves_live_stream_attached() -> anyhow::Result<()> {
+    use crate::connection::recover::recover;
+
+    // ---- connection A: the real Open handshake, live stream left running ---
+    let (server, _mock, mut client_a, _stop_a, ticket) =
+        setup_testing_connection(false, false).await;
+
+    let mut sig = vec![0u8; HANDSHAKE_V2_SIGNATURE.len() + 1 + TICKET_LENGTH];
+    sig[..HANDSHAKE_V2_SIGNATURE.len()].copy_from_slice(HANDSHAKE_V2_SIGNATURE);
+    sig[HANDSHAKE_V2_SIGNATURE.len()] = HandshakeCommand::Open.into();
+    sig[HANDSHAKE_V2_SIGNATURE.len() + 1..].copy_from_slice(ticket.as_ref());
+    client_a.write_all(&sig).await?;
+
+    let shared_secret =
+        SharedSecret::from_hex("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")?;
+    let material = derive_tunnel_material(&shared_secret, &ticket)?;
+
+    // Client crypts seeded at (0,0), exactly like the real launcher.
+    let mut client_a_out = Crypt::new(&material.key_receive, 0);
+    let mut client_a_in = Crypt::new(&material.key_send, 0);
+
+    // Ticket echo on channel 0, then read + decrypt the OpenResponse.
+    let mut echo = PacketBuffer::new();
+    echo.set_data(ticket.as_ref())?;
+    client_a_out.encrypt(0, ticket.as_ref().len(), &mut echo)?;
+    echo.write(&mut client_a).await?;
+
+    let open_frame = read_raw_frame(&mut client_a).await?;
+    assert_eq!(frame_seq(&open_frame), 1, "OpenResponse rides at seq 1");
+    let (_, open_pt) = decrypt_raw(&mut client_a_in, &open_frame)?;
+    let response = OpenResponse::from_slice(&open_pt)?;
+
+    // Let `connect` spawn the live stream and settle the post-handshake
+    // shared counters: (inbound, outbound) == (2, 1) as in production.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let session = SessionManager::get_instance()
+        .get_equiv_session(&response.session_id)
+        .expect("live session must exist after Open");
+    let session_id = *session.id();
+    assert_eq!(session.seqs(), (2, 1));
+
+    // Drive the live stream to emit one frame so the session's recovery
+    // buffer is non-empty: recover validates in_seq against its window
+    // before it touches the network.
+    let (launcher_tx, _) = session.get_proxy_channels();
+    let p_live = vec![0xA1u8; 90];
+    launcher_tx
+        .send_async(PayloadWithChannel::new(1, &p_live))
+        .await?;
+    let live1 = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_raw_frame(&mut client_a),
+    )
+    .await
+    .expect("live stream must forward the initial frame")?;
+    assert_eq!(frame_seq(&live1), 2, "live stream emits seq 2");
+    let (ch, payload) = decrypt_raw(&mut client_a_in, &live1)?;
+    assert_eq!(ch, 1);
+    assert_eq!(payload, p_live);
+
+    // ---- Recover handshake that never sends the confirm frame ------------
+    // in_seq = 3 => requested = 2, inside the live stream's recovery window
+    // [2, 2]. The client half stays open but is never written to, so the
+    // server's confirm read blocks until its own 1 s timeout fires.
+    let (client_b, server_b) = tokio::io::duplex(1024);
+    let (r, w) = tokio::io::split(server_b);
+    let ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        recover(r, w, &response.session_id, (3, 1), ip),
+    )
+    .await
+    .expect("recover must return on its own confirm timeout, not block forever")
+    .expect_err("recover must fail when the confirm frame never arrives");
+    // Must be the confirm timeout — not an earlier window-validation exit
+    // (which would never have reached the kill in the first place).
+    assert!(
+        err.to_string().contains("Timeout"),
+        "recover must reach the confirm read and time out, got: {err}"
+    );
+
+    // ---- the live stream survived the failed Recover ---------------------
+    // A timed-out Recover is not a malicious peer: it must not remove the
+    // session, and the original stream must still own the proxy data path.
+    let still = SessionManager::get_instance()
+        .get_equiv_session(&response.session_id)
+        .expect("a timed-out Recover must not remove the live session");
+    assert_eq!(*still.id(), session_id);
+    assert!(still.is_server_running());
+
+    // Under the pre-fix code the stream was killed before the confirm was
+    // read, so nothing is forwarded and this read times out.
+    let p_after = vec![0xD4u8; 90];
+    let _ = launcher_tx
+        .send_async(PayloadWithChannel::new(1, &p_after))
+        .await;
+    let after = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        read_raw_frame(&mut client_a),
+    )
+    .await
+    .expect("timed out waiting for the surviving stream's frame")
+    .expect("a timed-out Recover must not tear down the live stream (connection A closed)");
+    assert_eq!(
+        frame_seq(&after),
+        3,
+        "the surviving stream keeps advancing its own seq space"
+    );
+    let (ch, payload) = decrypt_raw(&mut client_a_in, &after)?;
+    assert_eq!(ch, 1);
+    assert_eq!(payload, p_after);
+
+    // Keep the broker mock and the open client half alive to the end.
+    drop(client_b);
+    drop(server);
+    Ok(())
+}
