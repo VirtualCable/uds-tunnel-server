@@ -47,6 +47,7 @@ use shared::{
 use crate::config;
 
 mod connect;
+pub(crate) mod net;
 mod recover;
 mod types;
 

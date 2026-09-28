@@ -140,6 +140,8 @@ async fn main() {
                         tokio::spawn({
                             // Try to disable Nagle's algorithm for better performance in our case
                             socket.set_nodelay(true).ok();
+                            // Backup liveness probe: see `connection::net`.
+                            connection::net::set_keepalive(&socket);
                             let (reader, writer) = socket.into_split();
                             async move {
                                 if let Err(e) =

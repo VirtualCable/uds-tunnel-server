@@ -31,6 +31,9 @@ toml.workspace = true
 tokio-rustls.workspace = true
 tokio.workspace = true
 futures.workspace = true
+
+# socket options (SO keepalive backup for the application-level keep-alive)
+socket2.workspace = true
 async-trait.workspace = true
 
 # channel

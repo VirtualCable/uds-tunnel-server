@@ -2471,6 +2471,7 @@ dependencies = [
  "serde_json",
  "serial_test",
  "shared",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",
