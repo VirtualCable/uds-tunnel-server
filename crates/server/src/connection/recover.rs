@@ -45,61 +45,11 @@ where
                     "Invalid recovery sequence: in_seq must be >= 1"
                 ));
             }
-            // Skip packages in the recovery buffer until the requested seq is found, if not found, return error
-            {
-                let ses_rec_buf = session.recovery_buffer();
-                let mut buffer = ses_rec_buf.lock();
-                log::debug!(
-                    "Found session {:?} for recovery, skipping packets until seq {:?} (buf: {:?})",
-                    session.id(),
-                    in_seqs.0,
-                    buffer
-                );
-                let requested = in_seqs.0 - 1;
-                let head = buffer.head_seq();
-                let tail = buffer.tail_seq();
-                // Empty buffer (head == tail == 0) means the server has nothing
-                // buffered for retransmission: a legitimate client always asks
-                // for seq >= 1, so any non-empty request against an empty
-                // window is also a malformed recovery attempt.
-                if tail == 0 || requested < head || requested > tail {
-                    log::error!(
-                        "Refusing recovery for session {:?}: requested seq {} outside buffer window [{}, {}]",
-                        session.id(),
-                        in_seqs.0,
-                        head,
-                        tail
-                    );
-                    return Err(anyhow::anyhow!(
-                        "Invalid recovery sequence: requested seq outside recovery buffer window"
-                    ));
-                }
-                buffer.skip(requested)?;
-                log::debug!(
-                    "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
-                    requested,
-                    session.id(),
-                    buffer,
-                );
-            }
-            // Enter the attach critical section for the rest of the handshake.
-            // The lock serializes this Recover against a second concurrent
-            // Recover, a fresh Open attach and the dying stream's teardown, so
-            // their `OpenResponse` writes and the
-            // [kill previous owner -> attach new one] swap below cannot
-            // interleave.
-            //
-            // The still-live stream is deliberately NOT killed here: the
-            // ticket confirm is read and validated first, so a Recover that
-            // times out (or carries a bad ticket) leaves the existing tunnel
-            // untouched. `start_server` performs the kill+attach atomically
-            // once the confirm has been accepted. An early kill is not needed
-            // for sequence safety: the handshake crypts below share the
-            // session's per-direction counters, so a replaced stream's
-            // in-flight frames can never reuse a (key, seq) pair the new
-            // stream will use.
-            let _attach_guard = session.lock_server_attach().await;
-
+            // NOTE: the request-driven session effects — consuming
+            // the recovery-buffer retransmission window and holding the attach
+            // lock — happen only AFTER the AEAD ticket confirm authenticates
+            // the peer below. Knowing the equiv session id alone must not
+            // drain the window nor occupy the lock.
             let session_id = session.id();
             // Crypts sharing the session counters: decrypting the ticket
             // confirm and encrypting the OpenResponse advance the session's
@@ -145,6 +95,58 @@ where
             if data != *recover_session_id {
                 log::error!("Invalid recover session id from client");
                 return Err(anyhow::anyhow!("Invalid recover session id from client"));
+            }
+            // The peer is authenticated at this point: it produced a valid
+            // AEAD ticket confirm over a leg whose keys only the ticket
+            // holder possesses. Only now may its request drive
+            // session state. Take the attach lock first so two concurrent
+            // Recovers cannot interleave the window consumption with the
+            // attach swap, then consume the recovery window it declared.
+            //
+            // The lock is held for the rest of the handshake (the attach
+            // swap at `start_server` below), serializing this Recover
+            // against a second concurrent Recover, a fresh Open attach, and
+            // the dying stream's teardown. The still-live stream is NOT
+            // killed before the confirm: a timed-out or forged Recover
+            // leaves the existing tunnel untouched; `start_server` performs
+            // the kill+attach atomically now that the confirm has been
+            // accepted.
+            let _attach_guard = session.lock_server_attach().await;
+            {
+                let ses_rec_buf = session.recovery_buffer();
+                let mut rbuf = ses_rec_buf.lock();
+                log::debug!(
+                    "Found session {:?} for recovery, skipping packets until seq {:?} (buf: {:?})",
+                    session.id(),
+                    in_seqs.0,
+                    rbuf
+                );
+                let requested = in_seqs.0 - 1;
+                let head = rbuf.head_seq();
+                let tail = rbuf.tail_seq();
+                // Empty buffer (head == tail == 0) means the server has nothing
+                // buffered for retransmission: a legitimate client always asks
+                // for seq >= 1, so any non-empty request against an empty
+                // window is also a malformed recovery attempt.
+                if tail == 0 || requested < head || requested > tail {
+                    log::error!(
+                        "Refusing recovery for session {:?}: requested seq {} outside buffer window [{}, {}]",
+                        session.id(),
+                        in_seqs.0,
+                        head,
+                        tail
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Invalid recovery sequence: requested seq outside recovery buffer window"
+                    ));
+                }
+                rbuf.skip(requested)?;
+                log::debug!(
+                    "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
+                    requested,
+                    session.id(),
+                    rbuf,
+                );
             }
             // Invalidate the old equiv session ID before minting a new
             // one so successive recoveries do not accumulate stale entries

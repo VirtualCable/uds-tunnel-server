@@ -163,6 +163,52 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// `Trigger::wait_async` checks the flag, then awaits `Notify::notified()`. A
+    /// `trigger()` landing in that gap must still wake the waiter, otherwise a
+    /// stop signal is silently lost (hung task / leaked session).
+    #[test]
+    fn trigger_async_wakeup_never_lost() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let mut lost = 0usize;
+            for i in 0..20000u64 {
+                let t = Trigger::new();
+                let waiter = {
+                    let t = t.clone();
+                    tokio::spawn(async move { t.wait_async().await })
+                };
+                // Vary the interleaving: sometimes trigger immediately, sometimes
+                // after a yield, sometimes from a separate task.
+                match i % 3 {
+                    0 => t.trigger(),
+                    1 => {
+                        tokio::task::yield_now().await;
+                        t.trigger();
+                    }
+                    _ => {
+                        let t2 = t.clone();
+                        tokio::spawn(async move { t2.trigger() });
+                    }
+                }
+                if tokio::time::timeout(std::time::Duration::from_secs(3), waiter)
+                    .await
+                    .is_err()
+                {
+                    lost += 1;
+                }
+            }
+            assert_eq!(
+                lost, 0,
+                "{lost} wait_async() calls never observed the trigger"
+            );
+        });
+    }
+
     #[test]
     fn trigger_is_set() {
         let trigger = Trigger::new();

@@ -522,7 +522,16 @@ impl Session {
         self.server_running
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        let endpoints = self.session_proxy.start_server().await?;
+        let endpoints = match self.session_proxy.start_server().await {
+            Ok(endpoints) => endpoints,
+            Err(e) => {
+                // The proxy refused or died while attaching: do not leave the
+                // session claiming a server stream that never attached.
+                self.server_running
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Err(e);
+            }
+        };
         let owner = Arc::new(ServerStreamOwner::new());
         *self
             .server_stream_slot

@@ -487,3 +487,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_hostile;
+
+#[cfg(test)]
+mod tests_relay_invariants;

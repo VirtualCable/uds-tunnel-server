@@ -1,4 +1,4 @@
-//! Round-2 malicious-client attack harness for the UDP leg.
+//! Malicious-client regression harness for the UDP leg.
 //!
 //! Kept in-tree for regression value (the vectors it pins are real). It is
 //! deliberately hermetic: it drives its own relay through

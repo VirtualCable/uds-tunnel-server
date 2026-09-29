@@ -82,6 +82,11 @@ impl Proxy {
         // Now we need the other sides for both sides (our sides)
         let mut our_server_channels: Option<types::ServerEndpoints> = None;
 
+        // Loop exit reason, kept so the shared cleanup below (and the
+        // queued-command drain) always runs on every path, including a
+        // control-command error that previously bailed out with `?`.
+        let mut exit_result: Result<()> = Ok(());
+
         log::debug!("Session proxy started");
 
         loop {
@@ -109,11 +114,31 @@ impl Proxy {
                     match cmd {
                         Ok(handler::Command::AttachServer { reply }) => {
                             log::debug!("Attaching server to session proxy");
-                            let (server_tx, server_rx) = manager.get_server_channels(&parent)?;
-                            let (our_tx, our_rx) = manager.get_proxy_channels(&parent)?;
-                            our_server_channels = Some(types::ServerEndpoints { tx: our_tx, rx: our_rx });
-                            let endpoints = types::ServerEndpoints { tx: server_tx, rx: server_rx };
-                            let _ = reply.send(endpoints);
+                            let channels = manager
+                                .get_server_channels(&parent)
+                                .and_then(|(server_tx, server_rx)| {
+                                    manager
+                                        .get_proxy_channels(&parent)
+                                        .map(move |(our_tx, our_rx)| {
+                                            (server_tx, server_rx, our_tx, our_rx)
+                                        })
+                                });
+                            match channels {
+                                Ok((server_tx, server_rx, our_tx, our_rx)) => {
+                                    our_server_channels =
+                                        Some(types::ServerEndpoints { tx: our_tx, rx: our_rx });
+                                    let endpoints =
+                                        types::ServerEndpoints { tx: server_tx, rx: server_rx };
+                                    let _ = reply.send(endpoints);
+                                }
+                                Err(e) => {
+                                    // Cannot serve the attach: fail the proxy (drop of the
+                                    // queued replies below unblocks any waiting start_server)
+                                    log::error!("Cannot attach server to session proxy: {:?}", e);
+                                    exit_result = Err(e);
+                                    break;
+                                }
+                            }
                         }
                         Ok(handler::Command::ServerFailed) => {
                             log::debug!("Detaching server from session proxy");
@@ -140,7 +165,22 @@ impl Proxy {
                             // stream channel 0 is control channel, process it here
                             if msg.channel_id == 0 {
                                 // Failures on commands closes the proxy and consecuently, the session
-                                if Self::handle_incoming_command(msg.payload.as_ref(), &parent, &mut clients).await? {
+                                let close = match Self::handle_incoming_command(
+                                    msg.payload.as_ref(),
+                                    &parent,
+                                    &mut clients,
+                                )
+                                .await
+                                {
+                                    Ok(close) => close,
+                                    Err(e) => {
+                                        // Do not bail with `?`: fall through to the shared
+                                        // cleanup/drain below so queued commands are released.
+                                        exit_result = Err(e);
+                                        break;
+                                    }
+                                };
+                                if close {
                                     // Send message, if server is still connected
                                     if let Some(server) = &our_server_channels {
                                         let _ = server.tx.send_async(protocol::Command::Close.into()).await;
@@ -194,9 +234,24 @@ impl Proxy {
             }
         }
         log::debug!("Session proxy exiting, cleaning up clients");
+        // Drain any still-queued control commands so their reply senders (if
+        // any) are dropped: a queued AttachServer would otherwise keep the
+        // waiting Handler::start_server blocked forever after this proxy exits
+        // (the Handler holds ctrl_tx, so the channel itself never "closes").
+        while let Ok(cmd) = ctrl_rx.try_recv() {
+            match cmd {
+                handler::Command::AttachServer { reply } => {
+                    log::debug!("Dropping queued attach-server reply on proxy exit");
+                    drop(reply);
+                }
+                _ => {
+                    log::debug!("Dropped queued command on proxy exit");
+                }
+            }
+        }
         // Stop all clients. Do not need to clean up the clients vector, as we are exiting anyway
         clients.stop_all_clients();
-        Ok(())
+        exit_result
     }
 
     // Handle incoming commands on control channel, return true if session should be closed

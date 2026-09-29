@@ -44,6 +44,20 @@ use shared::{
 mod request;
 mod response;
 
+/// Upper bound for the pre-authentication broker ticket call.
+///
+/// `connect` issues this request for every `Open` handshake *before* the
+/// per-remote-IP cap and `add_session`/`max_sessions` are consulted, and the
+/// handshake itself is not authenticated yet: an attacker only needs the
+/// static signature plus 48 alphanumeric bytes. Without a bound here, a
+/// slow or hung broker turns each unauthenticated 57-byte open into a
+/// pinned server task + socket + outbound HTTP request, unbounded by the
+/// session caps. 5s is generous for a healthy broker (it answers in ms) and
+/// keeps the worst-case pinned window short; it is deliberately tighter
+/// than [`stop_connection`]'s 10s, which is a best-effort post-session
+/// notification on an already-authenticated path.
+pub(crate) const START_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 // For converting from encrypted tycket response to normal response
 use response::EncryptedTicketResponse;
 
@@ -161,6 +175,7 @@ impl BrokerApi for HttpBrokerApi {
         self.client
             .post(&self.ticket_rest_url)
             .json(&ticket_request)
+            .timeout(START_CONNECTION_TIMEOUT)
             .send()
             .await?
             .error_for_status()?

@@ -171,6 +171,15 @@ impl Crypt {
                 self.current_seq()
             ));
         }
+        // `seq` comes straight from the wire. Advancing the counter below
+        // computes `seq + 1`, and a `u64::MAX` frame would overflow it: a
+        // panic under overflow-checks (CI/debug) on an unauthenticated
+        // inbound stream, or a counter wedged at MAX in release. No honest
+        // peer ever reaches this value — 2^64 packets is unreachable — so
+        // reject the frame outright instead of faulting the session.
+        if seq == u64::MAX {
+            return Err(anyhow::anyhow!("invalid sequence number: u64::MAX"));
+        }
 
         let length = buffer.length()?;
         if length < (consts::TAG_LENGTH + 2) {

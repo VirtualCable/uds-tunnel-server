@@ -55,12 +55,23 @@ impl Handler {
         Self { ctrl_tx }
     }
 
+    /// Upper bound for the proxy to answer an attach request. The proxy
+    /// drains queued replies on exit (so `reply_rx` normally disconnects
+    /// immediately), making this a purely defensive guard against a wedged
+    /// proxy that would otherwise strand the caller forever.
+    const ATTACH_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     pub async fn start_server(&self) -> Result<types::ServerEndpoints> {
         log::debug!("Starting server in session proxy");
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = Command::AttachServer { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
-        let endpoints = reply_rx.recv_async().await?;
+        let endpoints = tokio::time::timeout(Self::ATTACH_REPLY_TIMEOUT, reply_rx.recv_async())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Timed out waiting for session proxy to attach the server")
+            })?
+            .map_err(|_| anyhow::anyhow!("Session proxy is not accepting attach requests"))?;
         Ok(endpoints)
     }
 

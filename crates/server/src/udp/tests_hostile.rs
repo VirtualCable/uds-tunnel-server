@@ -1,5 +1,4 @@
-// Temporary hostile-client harness for the UDP relay leg (round 2).
-// Removed after the audit.
+// Hostile-client regression tests for the UDP relay leg.
 //
 // Threat model: the peer holds a valid broker ticket for ONE session, so it
 // knows that session's token and its c47/s2c AEAD keys and can mint as many
@@ -743,9 +742,9 @@ async fn return_path_aimed_at_the_relay_is_rejected_and_cannot_loop() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Regression for the source-IP pinning fix (vuln-0011): `client_addr` is
-//     only adopted when the datagram's ip matches the tunnel peer, so a
-//     spoofed source can no longer become the return target. The datagram
+// 13. Source-IP pinning: `client_addr` is only adopted when the datagram's
+//     ip matches the tunnel peer, so a spoofed source cannot become the
+//     return target. The datagram
 //     still authenticates and is still forwarded (the key holds) — only the
 //     repointing is refused.
 // ---------------------------------------------------------------------------
@@ -791,10 +790,9 @@ async fn source_ip_must_match_the_tcp_peer_before_repointing_the_return_path() {
 }
 
 // ---------------------------------------------------------------------------
-// 14. Regression for the leg-creation backoff fix (vuln-0010): after a
-//     remote-leg creation failure, the *next* datagrams of that session are
-//     skipped during the cooldown instead of repeating the (slow) address
-//     resolution inline on the shared relay loop. Only the first attempt may
+// 14. Leg-creation backoff: after a remote-leg creation failure, the *next*
+//     datagrams of that session are skipped during the cooldown instead of
+//     repeating the (slow) address resolution inline on the shared relay loop. Only the first attempt may
 //     delay other sessions.
 // ---------------------------------------------------------------------------
 

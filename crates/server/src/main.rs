@@ -40,6 +40,11 @@ pub mod session;
 pub mod stream;
 pub mod udp;
 
+#[cfg(test)]
+mod tests_broker_timeout;
+#[cfg(test)]
+mod tests_session_teardown_soak;
+
 use shared::{log, system::trigger::Trigger};
 
 // Catch SIGTERM and SIGINT to perform a graceful shutdown

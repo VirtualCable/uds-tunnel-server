@@ -1,4 +1,5 @@
-// Temporary UDP-leg audit harness (round 2). Removed after the audit.
+// Differential regression tests for the UDP-leg primitives (replay window,
+// datagram framing).
 use std::collections::HashSet;
 
 use shared::crypt::{
