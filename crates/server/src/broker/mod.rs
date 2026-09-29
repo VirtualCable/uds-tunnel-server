@@ -74,8 +74,61 @@ pub trait BrokerApi {
 pub struct HttpBrokerApi {
     client: Client,
     ticket_rest_url: String,
+    auth_header: reqwest::header::HeaderValue,
     public_key: [u8; PUBLIC_KEY_SIZE],
     private_key: [u8; PRIVATE_KEY_SIZE],
+}
+
+/// Shared HTTP clients for the broker API, one per SSL-verification mode.
+///
+/// Building a `reqwest::Client` loads the system root-certificate store and
+/// creates the connection pool: doing it per handshake and per stop
+/// notification burned CPU and file descriptors on every connection (and, at
+/// the 32-connection scale, made the broker-timeout regression test race its
+/// own deadline). `Client` is cheap-clone and pool-backed, so cloning the
+/// cached instance shares one pool per mode. The `Authorization` header is
+/// per-request because the cached client must not depend on the configured
+/// token; the ML-KEM keypair stays per `HttpBrokerApi` instance so each
+/// ticket still gets a fresh encryption key.
+///
+/// A build failure here is a broken TLS backend, not operator error: it can
+/// only happen once per process now, and the `expect` names the cause.
+fn shared_client(dangerous_disable_ssl_verify: bool) -> Client {
+    use std::sync::OnceLock;
+
+    static CLIENTS: OnceLock<(Client, Client)> = OnceLock::new();
+
+    let (verify_on, verify_off) = CLIENTS.get_or_init(|| {
+        // `ClientBuilder` is not `Clone`: both variants are built from the
+        // same settings, differing only in the cert-verification flag.
+        fn build(danger_accept_invalid_certs: bool) -> Client {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+
+            Client::builder()
+                .use_rustls_tls()
+                .user_agent("UDSTunnelServer/5.0")
+                .default_headers(headers)
+                .danger_accept_invalid_certs(danger_accept_invalid_certs)
+                .build()
+                .expect("broker HTTP client failed to build")
+        }
+
+        (build(false), build(true))
+    });
+
+    if dangerous_disable_ssl_verify {
+        verify_off.clone()
+    } else {
+        verify_on.clone()
+    }
 }
 
 impl HttpBrokerApi {
@@ -93,7 +146,7 @@ impl HttpBrokerApi {
     ) -> Self {
         // Remove trailing slash if present
         let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
-        log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
+        log::debug!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
         let keys = comms_keypair();
 
         // Build the `Authorization: Bearer sk-...` header value once.
@@ -107,34 +160,13 @@ impl HttpBrokerApi {
         } else {
             format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token)
         };
+        let auth_header = reqwest::header::HeaderValue::from_str(&auth_header_value)
+            .expect("auth token value is not a valid HTTP header value");
 
         HttpBrokerApi {
-            client: Client::builder()
-                .use_rustls_tls()
-                .user_agent("UDSTunnelServer/5.0")
-                .default_headers({
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    headers.insert(
-                        reqwest::header::ACCEPT,
-                        reqwest::header::HeaderValue::from_static("application/json"),
-                    );
-                    headers.insert(
-                        reqwest::header::CONTENT_TYPE,
-                        reqwest::header::HeaderValue::from_static("application/json"),
-                    );
-                    // Tunnel-server authenticates exclusively via the
-                    // `Authorization: Bearer sk-<token>` header.
-                    headers.insert(
-                        reqwest::header::AUTHORIZATION,
-                        reqwest::header::HeaderValue::from_str(&auth_header_value)
-                            .expect("auth token value is not a valid HTTP header value"),
-                    );
-                    headers
-                })
-                .danger_accept_invalid_certs(dangerous_disable_ssl_verify)
-                .build()
-                .unwrap(), // If not built, panic intentionally
+            client: shared_client(dangerous_disable_ssl_verify),
             ticket_rest_url: ticket_rest_url.to_string(),
+            auth_header,
             public_key: keys.public_key,
             private_key: keys.private_key,
         }
@@ -174,6 +206,7 @@ impl BrokerApi for HttpBrokerApi {
         );
         self.client
             .post(&self.ticket_rest_url)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header.clone())
             .json(&ticket_request)
             .timeout(START_CONNECTION_TIMEOUT)
             .send()
@@ -199,6 +232,11 @@ impl BrokerApi for HttpBrokerApi {
         let ticket_request = request::TicketRequest::new_stop(ticket, sent, recv);
         self.client
             .post(&self.ticket_rest_url)
+            .headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(reqwest::header::AUTHORIZATION, self.auth_header.clone());
+                h
+            })
             .json(&ticket_request)
             .timeout(std::time::Duration::from_secs(10))
             .send()

@@ -129,6 +129,12 @@ async fn unauthenticated_open_is_released_by_the_broker_timeout() {
     // Caps as tight as they can be set: one session, one per source IP.
     set_config(url, 1, 1);
 
+    // Baseline of the global manager count. Other tests in this binary may
+    // leave sessions registered when they finish (they are serialized with
+    // this one under the `manager` key, so the baseline is stable across the
+    // whole test); what this test pins is that *its own* connections add none.
+    let sessions_before = SessionManager::get_instance().count();
+
     let handles: Vec<_> = (0..N).map(|_| spawn_open_connection(true)).collect();
 
     tokio::time::sleep(RELEASE_DEADLINE).await;
@@ -137,7 +143,8 @@ async fn unauthenticated_open_is_released_by_the_broker_timeout() {
     let broker_inflight = accepted.load(Ordering::SeqCst);
     let sessions = SessionManager::get_instance().count();
     println!(
-        "[regression] after {RELEASE_DEADLINE:?}: released={finished}/{N} broker_requests_issued={broker_inflight} max_sessions_cap=1 sessions_registered={sessions}"
+        "[regression] after {RELEASE_DEADLINE:?}: released={finished}/{N} broker_requests_issued={broker_inflight} max_sessions_cap=1 sessions_registered={} (baseline {sessions_before})",
+        sessions
     );
 
     // FIXED BEHAVIOUR PIN: pre-fix, `finished` was 0 forever (the pin).
@@ -152,7 +159,7 @@ async fn unauthenticated_open_is_released_by_the_broker_timeout() {
         "each connection still reaches the broker call before timing out (got {broker_inflight})"
     );
     assert_eq!(
-        sessions, 0,
+        sessions, sessions_before,
         "a timed-out broker call never reaches add_session"
     );
 
@@ -232,9 +239,8 @@ async fn scaling_measurement() {
 
     let handles: Vec<_> = (0..n).map(|_| spawn_open_connection(true)).collect();
 
-    // Each unauthenticated connection builds its own reqwest client (loading
-    // the system root-certificate store), so give the swarm time to reach the
-    // broker call and poll until every one of them has landed there.
+    // Give the swarm time to reach the broker call and poll until every one
+    // of them has landed there before judging the release window.
     let mut waited = Duration::ZERO;
     while waited < Duration::from_secs(30) && accepted.load(Ordering::SeqCst) < n {
         tokio::time::sleep(Duration::from_millis(250)).await;
