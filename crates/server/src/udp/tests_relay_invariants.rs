@@ -19,15 +19,17 @@ use super::*;
 const T: Duration = Duration::from_secs(3);
 
 async fn host_relay() -> (Arc<UdpRelay>, Trigger, SocketAddr) {
-    let relay = UdpRelay::bind_for_test("127.0.0.1:0".parse().unwrap())
-        .await
-        .unwrap();
+    host_relay_on("127.0.0.1:0".parse().unwrap()).await.unwrap()
+}
+
+async fn host_relay_on(addr: SocketAddr) -> Option<(Arc<UdpRelay>, Trigger, SocketAddr)> {
+    let relay = UdpRelay::bind_for_test(addr).await.ok()?;
     let addr = relay.local_addr().unwrap();
     let stop = Trigger::new();
     let r = relay.clone();
     let s = stop.clone();
     tokio::spawn(async move { r.run(s).await });
-    (relay, stop, addr)
+    Some((relay, stop, addr))
 }
 
 async fn udp_session_full(
@@ -105,37 +107,70 @@ async fn return_path_adopts_new_port_from_same_ip() {
 
 // ---------------------------------------------------------------------------
 // The pin uses `IpAddr` equality: an IPv4-mapped-IPv6 source is NOT the same
-// as the plain IPv4 tunnel peer, so the return path is never adopted. Purely a
-// behavioural characterisation (dual-stack deployments).
+// as the plain IPv4 tunnel peer, so the return path is never adopted. A
+// dual-stack relay (`[::]`) sees IPv4 traffic as `::ffff:<v4>` at `recv_from`;
+// that is exactly the address the pin must refuse to adopt when the session
+// peer was recorded as plain IPv4. Purely a behavioural characterisation
+// (dual-stack deployments).
 // ---------------------------------------------------------------------------
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn v4mapped_v6_source_is_not_adopted_as_return_path() {
     let rdp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let rdp_addr = rdp.local_addr().unwrap();
-    let (relay, stop, relay_addr) = host_relay().await;
+    // A dual-stack relay is the only way to observe a v4-mapped-v6 source:
+    // an IPv4-bound relay is handed the plain IPv4 address by the kernel.
+    let (relay, stop, relay_addr) = match host_relay_on("[::]:0".parse().unwrap()).await {
+        Some(r) => r,
+        None => {
+            // Platform without IPv6: the scenario is unreachable here.
+            eprintln!("dual-stack ([::]) bind unavailable; scenario not exercisable");
+            return;
+        }
+    };
     // Tunnel peer recorded as plain IPv4.
     let (s, token, secret, ticket) =
         udp_session_full(vec![rdp_addr.to_string()], 7, "127.0.0.1:1").await;
     relay.register(&s);
 
-    // Send the datagram with a v4-mapped-v6 source if the platform allows it.
-    let sock = match UdpSocket::bind("[::ffff:127.0.0.1]:0").await {
-        Ok(sock) => sock,
-        Err(_) => {
-            eprintln!("v4-mapped-v6 bind unavailable; skipping");
-            stop.trigger();
-            return;
-        }
-    };
+    // A plain IPv4 client reaching the dual-stack relay is seen as
+    // `::ffff:127.0.0.1` by the relay's `recv_from`. The client targets the
+    // loopback v4 form of the relay's port (the kernel maps it into the v6
+    // socket as a v4-mapped source).
+    let v4_relay = SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, relay_addr.port()));
+    let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let (mut csend, _) = launcher(&secret, &ticket);
     let d = csend.encrypt(&token, b"mapped").unwrap();
-    let _ = sock.send_to(&d, relay_addr).await;
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    eprintln!(
-        "client_addr after v4-mapped-v6 source = {:?} (session peer {})",
-        s.udp().unwrap().client_addr(),
-        s.src_ip()
+    sock.send_to(&d, v4_relay).await.unwrap();
+
+    let mut adopted = None;
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if s.udp().unwrap().client_addr().is_some()
+            || relay
+                .counters
+                .discarded_foreign_source
+                .load(Ordering::Relaxed)
+                > 0
+        {
+            adopted = s.udp().unwrap().client_addr();
+            break;
+        }
+    }
+    // The pin compares `IpAddr` values: `::ffff:127.0.0.1` is *not* equal to
+    // `127.0.0.1`, so the authenticated v4-mapped datagram must never become
+    // the return path. It is classified as a foreign source instead.
+    assert!(
+        adopted.is_none(),
+        "a v4-mapped-v6 source was adopted as the return path: {adopted:?}"
+    );
+    assert!(
+        relay
+            .counters
+            .discarded_foreign_source
+            .load(Ordering::Relaxed)
+            > 0,
+        "the v4-mapped source must be rejected by the ip pin, not silently dropped elsewhere"
     );
     stop.trigger();
 }

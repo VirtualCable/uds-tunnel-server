@@ -18,7 +18,7 @@ with a single `--build-arg DISTRO_VERSION=forky`.
 ```
                   ┌────────────── Docker Container ──────────────┐
                   │                                               │
-   Host:4443 ───►│  udstunnel :4443 (TCP/TLS)                    │
+   Host:4443 ───►│  udstunnel :4443 (TCP)                        │
                   │                                               │
                   └───────────────────────────────────────────────┘
 ```

@@ -206,15 +206,21 @@ async fn timed_out_recover_preserves_legitimate_recovery() -> anyhow::Result<()>
     Ok(())
 }
 
-/// Characterisation: with a shared `seq_in`, `Crypt::decrypt` is check-then-act
+/// Characterisation (ignored by default): with a shared `seq_in`, `Crypt::decrypt` is check-then-act
 /// — it loads `current_seq`, runs the whole AES-GCM verification, and only then
 /// `fetch_max`es the counter. Two inbound crypts that share one counter
 /// therefore BOTH accept the same frame if they overlap (recover handshake
 /// crypt vs the live stream crypt, or a replaced stream vs its replacement).
 /// Consequence is a duplicated frame delivered to the proxy, not a crypto
 /// break: both holders already possess the per-session key.
+///
+/// Ignored because it MEASURES a known defect: pinning `doubles > 0` would
+/// fail the day the check-then-act becomes atomic (the desirable fix), so it
+/// is a characterization probe to run manually (`cargo test -- --ignored`)
+/// before and after any anti-replay hardening, not a regression gate.
 #[test]
-fn shared_inbound_counter_can_duplicate_accept_a_frame() {
+#[ignore]
+fn duplicate_accept_is_possible_while_decrypt_is_check_then_act() {
     use shared::crypt::{
         Crypt,
         types::{PacketBuffer, SharedSecret},

@@ -16,9 +16,11 @@ field accepted by the file. Unknown fields are ignored by
 
 ## Environment overrides
 
-Two settings can be overridden at runtime via environment variables
-without editing the file. They take effect only when the
-configuration file is read; later edits to the file still win.
+Three settings can be overridden via environment variables
+without editing the file. They are applied once, when the
+configuration is first read at startup; the effective config is
+cached in a process-wide `OnceLock`, so editing the file or the
+environment afterwards has no effect until the server is restarted.
 
 | Variable                   | Overrides                  |
 |----------------------------|----------------------------|
@@ -172,4 +174,7 @@ The config struct is deserialised with `toml::from_str`. Parsing fails
 loudly with a Rust-side error if a field has the wrong type. Missing
 required fields (`ticket_api_url`, `broker_auth_token`) panic at
 startup with a clear "Failed to parse server configuration file"
-message in debug builds and abort in release builds.
+message. Panic unwinding is enabled in every build profile (no
+`panic = "abort"` in any `[profile]` section), so release builds
+behave the same as debug ones here: the process panics and the
+runtime reports the unwound error.

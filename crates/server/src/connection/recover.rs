@@ -5,7 +5,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket};
 
-use crate::{session::SessionManager, stream::server::TunnelServerStream};
+use crate::{
+    consts::HANDSHAKE_CONFIRM_TIMEOUT_SECS, session::SessionManager,
+    stream::server::TunnelServerStream,
+};
 
 use super::types::OpenResponse;
 
@@ -63,7 +66,7 @@ where
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let rec_sessid_confirm = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(HANDSHAKE_CONFIRM_TIMEOUT_SECS),
                 crypt_reader.read(&mut reader, &mut buffer),
             )
             .await
@@ -149,9 +152,9 @@ where
                 );
             }
             // Invalidate the old equiv session ID before minting a new
-            // one so successive recoveries do not accumulate stale entries
-            // in `SessionManager.equivs` (which would slowly leak memory
-            // and widen the recovery-credential attack surface).
+            // one: the id the peer just used must stop resolving the
+            // moment recovery succeeds, so a stolen or replayed
+            // recovery credential cannot keep pointing at the session.
             session_manager.remove_equiv_session(recover_session_id);
             let equiv_id = session_manager.create_equiv_session(session_id)?;
             // The UDP leg survives recovery: keys derive from the ticket

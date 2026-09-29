@@ -44,6 +44,12 @@ pub const SERVER_RECOVERY_GRACE_SECS: u64 = 5; // Time given to recover server c
 // refreshes the deadline).
 pub const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
 
+/// Time the server waits for the post-handshake AEAD confirm frame (the
+/// ticket echo on Open, the session-id echo on Recover). Shared by
+/// `connection::connect` and `connection::recover` so the two handshake
+/// paths cannot drift apart.
+pub const HANDSHAKE_CONFIRM_TIMEOUT_SECS: u64 = 1;
+
 #[cfg(debug_assertions)]
 pub const CONFIGFILE_PATH: &str = "udstunnel.conf";
 #[cfg(not(debug_assertions))]

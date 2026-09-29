@@ -8,7 +8,7 @@ The UDS Tunnel Server is a high-performance tunneling service written in Rust th
 
 - **Secure Tunneling**: Establishes encrypted tunnels between clients and target servers
 - **Ticket-Based Authentication**: Uses broker-validated tickets for connection authorization
-- **TLS Support**: Built-in TLS encryption for secure communications
+- **Encrypted Tunnels**: Per-frame AES-256-GCM AEAD on the tunnel leg (TLS is used only towards the broker API)
 - **UDP Relay**: Optional parallel UDP leg (e.g. RDPUDP redirection) with per-datagram AEAD encryption
 - **Proxy Protocol Support**: Optional PROXY protocol v2 support for load balancers
 - **Asynchronous I/O**: High-performance async Rust implementation using Tokio

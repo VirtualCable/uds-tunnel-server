@@ -71,8 +71,16 @@ fn crafted_max_minus_one_seq_on_the_wire_is_still_accepted() {
     let mut server = Crypt::new(&key, 0);
     let mut copy = buf.clone();
     let r = server.decrypt(&mut copy);
-    println!("decrypt(seq=MAX-1) -> ok={}", r.is_ok());
-    println!("counter after = {}", server.current_seq());
+    assert!(
+        r.is_ok(),
+        "seq=MAX-1 is below the rejection boundary and must decrypt, got: {:?}",
+        r.err()
+    );
+    assert_eq!(
+        server.current_seq(),
+        u64::MAX,
+        "counter must advance past MAX-1"
+    );
 
     // A later, entirely legitimate frame (small seq) is now rejected.
     let mut legit = Crypt::new(&key, 0);
@@ -80,8 +88,8 @@ fn crafted_max_minus_one_seq_on_the_wire_is_still_accepted() {
     legit.encrypt(1, 2, &mut lb).unwrap();
     let mut lcopy = lb.clone();
     let lr = server.decrypt(&mut lcopy);
-    println!(
-        "legit frame after poison -> {:?}",
-        lr.err().map(|e| e.to_string())
+    assert!(
+        lr.is_err(),
+        "a small-seq frame after a near-MAX one must be rejected as replay"
     );
 }

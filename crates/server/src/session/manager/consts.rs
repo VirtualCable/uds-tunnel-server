@@ -29,9 +29,10 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-// This module is intentionally empty: with the deterministic cleanup
-// of equiv entries in `remove_session` and `recover::recover`, the
-// per-session equiv count is bounded by 2 (one idempotent self-entry
-// from `add_session` plus at most one entry from the latest Recover),
-// so a hard cap is unreachable. Kept as a placeholder for any future
-// constants the manager might need.
+// This module is intentionally empty. An equiv id is a per-session
+// slot (`Session::current_equiv_id`), not a global map: `add_session`
+// does not mint one, and each Recover invalidates the previous id
+// before installing the new one, so a live session holds at most one
+// equiv id and a dead session takes its id with it (the value is
+// dropped together with the `Arc<Session>`). Kept as a placeholder
+// for any future constants the manager might need.

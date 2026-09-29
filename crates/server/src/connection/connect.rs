@@ -14,6 +14,7 @@ use shared::{
 use crate::{
     broker::{self, BrokerApi},
     config,
+    consts::HANDSHAKE_CONFIRM_TIMEOUT_SECS,
     session::{Session, SessionId, SessionManager, UdpState},
     stream::server::TunnelServerStream,
 };
@@ -220,7 +221,7 @@ where
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let ticket_confirm = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(HANDSHAKE_CONFIRM_TIMEOUT_SECS),
                 crypt_reader.read(&mut reader, &mut buffer),
             )
             .await

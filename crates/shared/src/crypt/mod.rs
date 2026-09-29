@@ -160,7 +160,7 @@ impl Crypt {
     /// Decrypts the given ciphertext using AES-GCM with a nonce derived from the provided seq.
     /// The nonce is constructed by taking the seq value and padding it to 12 bytes with
     /// zeros. The seq value is also used as associated data (AAD) to ensure integrity.
-    /// Returns the decrypted plaintext on success, and the channel (first 2 bytes, little-endian u16).
+    /// Returns the decrypted plaintext on success, and the channel (first 2 bytes, big-endian u16).
     /// Note: length is the length on encrpypted data WITH the tag (so, as readed from the stream).
     pub fn decrypt(&mut self, buffer: &mut types::PacketBuffer) -> Result<()> {
         let seq = buffer.seq()?;
