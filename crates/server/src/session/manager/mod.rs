@@ -126,49 +126,80 @@ impl SessionManager {
     }
 
     pub async fn finish_all_sessions(&self) {
-        // Take the sessions out of the map but keep them alive until the
-        // final stop reports are delivered: dropping the Arcs earlier
-        // would stop the streams (and the traffic counters) mid-drain,
-        // and the detached notifications spawned by `Session::Drop`
-        // could be killed before the runtime shuts down.
-        let sessions: Vec<Arc<Session>> = {
-            let mut sessions = self.sessions.write().unwrap();
-            sessions.drain().map(|(_, session)| session).collect()
-        };
+        // Drain repeatedly until a pass finds the map empty. The caller
+        // closes the accept loop before invoking this (main triggers the
+        // listener stop first), but connections already in flight can
+        // reach `add_session` while this function awaits the broker stop
+        // reports of the earlier batch. A session left in the map at the
+        // end of shutdown gets no broker stop at all — the tunnel record
+        // hangs until the broker's own validity window expires — so every
+        // late arrival must be caught by a further pass. The rounds cap
+        // only guards against a pathological endless supply; with the
+        // accept loop closed, every in-flight `handle_connection` is
+        // bounded by its own request/handshake timeouts, so the loop ends
+        // after the stragglers drain.
+        let mut round = 0usize;
+        loop {
+            round += 1;
+            // Take the sessions out of the map but keep them alive until
+            // the final stop reports are delivered: dropping the Arcs
+            // earlier would stop the streams (and the traffic counters)
+            // mid-drain, and the detached notifications spawned by
+            // `Session::Drop` could be killed before the runtime shuts
+            // down.
+            let sessions: Vec<Arc<Session>> = {
+                let mut sessions = self.sessions.write().unwrap();
+                sessions.drain().map(|(_, session)| session).collect()
+            };
+            if sessions.is_empty() {
+                break;
+            }
+            if round > 8 {
+                // Should be unreachable; warn rather than loop forever.
+                log::warn!(
+                    "Shutdown drain still finding sessions after {} rounds ({} left)",
+                    round,
+                    sessions.len()
+                );
+                drop(sessions);
+                break;
+            }
 
-        // Stop the streams first so the traffic counters freeze, then
-        // snapshot them for the report (in-flight adds after this point
-        // are at most one packet per leg, which is acceptable for
-        // informational stats).
-        for session in &sessions {
-            session.stopper().trigger();
-        }
+            // Stop the streams first so the traffic counters freeze, then
+            // snapshot them for the report (in-flight adds after this point
+            // are at most one packet per leg, which is acceptable for
+            // informational stats).
+            for session in &sessions {
+                session.stopper().trigger();
+            }
 
-        // Claim the one-shot broker notifications up front (`take_broker_stop`
-        // is idempotent, so the `Session::Drop` below will not re-send).
-        // Await the reports concurrently; each has its own request timeout.
-        let reports: Vec<_> = sessions
-            .iter()
-            .filter_map(|session| session.take_broker_stop())
-            .map(|(notify, sent, recv)| {
-                tokio::spawn(async move {
-                    if let Err(e) =
-                        crate::broker::get().stop_connection(&notify, sent, recv).await
-                    {
-                        log::warn!(
-                            "Broker stop notification failed on shutdown for notify ticket {:?}: {:?}",
-                            notify.redacted(),
-                            e
-                        );
-                    }
+            // Claim the one-shot broker notifications up front
+            // (`take_broker_stop` is idempotent, so the `Session::Drop`
+            // below will not re-send). Await the reports concurrently;
+            // each has its own request timeout.
+            let reports: Vec<_> = sessions
+                .iter()
+                .filter_map(|session| session.take_broker_stop())
+                .map(|(notify, sent, recv)| {
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            crate::broker::get().stop_connection(&notify, sent, recv).await
+                        {
+                            log::warn!(
+                                "Broker stop notification failed on shutdown for notify ticket {:?}: {:?}",
+                                notify.redacted(),
+                                e
+                            );
+                        }
+                    })
                 })
-            })
-            .collect();
-        futures::future::join_all(reports).await;
+                .collect();
+            futures::future::join_all(reports).await;
 
-        // Dropping the Arcs triggers each session's `Drop`, stopping the
-        // proxy/streams just as `sessions.clear()` used to.
-        drop(sessions);
+            // Dropping the Arcs triggers each session's `Drop`, stopping
+            // the proxy/streams just as `sessions.clear()` used to.
+            drop(sessions);
+        }
     }
 
     pub fn count(&self) -> usize {

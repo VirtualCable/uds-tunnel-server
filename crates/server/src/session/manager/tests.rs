@@ -38,6 +38,11 @@ use shared::{
 
 use crate::config;
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -527,4 +532,196 @@ async fn test_count_by_remote() {
     assert_eq!(manager.count_by_remote(a), 2);
     assert_eq!(manager.count_by_remote(b), 1);
     assert_eq!(manager.count_by_remote(other), 0);
+}
+
+/// B4 regression for the shutdown drain.
+///
+/// History: `finish_all_sessions` used to drain the session map exactly
+/// once, while the accept loop was still alive (`main.rs` triggered the
+/// listener stop AFTER the drain). Sessions whose handshakes completed
+/// during the drain's broker-stop awaits were registered after the
+/// one-shot pass had passed them by: the process then exited with live
+/// sessions whose tunnels were never closed at the broker. The fix:
+/// `main.rs` stops the accept loop first, and `finish_all_sessions`
+/// re-drains until the map settles empty.
+///
+/// This test pins the re-drain directly on the manager: a session is
+/// registered while the first batch's broker stop report is still in
+/// flight. Pre-fix the late arrival stayed in the map and got no stop
+/// report at all; post-fix a second pass must drain and notify it.
+struct Gate {
+    opened: Mutex<bool>,
+    notify: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Gate {
+            opened: Mutex::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Block until `open` is called. The future is registered before the
+    /// flag is checked, so a concurrent `open` can never be lost.
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if *self.opened.lock().unwrap() {
+            return;
+        }
+        notified.await;
+    }
+
+    fn open(&self) {
+        *self.opened.lock().unwrap() = true;
+        self.notify.notify_waiters();
+    }
+}
+
+/// Minimal broker endpoint for stop notifications: counts the requests it
+/// has fully read and holds the FIRST reply until `gate` opens, modelling a
+/// slow broker response so a session can be registered mid-drain.
+async fn start_gated_stop_broker(
+    gate: Arc<Gate>,
+    arrivals: Arc<AtomicUsize>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                break;
+            };
+            let gate = gate.clone();
+            let arrivals = arrivals.clone();
+            tokio::spawn(async move {
+                let mut sock = sock;
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let headers_end = loop {
+                    let Ok(n) = sock.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                // Drain the (small) JSON body so the reply is not racing a
+                // half-written request.
+                let head = String::from_utf8_lossy(&buf[..headers_end]).to_lowercase();
+                let content_len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse().ok())
+                    })
+                    .unwrap_or(0);
+                while buf.len() < headers_end + content_len {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+
+                if arrivals.fetch_add(1, Ordering::SeqCst) == 0 {
+                    gate.wait().await;
+                }
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{addr}/"), task)
+}
+
+fn session_with_stop_ticket(remote: &str) -> Session {
+    Session::with_broker_stop_ticket(
+        SharedSecret::new([0u8; 32]),
+        ticket::Ticket::new_random(),
+        Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![remote.to_string()],
+        Some(ticket::Ticket::new_random()),
+    )
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn finish_all_sessions_drains_sessions_registered_during_the_drain() {
+    let gate = Arc::new(Gate::new());
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    let (url, broker_task) = start_gated_stop_broker(gate.clone(), arrivals.clone()).await;
+
+    let original_url = config::get().read().unwrap().ticket_api_url.clone();
+    {
+        let cfg = config::get();
+        let mut c = cfg.write().unwrap();
+        c.ticket_api_url = url;
+        c.broker_auth_token = "test_token".to_string();
+        c.dangerous_disable_ssl_verify = Some(false);
+    }
+
+    let manager = Arc::new(SessionManager::new());
+    let first = manager
+        .add_session(session_with_stop_ticket("127.0.0.1:1"))
+        .unwrap();
+
+    let drain_manager = manager.clone();
+    let drain = tokio::spawn(async move { drain_manager.finish_all_sessions().await });
+
+    // Wait until the broker has fully read the first stop report: the drain
+    // is inside `join_all` for the first batch from this point on.
+    let mut spins = 0;
+    while arrivals.load(Ordering::SeqCst) == 0 {
+        assert!(
+            spins < 500,
+            "the first stop report never reached the broker"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        spins += 1;
+    }
+
+    // The straggler: a handshake that completed while the first batch's
+    // report was in flight registers now.
+    let late = manager
+        .add_session(session_with_stop_ticket("127.0.0.1:2"))
+        .expect("late session under cap");
+    assert_eq!(
+        manager.count(),
+        1,
+        "the first pass took `first` out of the map"
+    );
+
+    // Release the first reply.
+    gate.open();
+    tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+        .await
+        .expect("the drain must complete once the broker replies")
+        .expect("drain task panicked");
+
+    // FIXED BEHAVIOUR PIN: pre-fix, the one-shot drain returned here with
+    // `late` still registered and the broker having seen a single stop
+    // report. Post-fix the second pass drains it and notifies as well.
+    assert_eq!(
+        arrivals.load(Ordering::SeqCst),
+        2,
+        "both sessions must have delivered their broker stop report"
+    );
+    assert_eq!(manager.count(), 0, "the drain must leave the map empty");
+    assert!(first.take_broker_stop().is_none(), "first was notified");
+    assert!(late.take_broker_stop().is_none(), "late was notified");
+
+    drop(first);
+    drop(late);
+    config::get().write().unwrap().ticket_api_url = original_url;
+    broker_task.abort();
 }

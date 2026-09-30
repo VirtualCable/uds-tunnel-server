@@ -187,6 +187,17 @@ where
                     );
                 }
             }
+            // Adopt the recovering peer's address: the AEAD confirm above
+            // proves this socket is the session's launcher, so it is the
+            // session's source address from here on. Skipping the update
+            // left a moved client (a VPN re-bind, a NAT that changes the
+            // public address, a laptop that switched networks) pinned to
+            // the address it opened with: the per-IP session cap kept
+            // counting it against the old address, and the UDP relay's
+            // foreign-source check (`src.ip() == session.src_ip().ip()`)
+            // refused to re-point the return path at the new one, so the
+            // UDP leg died silently while the TCP tunnel worked.
+            session.set_ip(ip);
             // Invalidate the old equiv session ID before minting a new
             // one: the id the peer just used must stop resolving the
             // moment recovery succeeds, so a stolen or replayed

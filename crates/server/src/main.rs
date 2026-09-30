@@ -103,7 +103,7 @@ async fn main() {
     }
 
     // Spawn the signal handler
-    {
+    let shutdown_handler = {
         let stop = stop.clone();
         tokio::spawn(async move {
             let ctrl_c = signal::ctrl_c();
@@ -125,12 +125,22 @@ async fn main() {
                 ctrl_c.await.expect("Failed to listen for Ctrl-C");
                 log::info!("Received Ctrl-C, shutting down");
             }
+            // Close the accept loop FIRST, then drain the sessions. In the
+            // other order (drain first, stop after) every broker stop
+            // notification of the drain was awaited while the listener kept
+            // accepting, and connections completed in that window were
+            // registered after the one-shot drain had passed them by: the
+            // runtime then shut down with live sessions whose tunnels were
+            // never closed at the broker. With the accept loop stopped
+            // first, only stragglers whose handshake was already in flight
+            // can still register, and `finish_all_sessions` re-drains until
+            // the map settles.
+            stop.trigger();
             session::SessionManager::get_instance()
                 .finish_all_sessions()
                 .await;
-            stop.trigger();
-        });
-    }
+        })
+    };
 
     loop {
         tokio::select! {
@@ -163,5 +173,12 @@ async fn main() {
                 }
             }
         }
+    }
+
+    // Wait for the drain to finish before the runtime shuts down: the accept
+    // loop above only stops the listener, the broker stop notifications still
+    // have to complete.
+    if let Err(e) = shutdown_handler.await {
+        log::error!("Shutdown handler failed: {:?}", e);
     }
 }

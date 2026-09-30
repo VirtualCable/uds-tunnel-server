@@ -31,6 +31,20 @@ use crate::session::{Session, SessionManager};
 
 use super::recover::recover;
 
+/// Address every `hermetic_session` registers with, and the leg every
+/// pre-existing window test drives recovery from. B3 tests pass a different
+/// `ip` to observe whether the recovering peer's address gets adopted.
+const ORIG_IP: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+    0,
+);
+/// The address a client that moved networks (VPN re-bind, NAT rebinding,
+/// Wi-Fi switch) recovers from.
+const NEW_IP: SocketAddr = SocketAddr::new(
+    std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 7)),
+    31337,
+);
+
 /// A registered session with a known secret/ticket and a minted equiv id, so
 /// a test can act as the launcher (mirror crypts) or as a key-less attacker
 /// that only knows the equiv id.
@@ -85,11 +99,11 @@ async fn recover_with_valid_confirm(
     secret: &SharedSecret,
     ticket: &Ticket,
     in_seqs: (u64, u64),
+    ip: SocketAddr,
 ) -> anyhow::Result<()> {
     let material = derive_tunnel_material(secret, ticket)?;
     let (client, server) = tokio::io::duplex(1024);
     let (r, w) = tokio::io::split(server);
-    let ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
     let equiv_owned = *equiv;
     let handle = tokio::spawn(async move { recover(r, w, &equiv_owned, in_seqs, ip).await });
 
@@ -117,7 +131,7 @@ async fn recover_accepts_empty_buffer_after_last_encrypted_frame() {
     let (session, equiv, secret, ticket) = hermetic_session(5).await;
     advance_outbound(&session, 3); // the wire reached seq 3
 
-    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (4, 1)).await;
+    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (4, 1), ORIG_IP).await;
     if let Err(e) = res {
         assert!(
             !e.to_string().contains("Invalid recovery sequence"),
@@ -137,7 +151,7 @@ async fn recover_keeps_whole_window_when_launcher_acked_nothing() {
     push_buffered(&session, 2);
     advance_outbound(&session, 2); // tail == last sent: production-consistent
 
-    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (2, 1)).await;
+    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (2, 1), ORIG_IP).await;
     if let Err(e) = res {
         assert!(
             !e.to_string().contains("Invalid recovery sequence"),
@@ -161,7 +175,7 @@ async fn recover_refuses_declaration_above_last_encrypted_frame() {
     push_buffered(&session, 2);
     advance_outbound(&session, 2);
 
-    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (5, 1))
+    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (5, 1), ORIG_IP)
         .await
         .expect_err("a fabricated declaration must be refused");
     assert!(
@@ -188,7 +202,7 @@ async fn recover_refuses_declaration_below_evicted_gap() {
     }
     advance_outbound(&session, 7);
 
-    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (3, 1))
+    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (3, 1), ORIG_IP)
         .await
         .expect_err("an evicted-gap declaration must be refused");
     assert!(
@@ -455,4 +469,100 @@ async fn start_server_fails_fast_when_proxy_exits_with_attach_queued() -> anyhow
         "server_running was not rolled back after the failed attach"
     );
     Ok(())
+}
+
+/// B3 regression: a legitimate recovery from a *new* source address must
+/// re-point the session's `src_ip` at the recovering socket. Pre-fix the
+/// session stayed pinned to the address it opened with, so a client that
+/// moved networks was still counted against the old IP by
+/// `max_sessions_per_remote` and the UDP relay's foreign-source check kept
+/// refusing the new address (`src.ip() == session.src_ip().ip()`): the UDP
+/// leg died silently while the TCP tunnel recovered fine.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn authenticated_recover_from_new_ip_adopts_the_new_source() -> anyhow::Result<()> {
+    let (session, equiv, secret, ticket) = hermetic_session(11).await;
+    assert_eq!(session.src_ip(), ORIG_IP);
+    push_buffered(&session, 2); // declare a recoverable in-window seq (3, 1)
+
+    // Same flow as `timed_out_recover_preserves_legitimate_recovery` (the leg
+    // stays alive so the handshake runs to completion), except the recover
+    // socket claims `NEW_IP`.
+    let material = derive_tunnel_material(&secret, &ticket)?;
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (r, w) = tokio::io::split(server);
+    let handle = tokio::spawn(async move { recover(r, w, &equiv, (3, 1), NEW_IP).await });
+
+    let mut confirm = PacketBuffer::new();
+    confirm.set_data(equiv.as_ref())?;
+    Crypt::new(&material.key_receive, 0).encrypt(0, equiv.as_ref().len(), &mut confirm)?;
+    confirm.write(&mut client).await?;
+
+    tokio::time::timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("the authenticated recover must complete, not hang")
+        .expect("recover task panicked")
+        .expect("legitimate recovery from a moved client must succeed");
+
+    // FIXED BEHAVIOUR PIN: the session is now attributed to the recovering
+    // socket's address, so per-IP caps and the UDP pin follow the client.
+    assert_eq!(session.src_ip(), NEW_IP);
+
+    drop(client);
+    SessionManager::get_instance().remove_session(session.id());
+    Ok(())
+}
+
+/// B3 regression (negative): an unauthenticated Recover (equiv id known, no
+/// key) that times out must not move the session's `src_ip` to the attacker's
+/// address: the address swap is a session-state mutation and, like the window
+/// consumption, belongs strictly after the AEAD ticket confirm.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn unauthenticated_recover_timeout_does_not_adopt_the_attacker_ip() {
+    let (session, equiv, _secret, _ticket) = hermetic_session(12).await;
+
+    let (client, server) = tokio::io::duplex(1024);
+    let (r, w) = tokio::io::split(server);
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        recover(r, w, &equiv, (3, 1), NEW_IP),
+    )
+    .await
+    .expect("the silent recover must fail on its own timeout, not hang")
+    .expect_err("the silent recover must return an error");
+    drop(client);
+
+    assert_eq!(
+        session.src_ip(),
+        ORIG_IP,
+        "a timed-out, unauthenticated recover must not re-point the session's source address"
+    );
+    SessionManager::get_instance().remove_session(session.id());
+}
+
+/// B3 regression (negative): a recovery that authenticates but is refused at
+/// the window check (a fabricated declaration above the last encrypted frame)
+/// must not adopt the peer's address either: only accepted recoveries move
+/// session state.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn refused_recover_does_not_adopt_the_peer_ip() {
+    let (session, equiv, secret, ticket) = hermetic_session(13).await;
+    push_buffered(&session, 2);
+    advance_outbound(&session, 2);
+
+    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (5, 1), NEW_IP)
+        .await
+        .expect_err("a fabricated declaration must be refused");
+    assert!(
+        err.to_string().contains("beyond last sent seq"),
+        "expected the last-sent refusal, got: {err}"
+    );
+    assert_eq!(
+        session.src_ip(),
+        ORIG_IP,
+        "a refused recovery must not re-point the session's source address"
+    );
+    SessionManager::get_instance().remove_session(session.id());
 }
