@@ -725,3 +725,119 @@ async fn finish_all_sessions_drains_sessions_registered_during_the_drain() {
     config::get().write().unwrap().ticket_api_url = original_url;
     broker_task.abort();
 }
+
+// ---------------------------------------------------------------------------
+// Data-idle session cap: keep-alive `Nop`s sustain the TCP leg (10 s
+// watchdog) but NOT the session. A session that carries no payload bytes
+// within `session_idle_data_timeout_secs` is ended by the watchdog that
+// `add_session` spawns. Virtual time (`start_paused`) keeps the tests
+// instant regardless of the cap value.
+// ---------------------------------------------------------------------------
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn dataless_session_is_ended_at_the_idle_data_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(1);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1"))
+        .expect("session under cap");
+    let stop = session.stopper();
+
+    // Just under the cap: still alive.
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "a session within the data-idle window must not be ended"
+    );
+
+    // Cross the window with zero payload bytes: ended.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        stop.is_triggered(),
+        "a dataless session must be ended once the idle-data cap expires"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn real_payload_bytes_reset_the_idle_data_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(1);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:2"))
+        .expect("session under cap");
+    let stop = session.stopper();
+    let traffic = session.traffic();
+
+    // t = 0.8: still inside the first window, and real data crosses the
+    // leg (this is what the cap measures; a `Nop` would not do it).
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    traffic.add_sent(10);
+
+    // t = 1.6: past the first window, but the watchdog re-armed on the
+    // data delta, so the session must be alive.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "payload bytes within the window must reset the idle-data clock"
+    );
+
+    // t = 2.0: the re-armed window expires with no further data: ended.
+    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        stop.is_triggered(),
+        "idle data after the last payload must still expire the session"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn zero_idle_data_timeout_disables_the_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(0);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:3"))
+        .expect("session under cap");
+    let stop = session.stopper();
+
+    // Way beyond the production default (120 s): a disabled cap means the
+    // watchdog is not even spawned, so the session lives.
+    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "timeout 0 must disable the data-idle session cap"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
+}

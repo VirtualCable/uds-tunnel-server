@@ -269,6 +269,18 @@ impl TrafficCounters {
             self.recv.load(std::sync::atomic::Ordering::Relaxed),
         )
     }
+
+    /// Total payload bytes counted so far (sent + recv). The sum is
+    /// monotonically increasing and only moves when real tunnel data
+    /// flows — channel-0 control frames (keep-alive `Nop`) never reach
+    /// the counters by construction. The session data-idle watchdog
+    /// rides on this: a zero delta across a full window means "alive
+    /// leg, no data", which is exactly what the cap must expire.
+    pub fn total(&self) -> u64 {
+        self.sent
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(self.recv.load(std::sync::atomic::Ordering::Relaxed))
+    }
 }
 
 #[derive(Debug, Clone)]

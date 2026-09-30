@@ -154,6 +154,23 @@ environment afterwards has no effect until the server is restarted.
   `max_sessions_per_remote` knob to raise, so an operator can see at a
   glance whether it is abuse or legitimate shared load.
 
+#### `session_idle_data_timeout_secs`
+
+- Type: unsigned integer (seconds)
+- Default: `120` (see `DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS` in
+  `crates/server/src/consts.rs`); `0` disables the cap
+- Data-idle cap for sessions. A session that carries no payload bytes
+  for this long is ended, freeing its slot. Keep-alive `Nop` frames do
+  **not** count: they only refresh the launcher leg's 10 s TCP watchdog
+  (`KEEPALIVE_TIMEOUT_SECS`), proving the socket is alive — they cannot
+  sustain a session indefinitely. Real tunnel data in either direction
+  and over either transport (TCP data channels, UDP relay datagrams)
+  resets the clock. A `Recover` of the launcher stream does not reset
+  it: the clock belongs to the session's traffic counters, not to the
+  stream, so re-attaching a dataless launcher keeps it a dataless
+  session. This is the defence against a client with a valid ticket
+  parking a slot forever with `Nop`s only.
+
 ## Behaviour summary
 
 | Concern                          | Knob                          | Default      |
@@ -167,6 +184,7 @@ environment afterwards has no effect until the server is restarted.
 | Session recovery buffer          | `recovery_buffer_size`        | 64 KB        |
 | Total session cap                | `max_sessions`                | 8192         |
 | Per source-IP session cap        | `max_sessions_per_remote`     | disabled     |
+| Data-idle session cap            | `session_idle_data_timeout_secs` | 120 s      |
 
 ## Validation
 

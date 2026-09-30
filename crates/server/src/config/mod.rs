@@ -1,4 +1,6 @@
-use crate::consts::{CONFIGFILE_PATH, DEFAULT_MAX_SESSIONS};
+use crate::consts::{
+    CONFIGFILE_PATH, DEFAULT_MAX_SESSIONS, DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS,
+};
 use shared::log;
 use std::{
     fs::read_to_string,
@@ -23,6 +25,7 @@ pub struct ServerConfig {
     pub recovery_buffer_size: Option<usize>, // Size of the session recovery buffer in Kb, default: 64 (kb)
     pub max_sessions: Option<usize>, // Hard cap on concurrent sessions, default: DEFAULT_MAX_SESSIONS (8192)
     pub max_sessions_per_remote: Option<usize>, // Per-source-IP cap. None = disabled (no per-IP check).
+    pub session_idle_data_timeout_secs: Option<u64>, // Data-idle session cap. None = DEFAULT (120), Some(0) = disabled.
 }
 
 impl ServerConfig {
@@ -33,6 +36,21 @@ impl ServerConfig {
     /// Effective session cap, falling back to the default when unset.
     pub fn max_sessions(&self) -> usize {
         self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS)
+    }
+
+    /// Effective data-idle cap for sessions. `None` means the cap is
+    /// disabled (explicit `0` in the config); otherwise the deadline a
+    /// session may go without payload bytes (data channels only — keep-
+    /// alive `Nop` frames never count) before it is ended. Unset falls
+    /// back to `DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS`.
+    pub fn session_idle_data_timeout(&self) -> Option<std::time::Duration> {
+        match self.session_idle_data_timeout_secs {
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => Some(std::time::Duration::from_secs(
+                DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS,
+            )),
+        }
     }
 
     /// Whether the UDP relay leg is allowed at all on this server.
@@ -105,6 +123,7 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     recovery_buffer_size: None,
                     max_sessions: None,
                     max_sessions_per_remote: None,
+                    session_idle_data_timeout_secs: None,
                 }
             };
 

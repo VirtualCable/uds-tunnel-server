@@ -111,12 +111,16 @@ async fn malformed_channel0_payload_is_forwarded_to_proxy() {
 }
 
 // ---------------------------------------------------------------------------
-// A `Nop` shorter than the deadline sustains the leg indefinitely: 100
-// cycles of (deadline - 1s) is ~900 s of quiet with no teardown.
+// A `Nop` shorter than the deadline sustains the LEG indefinitely: 100
+// cycles of (deadline - 1s) is ~900 s of quiet with no teardown. This is
+// the per-stream keep-alive watchdog only; the bare `inbound_pair` stream
+// here owns no registered session, so the session-level data-idle cap
+// (`session_idle_data_timeout_secs`, see `session::manager`) does not
+// apply — `Nop`s alone sustain the leg but never the session.
 // ---------------------------------------------------------------------------
 #[serial_test::serial(manager)]
 #[tokio::test(start_paused = true)]
-async fn nop_sustains_a_session_far_beyond_the_deadline() {
+async fn nops_sustain_the_leg_far_beyond_the_keepalive_deadline() {
     let (mut inbound, mut client, stop) = inbound_pair();
     let mut client_crypt = Crypt::new(&SharedSecret::new(KEY1), 0);
     let handle = tokio::spawn(async move { inbound.run().await });

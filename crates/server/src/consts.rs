@@ -68,3 +68,12 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 /// Open handshake at the SessionManager level — see
 /// `ServerConfig::max_sessions` for the override knob.
 pub const DEFAULT_MAX_SESSIONS: usize = 8192;
+
+/// Default session data-idle cap: a session whose launcher leg carries no
+/// payload bytes (data channels only — keep-alive `Nop` frames never count)
+/// for this long is ended. The keep-alive watchdog
+/// (`KEEPALIVE_TIMEOUT_SECS`) only proves the TCP leg is alive; this cap
+/// is what bounds the slot: a client cannot hold a session forever with
+/// `Nop` frames alone. Override with `session_idle_data_timeout_secs` in
+/// the server config; `0` disables the cap.
+pub const DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS: u64 = 120;

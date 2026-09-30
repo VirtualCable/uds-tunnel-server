@@ -105,7 +105,69 @@ impl SessionManager {
         if session.udp().is_some() {
             crate::udp::register_session(&session);
         }
+        // Drop the map lock before spawning: the watchdog only needs the
+        // session's own cheap handles (counters, stopper, id), never the
+        // map.
+        drop(sessions);
+        Self::spawn_idle_data_watchdog(&session);
         Ok(session)
+    }
+
+    /// Data-idle cap: a session may hold its slot only while it carries
+    /// real tunnel data. Keep-alive `Nop` frames refresh the launcher
+    /// leg's 10 s watchdog (proving the TCP socket is alive) but never
+    /// touch the traffic counters, so a pure-`Nop` zombie cannot sustain
+    /// the session beyond `session_idle_data_timeout_secs` (default
+    /// `DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS`; `0` disables the cap).
+    /// The clock is the session's shared `TrafficCounters`, so a
+    /// `Recover` of a dataless launcher does not reset it — re-attaching
+    /// a zombie keeps it a zombie. The window is pinned at registration
+    /// time (config re-reads afterwards do not retarget live sessions).
+    fn spawn_idle_data_watchdog(session: &Arc<Session>) {
+        let window = match config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_idle_data_timeout()
+        {
+            Some(window) => window,
+            None => return, // cap disabled
+        };
+        // The watchdog is a spawned task; without a runtime there is
+        // nothing to schedule it on (pure-sync unit use of the manager).
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let traffic = session.traffic();
+        let stop = session.stopper();
+        let id = *session.id();
+        handle.spawn(async move {
+            let mut last = traffic.total();
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(window) => {}
+                    // The session is ending for any other reason (clean
+                    // close, cap-reject, shutdown): our job is done.
+                    _ = stop.wait_async() => return,
+                }
+                let now = traffic.total();
+                if now != last {
+                    // Payload bytes crossed the leg within the window
+                    // (TCP or UDP, either direction): earned another one.
+                    last = now;
+                    continue;
+                }
+                log::info!(
+                    "Session {:?}: no data traffic within {:?}, ending it (keep-alive Nops alone cannot sustain a session)",
+                    id,
+                    window
+                );
+                // Same termination as any other session stop: the proxy
+                // exits and removes the session from the map; the client
+                // leg sees the drop.
+                stop.trigger();
+                return;
+            }
+        });
     }
 
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {
