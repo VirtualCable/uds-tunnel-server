@@ -243,10 +243,10 @@ impl SessionManager {
         }
     }
 
-    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) {
+    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16, generation: u64) {
         if let Some(session) = self.get_session(id) {
             log::debug!("Stopping session {:?} client side", id);
-            session.stop_client(stream_channel_id).await;
+            session.stop_client(stream_channel_id, generation).await;
         }
     }
 

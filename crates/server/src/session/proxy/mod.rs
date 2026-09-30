@@ -148,10 +148,30 @@ impl Proxy {
                             log::debug!("Server stopped, closing session proxy");
                             break;  // exit loop on server stopped
                         }
-                        Ok(handler::Command::ClientStopped(stream_channel_id)) => {
-                            log::debug!("Client {} stopped, removing from session proxy", stream_channel_id);
-                            clients.stop_client(stream_channel_id).await;
-                            clients.close_client(stream_channel_id);
+                        Ok(handler::Command::ClientStopped(stream_channel_id, generation)) => {
+                            // Only tear the slot down if the reporting
+                            // stream still owns it. A replaced channel's
+                            // older stream dies asynchronously and its
+                            // notice arrives after the newer generation was
+                            // installed; stopping/closing the slot then would
+                            // kill the live channel (the frames forwarded to
+                            // its sender get silently dropped once it is
+                            // gone). Stale notices are ignored.
+                            if clients.generation_matches(stream_channel_id, generation) {
+                                log::debug!(
+                                    "Client {} (gen {}) stopped, removing from session proxy",
+                                    stream_channel_id,
+                                    generation
+                                );
+                                clients.stop_client(stream_channel_id).await;
+                                clients.close_client(stream_channel_id);
+                            } else {
+                                log::debug!(
+                                    "Ignoring stale stop notice for client {} generation {}",
+                                    stream_channel_id,
+                                    generation
+                                );
+                            }
                         }
                         Err(_) => {
                             log::debug!("Control channel closed, stopping session proxy");

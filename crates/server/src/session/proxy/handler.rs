@@ -42,7 +42,12 @@ pub(super) enum Command {
     ServerFailed,  // Will not close the proxy, to allow recovery
     ServerStopped, // Will close the proxy, as the server is done
     // Client is attached by us, so no need for an attach command
-    ClientStopped(u16), // stream_channel_id, no need to know if it failed or stopped normally
+    // stream_channel_id + the generation that owns it. The proxy only stops
+    // and closes the slot when the generation still matches, so a stale
+    // stream (its channel already replaced by a newer generation) cannot
+    // tear down the new occupant. No need to know if it failed or stopped
+    // normally.
+    ClientStopped(u16, u64),
 }
 
 #[derive(Debug)]
@@ -93,10 +98,10 @@ impl Handler {
         }
     }
 
-    pub async fn stop_client(&self, stream_channel_id: u16) {
+    pub async fn stop_client(&self, stream_channel_id: u16, generation: u64) {
         if let Err(e) = self
             .ctrl_tx
-            .send_async(Command::ClientStopped(stream_channel_id))
+            .send_async(Command::ClientStopped(stream_channel_id, generation))
             .await
         {
             log::error!(

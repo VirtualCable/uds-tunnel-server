@@ -701,8 +701,10 @@ impl Session {
         self.session_proxy.fail_server().await;
     }
 
-    pub(super) async fn stop_client(&self, stream_channel_id: u16) {
-        self.session_proxy.stop_client(stream_channel_id).await;
+    pub(super) async fn stop_client(&self, stream_channel_id: u16, generation: u64) {
+        self.session_proxy
+            .stop_client(stream_channel_id, generation)
+            .await;
     }
 }
 

@@ -199,6 +199,10 @@ where
     session_id: SessionId,
     local_stop: Trigger,
     stream_channel_id: u16,
+    /// Generation id this stream owns on the proxy's `ClientChannels` slot.
+    /// Reported back on teardown so a stale stream (its channel was already
+    /// replaced by a newer generation) cannot stop/close the new occupant.
+    generation: u64,
     reader: R,
     writer: W,
     channels: ClientEndpoints,
@@ -213,6 +217,7 @@ where
         session_id: SessionId,
         local_stop: Trigger,
         stream_channel_id: u16,
+        generation: u64,
         reader: R,
         writer: W,
         channels: ClientEndpoints,
@@ -221,6 +226,7 @@ where
             session_id,
             local_stop,
             stream_channel_id,
+            generation,
             reader,
             writer,
             channels,
@@ -232,6 +238,7 @@ where
             session_id,
             local_stop,
             stream_channel_id,
+            generation,
             reader,
             writer,
             channels,
@@ -280,9 +287,12 @@ where
                 }
             }
             log::debug!("Client stream for session {:?} stopping", session_id);
-            // Notify stopping client side
+            // Notify stopping client side, tagging the generation this stream
+            // owned: the proxy only stops/closes the slot if the generation
+            // still matches, so a replaced (older) stream's teardown cannot
+            // kill the channel a newer generation already re-opened.
             session_manager
-                .stop_client(&session_id, stream_channel_id)
+                .stop_client(&session_id, stream_channel_id, generation)
                 .await;
         });
         Ok(())

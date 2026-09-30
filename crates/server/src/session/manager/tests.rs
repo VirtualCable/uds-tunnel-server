@@ -182,7 +182,7 @@ async fn test_session_lifecycle() {
 
     // No client is running in fact, and as the proxy is stopped,
     // but this should not fail
-    manager.stop_client(session.id(), 1).await;
+    manager.stop_client(session.id(), 1, 0).await;
     wait_for_session_existence(session.id(), false)
         .await
         .unwrap();
@@ -210,7 +210,7 @@ async fn test_session_removed_exactly_once() {
 
     // Any aditional stops should be no-ops
     manager.stop_server(session.id()).await;
-    manager.stop_client(session.id(), 1).await;
+    manager.stop_client(session.id(), 1, 0).await;
 }
 
 #[serial_test::serial(config, manager)]
