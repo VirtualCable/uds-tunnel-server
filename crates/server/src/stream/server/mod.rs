@@ -228,8 +228,22 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
         // Send in buffer (FIFO) order. If any send fails, re-queue the failed
         // item and everything still pending behind it, mirroring the
         // steady-state invariant in `run` (push-then-send: a send failure
-        // leaves the packet buffered for the next recovery attempt). The
-        // buffer was just drained empty, so these pushes cannot evict or fail.
+        // leaves the packet buffered for the next recovery attempt).
+        //
+        // These re-pushes cannot fail the capacity check: every item here
+        // coexisted in this same buffer before the drain, so each one's
+        // length is within `max_bytes` by construction. They also cannot
+        // evict anything: the re-pushed set totals at most the bytes the
+        // buffer held before the drain, and the drain happened atomically
+        // under the per-session mutex. Both halves hold even if a replaced
+        // (killed) stream is still parked mid-send on its own drained items
+        // — those items are privately owned by that stream's re-push path,
+        // never double-handed. What the kill-on-attach single-live-stream
+        // invariant (`Session::start_server`) adds is that no *other* live
+        // producer can push fresh frames into the buffer between this
+        // drain and these re-pushes and consume the freed capacity; without
+        // it, the eviction loop here could fire against a peer stream's
+        // packets.
         let mut iter = unsent.into_iter();
         while let Some((unsent_packet, old_seq)) = iter.next() {
             log::debug!(

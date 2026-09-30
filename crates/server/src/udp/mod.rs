@@ -273,6 +273,19 @@ impl UdpRelay {
         // (reflection / amplification). Port changes (NAT rebinding) are
         // still accepted. A datagram from a foreign ip authenticates — the
         // key holds — but it is never made the return target.
+        //
+        // Trust boundary (deployment-dependent, same posture as the
+        // per-remote-IP cap in `connection/connect.rs`): "tunnel peer" is
+        // `session.src_ip()`, which under `use_proxy_protocol` is the
+        // PROXY v2 header source — authoritative only when the listener is
+        // firewalled so that just the trusted frontend may speak PROXY v2
+        // to it. A deployment that reaches this port directly *and* forges
+        // the header can steer the return path to any spoofable ip; per the
+        // operator posture that breach is outside the server's threat
+        // model. Keying the pin on the raw TCP peer instead is not an
+        // option: behind a frontend every session's TCP peer is the
+        // frontend, while UDP datagrams arrive from the real client, so the
+        // pin would reject every source and silently kill the relay leg.
         if src.ip() == session.src_ip().ip() {
             udp.set_client_addr(src);
         } else {
