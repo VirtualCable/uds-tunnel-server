@@ -109,7 +109,7 @@ async fn attacker_flood_does_not_break_other_sessions() {
         attacker.send_to(&forged, r_addr).await.unwrap();
     }
     // 5) truncated / oversized / garbage sizes, victim and own tokens
-    for len in [0usize, 1, 23, 24, 40, 41, 42, 1272, 1273, 4096] {
+    for len in [0usize, 1, 23, 24, 40, 41, 42, 1440, 1441, 4096] {
         let mut junk = vec![0xAAu8; len];
         if len >= TOKEN_LENGTH {
             junk[..TOKEN_LENGTH].copy_from_slice(&ta);
