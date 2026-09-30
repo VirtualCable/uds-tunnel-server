@@ -36,9 +36,9 @@ where
             // Validate the client-supplied sequence numbers BEFORE touching the
             // recovery buffer. Crypt::next_seq pre-increments from 0, so the
             // smallest legitimate inbound seq is 1. A value of 0 would underflow
-            // the `in_seqs.0 - 1` subtraction below. Any value outside the
-            // buffer's [head, tail] window is malformed and must be rejected
-            // without emptying the buffer.
+            // the `in_seqs.0 - 1` subtraction below. The full window validation
+            // (against the session's outbound counter and the buffered window)
+            // runs only after the peer authenticates, below.
             if in_seqs.0 == 0 {
                 log::error!(
                     "Refusing recovery for session {:?}: in_seq underflows",
@@ -127,29 +127,65 @@ where
                 let requested = in_seqs.0 - 1;
                 let head = rbuf.head_seq();
                 let tail = rbuf.tail_seq();
-                // Empty buffer (head == tail == 0) means the server has nothing
-                // buffered for retransmission: a legitimate client always asks
-                // for seq >= 1, so any non-empty request against an empty
-                // window is also a malformed recovery attempt.
-                if tail == 0 || requested < head || requested > tail {
+                // Judge the declaration against the session's authoritative
+                // outbound counter, not only the surviving buffer window.
+                // Two legitimate shapes used to be rejected outright:
+                //  - a leg that dropped after the `OpenResponse` and before
+                //    the first buffered data frame: the window is empty
+                //    (`tail == 0`) while the launcher's last received seq is
+                //    exactly the last seq the session encrypted. Refusing it
+                //    lost a recoverable session.
+                //  - `requested == head - 1`: the launcher acknowledged none
+                //    of the buffered window, which simply means "re-send all
+                //    of it", not a malformed recovery.
+                // Malformed shapes: a declaration above everything the
+                // session ever encrypted (fabricated), and a declaration
+                // below the retained window whose gap frames were neither
+                // buffered nor acknowledged (an eviction hole — no
+                // contiguous retransmission is possible).
+                let last_sent = std::cmp::max(tail, session.seqs().1);
+                if requested > last_sent {
                     log::error!(
-                        "Refusing recovery for session {:?}: requested seq {} outside buffer window [{}, {}]",
+                        "Refusing recovery for session {:?}: requested seq {} exceeds last sent seq {} (buffer window [{}, {}])",
                         session.id(),
-                        in_seqs.0,
+                        requested,
+                        last_sent,
                         head,
                         tail
                     );
                     return Err(anyhow::anyhow!(
-                        "Invalid recovery sequence: requested seq outside recovery buffer window"
+                        "Invalid recovery sequence: requested seq beyond last sent seq"
                     ));
                 }
-                rbuf.skip(requested)?;
-                log::debug!(
-                    "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
-                    requested,
-                    session.id(),
-                    rbuf,
-                );
+                if head != 0 && requested < head - 1 {
+                    log::error!(
+                        "Refusing recovery for session {:?}: requested seq {} below retained window [{}, {}] (evicted gap)",
+                        session.id(),
+                        requested,
+                        head,
+                        tail
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Invalid recovery sequence: requested seq below recovery buffer window"
+                    ));
+                }
+                // Skip only into the retained window. At or below `head - 1`
+                // the whole window is due for retransmission and must stay
+                // intact — `skip` walks from the front and would drain it.
+                // A `NotFound` here means `requested` is above the retained
+                // `tail` (everything buffered was acknowledged, the remaining
+                // declared frames were encrypted but not yet on the wire at
+                // snapshot time): the drain consumed the full window, which
+                // is exactly the correct outcome, so it is not an error.
+                if head != 0 && requested >= head {
+                    let _ = rbuf.skip(requested);
+                    log::debug!(
+                        "Skipped packets until seq {:?} for session {:?} recovery (buf: {:?})",
+                        requested,
+                        session.id(),
+                        rbuf,
+                    );
+                }
             }
             // Invalidate the old equiv session ID before minting a new
             // one: the id the peer just used must stop resolving the

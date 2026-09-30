@@ -61,6 +61,148 @@ fn push_buffered(session: &Session, seq: u64) {
         .expect("buffer push");
 }
 
+/// Advance the session's shared outbound counter without touching the
+/// recovery buffer — exactly what a recovery handshake's `OpenResponse`
+/// does in production. Keeps `session.seqs().1` consistent with a buffer
+/// window the test stamps manually.
+fn advance_outbound(session: &Session, times: u64) {
+    let (_in, mut out) = session.server_tunnel_crypts().expect("crypts");
+    let mut buf = PacketBuffer::new();
+    buf.set_data(b"advance").expect("set_data");
+    for _ in 0..times {
+        out.encrypt(0, 7, &mut buf).expect("encrypt");
+    }
+}
+
+/// Drive `recover()` with a real AEAD ticket confirm, then cut the leg so a
+/// passed window validation can only fail later on the `OpenResponse` write.
+/// This pins the window-check outcome deterministically: an error whose
+/// message contains `Invalid recovery sequence` means the recovery was
+/// refused at the window check; anything else (the write error) means the
+/// validation accepted it.
+async fn recover_with_valid_confirm(
+    equiv: &Ticket,
+    secret: &SharedSecret,
+    ticket: &Ticket,
+    in_seqs: (u64, u64),
+) -> anyhow::Result<()> {
+    let material = derive_tunnel_material(secret, ticket)?;
+    let (client, server) = tokio::io::duplex(1024);
+    let (r, w) = tokio::io::split(server);
+    let ip: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let equiv_owned = *equiv;
+    let handle = tokio::spawn(async move { recover(r, w, &equiv_owned, in_seqs, ip).await });
+
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut confirm = PacketBuffer::new();
+    confirm.set_data(equiv.as_ref())?;
+    Crypt::new(&material.key_receive, 0).encrypt(0, equiv.as_ref().len(), &mut confirm)?;
+    confirm.write(&mut cw).await?;
+    drop((cr, cw)); // cut the leg: the handshake can go no further than the response write
+
+    tokio::time::timeout(Duration::from_secs(3), handle)
+        .await
+        .expect("recover must not hang after a valid confirm and a cut leg")
+        .expect("recover task panicked")
+}
+
+/// A leg that dropped after the previous leg's `OpenResponse` and before any
+/// data frame was buffered: the retransmission window is empty while the
+/// launcher declares the last seq the session encrypted. The declaration is
+/// legitimate — nothing is pending retransmission — and must not be refused
+/// just because `tail_seq()` is zero.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_accepts_empty_buffer_after_last_encrypted_frame() {
+    let (session, equiv, secret, ticket) = hermetic_session(5).await;
+    advance_outbound(&session, 3); // the wire reached seq 3
+
+    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (4, 1)).await;
+    if let Err(e) = res {
+        assert!(
+            !e.to_string().contains("Invalid recovery sequence"),
+            "legitimate empty-buffer recovery refused: {e}"
+        );
+    }
+    SessionManager::get_instance().remove_session(session.id());
+}
+
+/// `requested == head - 1`: the launcher acknowledged none of the buffered
+/// window, which means "re-send all of it". The window must survive the
+/// handshake untouched for the new stream to replay it.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_keeps_whole_window_when_launcher_acked_nothing() {
+    let (session, equiv, secret, ticket) = hermetic_session(6).await;
+    push_buffered(&session, 2);
+    advance_outbound(&session, 2); // tail == last sent: production-consistent
+
+    let res = recover_with_valid_confirm(&equiv, &secret, &ticket, (2, 1)).await;
+    if let Err(e) = res {
+        assert!(
+            !e.to_string().contains("Invalid recovery sequence"),
+            "re-send-all recovery refused: {e}"
+        );
+    }
+    assert_eq!(
+        session.recovery_buffer().lock().len(),
+        1,
+        "the window due for retransmission was destroyed instead of replayed"
+    );
+    SessionManager::get_instance().remove_session(session.id());
+}
+
+/// A declaration above everything the session ever encrypted cannot be
+/// satisfied by any retransmission: refuse it and leave the window intact.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_refuses_declaration_above_last_encrypted_frame() {
+    let (session, equiv, secret, ticket) = hermetic_session(7).await;
+    push_buffered(&session, 2);
+    advance_outbound(&session, 2);
+
+    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (5, 1))
+        .await
+        .expect_err("a fabricated declaration must be refused");
+    assert!(
+        err.to_string().contains("beyond last sent seq"),
+        "expected the last-sent refusal, got: {err}"
+    );
+    assert_eq!(
+        session.recovery_buffer().lock().len(),
+        1,
+        "a refused recovery must leave the window intact"
+    );
+    SessionManager::get_instance().remove_session(session.id());
+}
+
+/// A declaration below the retained window whose gap frames were neither
+/// buffered nor acknowledged is an eviction hole: no contiguous
+/// retransmission can satisfy it, so refuse it.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_refuses_declaration_below_evicted_gap() {
+    let (session, equiv, secret, ticket) = hermetic_session(8).await;
+    for seq in 5..8 {
+        push_buffered(&session, seq); // head 5; 1..4 were evicted
+    }
+    advance_outbound(&session, 7);
+
+    let err = recover_with_valid_confirm(&equiv, &secret, &ticket, (3, 1))
+        .await
+        .expect_err("an evicted-gap declaration must be refused");
+    assert!(
+        err.to_string().contains("below recovery buffer window"),
+        "expected the evicted-gap refusal, got: {err}"
+    );
+    assert_eq!(
+        session.recovery_buffer().lock().len(),
+        3,
+        "a refused recovery must leave the window intact"
+    );
+    SessionManager::get_instance().remove_session(session.id());
+}
+
 /// An unauthenticated Recover (equiv id known, no key) must not mutate the
 /// victim's recovery buffer nor hold the attach lock: the window check and
 /// `skip` run only AFTER the AEAD ticket-confirm authenticates the peer, so a

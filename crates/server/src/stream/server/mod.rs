@@ -272,17 +272,32 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                 result = self.receiver.recv_async() => {
                     match result {
                         Ok(channel_data) => {
+                            // Encrypt the frame *before* stamping it: the
+                            // recovery-buffer label must be the sequence the
+                            // frame actually carries on the wire. A
+                            // prediction taken before the encrypt
+                            // (`current_seq() + 1`) desynchronizes from the
+                            // wire as soon as another holder of the shared
+                            // session counter advances it between the read
+                            // and the encrypt (e.g. a recovery handshake
+                            // overlapping this, still-live stream), and a
+                            // later recovery then mis-skips or refuses the
+                            // window.
+                            let channel_id = channel_data.channel_id;
+                            let payload_len = channel_data.payload.len();
+                            let mut buffer = PacketBuffer::from(channel_data.payload.as_ref());
+                            self.crypt.encrypt(channel_id, payload_len, &mut buffer)?;
+                            let seq = buffer.seq()?;
                             // Store on recovery buffer, so if we fail to send, we can retry on next connection.
-                            // The buffer is behind a Mutex, so we clone the payload here and release the
+                            // The buffer is behind a Mutex, so we move the payload in and release the
                             // lock before sending; the item stored in the buffer remains valid for the
                             // next recover replay.
-                            let to_send = {
+                            {
                                 let mut buf = recovery_buffer.lock();
-                                let stored = buf.push(self.crypt.current_seq() + 1, channel_data)?;
-                                stored.clone()
-                            };
-                            self.send_data(&to_send).await?;
-                            if to_send.channel_id != 0 {
+                                buf.push(seq, channel_data)?;
+                            }
+                            buffer.write(&mut self.writer).await?;
+                            if channel_id != 0 {
                                 // Download to the launcher: payload bytes
                                 // only (channel 0 is control traffic), and
                                 // only counted here — recovery re-sends are
@@ -290,7 +305,7 @@ impl<W: AsyncWriteExt + Unpin> TunnelServerOutboundStream<W> {
                                 // the rare packet that first lands through
                                 // `recover_buffer`. Fine for informational
                                 // broker stats.
-                                self.traffic.add_recv(to_send.payload.len() as u64);
+                                self.traffic.add_recv(payload_len as u64);
                             }
                         }
                         Err(e) => {

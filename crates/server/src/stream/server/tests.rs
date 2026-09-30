@@ -755,3 +755,129 @@ async fn test_server_inbound_keepalive_data_frame_sustains() {
     handle.await.unwrap().unwrap();
     assert!(stop.is_triggered());
 }
+
+/// The sequence number stamped into the recovery buffer must be the one the
+/// frame actually carries on the wire. Stamping a *prediction*
+/// (`current_seq() + 1`) desynchronizes the label from the wire whenever a
+/// second holder of the session's shared outbound counter encrypts between
+/// the prediction and the encrypt — exactly what a recovery handshake does
+/// while an old stream is still live. The buffer then holds labels that no
+/// window check can satisfy, and recovery fails.
+///
+/// Pinned here with a real interleave: the outbound stream sends payloads
+/// while another task encrypts under the same shared counter on the same
+/// runtime. Drain order is wire order (single writer, FIFO buffer).
+#[serial_test::serial(manager)]
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_buffer_labels_match_the_sequence_on_the_wire() -> Result<()> {
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, stream_crypt) = session.server_tunnel_crypts()?;
+    let stop = Trigger::new();
+    let (tx, rx) = flume::bounded(100);
+    let (client, server) = tokio::io::duplex(65536);
+    let (mut client_reader, _client_write) = tokio::io::split(client);
+
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        stream_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let stream_handle = tokio::spawn(async move {
+        let _ = outbound.run().await;
+    }); // the channel-close exit is expected
+
+    // Independent holder over the session's shared outbound counter: every
+    // encrypt consumes a real sequence number that the stream's frames are
+    // interleaved with. The first encrypt happens inline, before any payload
+    // is queued, so the wire cannot start at seq 1 even on a lucky schedule.
+    let mut interloper = {
+        let (_in, out) = session.server_tunnel_crypts()?;
+        out
+    };
+    let mut hammer_buf = PacketBuffer::new();
+    hammer_buf.set_data(b"interleave").unwrap();
+    interloper.encrypt(0, 10, &mut hammer_buf).unwrap();
+    let hammer_stop = stop.clone();
+    let hammer_handle = tokio::spawn(async move {
+        for _ in 0..100u32 {
+            if hammer_stop.is_triggered() {
+                break;
+            }
+            interloper.encrypt(0, 10, &mut hammer_buf).unwrap(); // consumes a real seq each round
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let payloads: Vec<Vec<u8>> = (0..20u32)
+        .map(|i| format!("rld-{i:03}").repeat(8).into_bytes())
+        .collect();
+    let expected: Vec<Vec<u8>> = payloads.clone();
+    for p in payloads {
+        tx.send(PayloadWithChannel {
+            channel_id: TEST_CHANNEL_ID,
+            payload: p.into(),
+        })
+        .unwrap();
+    }
+
+    // The launcher-side crypt: decrypts server->tunnel frames under key_send.
+    let material =
+        shared::crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())?;
+    let mut launcher_crypt = Crypt::new(&material.key_send, 0);
+
+    let mut stream_seq: Vec<u64> = Vec::new();
+    let mut expect_idx = 0usize;
+    while expect_idx < expected.len() {
+        let mut header = [0u8; 10];
+        client_reader.read_exact(&mut header).await?;
+        let length = u16::from_be_bytes([header[8], header[9]]) as usize;
+        let mut frame = header.to_vec();
+        frame.resize(10 + length, 0);
+        client_reader.read_exact(&mut frame[10..]).await?;
+
+        let wire_seq = u64::from_be_bytes(frame[0..8].try_into().unwrap());
+        let mut pb = PacketBuffer::new();
+        pb.full_buffer_mut()[..frame.len()].copy_from_slice(&frame);
+        launcher_crypt.decrypt(&mut pb)?;
+        if pb.data() == expected[expect_idx].as_slice() {
+            assert_eq!(pb.channel_id(), TEST_CHANNEL_ID);
+            stream_seq.push(wire_seq);
+            expect_idx += 1;
+        }
+    }
+
+    drop(tx);
+    stop.trigger();
+    let _ = stream_handle.await;
+    let _ = hammer_handle.await;
+
+    let labels: Vec<u64> = {
+        let rec_buf = session.recovery_buffer();
+        let mut buf = rec_buf.lock();
+        let mut v = Vec::new();
+        while let Some((_packet, seq)) = buf.take_unsent_packet() {
+            v.push(seq);
+        }
+        v
+    };
+
+    assert!(!stream_seq.is_empty());
+    // Every interloper encrypt consumed a real sequence number: the wire seqs
+    // of the stream frames are not contiguous.
+    assert!(
+        stream_seq.windows(2).any(|w| w[1] - w[0] > 1),
+        "the interleave did not consume any outbound sequences (test degenerated)"
+    );
+    assert_eq!(
+        labels, stream_seq,
+        "recovery-buffer labels drifted from the sequences on the wire"
+    );
+
+    SessionManager::get_instance().remove_session(session.id());
+    Ok(())
+}
