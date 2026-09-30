@@ -210,7 +210,11 @@ where
             let (udp_token, udp_port) = match session.udp() {
                 Some(udp) => (
                     udp.token,
-                    crate::config::get().read().unwrap().udp_sockaddr().port(),
+                    crate::config::get()
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .udp_sockaddr()
+                        .port(),
                 ),
                 None => ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0),
             };

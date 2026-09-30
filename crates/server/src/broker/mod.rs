@@ -282,7 +282,7 @@ pub fn spawn_stop_notification(ticket: Ticket, sent: u64, recv: u64) {
 
 pub fn get() -> impl BrokerApi {
     let config = config::get();
-    let cfg = config.read().unwrap();
+    let cfg = config.read().unwrap_or_else(|e| e.into_inner());
     HttpBrokerApi::new(
         &cfg.ticket_api_url,
         &cfg.broker_auth_token,

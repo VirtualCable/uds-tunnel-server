@@ -61,16 +61,22 @@ async fn main() {
     );
     // Warn on any configuration that materially weakens security posture.
     // Must run after set_log_level so the warnings are actually emitted.
-    config::get().read().unwrap().report_dangerous_settings();
+    config::get()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .report_dangerous_settings();
 
     // Read config
     // Crate a listener with the configured address
-    let listen_sock_addr = config::get().read().unwrap().listen_sockaddr();
+    let listen_sock_addr = config::get()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .listen_sockaddr();
 
     session::RECOVERY_BUFFER_SIZE.store(
         config::get()
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .recovery_buffer_size
             .unwrap_or(64)
             * 1024, // Convert from Kb to bytes
@@ -87,7 +93,7 @@ async fn main() {
     {
         let (udp_enabled, udp_addr) = {
             let config_guard = config::get();
-            let config = config_guard.read().unwrap();
+            let config = config_guard.read().unwrap_or_else(|e| e.into_inner());
             (config.udp_enabled(), config.udp_sockaddr())
         };
         if udp_enabled {

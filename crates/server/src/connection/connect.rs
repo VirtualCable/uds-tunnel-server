@@ -163,7 +163,10 @@ where
             // Compute the predicate synchronously and drop the config
             // read-lock before any `.await` so the guard does not
             // cross an await point (which would break `tokio::spawn`).
-            let per_remote_cap = config::get().read().unwrap().max_sessions_per_remote;
+            let per_remote_cap = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .max_sessions_per_remote;
             if let Some(per_remote) = per_remote_cap
                 && session_manager.count_by_remote(src_ip) >= per_remote
             {
@@ -194,7 +197,10 @@ where
             // config allow it. Keys derive from the same ticket shared
             // secret (dedicated HKDF label), so no extra handshake is
             // needed; a zero token on the OpenResponse means "disabled".
-            let udp_enabled = config::get().read().unwrap().udp_enabled();
+            let udp_enabled = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .udp_enabled();
             let (udp_token, udp_port) = if ticket_info.enable_udp() && udp_enabled {
                 let token = random_token();
                 let (inbound, outbound) = get_udp_crypts(&shared_secret, ticket)?;
@@ -202,7 +208,14 @@ where
                 log::debug!("UDP relay leg enabled for ticket {:?}", ticket);
                 // Advertise the resolved UDP port so the client can reach
                 // the relay even when it is split from the TCP listener.
-                (token, config::get().read().unwrap().udp_sockaddr().port())
+                (
+                    token,
+                    config::get()
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .udp_sockaddr()
+                        .port(),
+                )
             } else {
                 // A zeroed token means "UDP disabled"; the port is ignored.
                 ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0)

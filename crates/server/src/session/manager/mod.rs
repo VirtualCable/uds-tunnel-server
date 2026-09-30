@@ -53,7 +53,7 @@ pub struct SessionManager {
 
 impl fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("SessionManager")
             .field("sessions_count", &sessions.len())
             .finish()
@@ -76,8 +76,11 @@ impl SessionManager {
     /// `get_equiv_session` / `remove_equiv_session` bounded even
     /// under session-flood conditions.
     pub fn add_session(&self, session: Session) -> Result<Arc<Session>> {
-        let max = config::get().read().unwrap().max_sessions();
-        let mut sessions = self.sessions.write().unwrap();
+        let max = config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_sessions();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if sessions.len() >= max {
             log::warn!(
                 "Refusing new session: SessionManager at cap ({} of {})",
@@ -106,23 +109,31 @@ impl SessionManager {
     }
 
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.get(id).cloned()
     }
 
     pub fn remove_session(&self, id: &SessionId) {
-        let mut sessions = self.sessions.write().unwrap();
-        if let Some(session) = sessions.get(id) {
+        // Unlink under the lock, then work on the taken Arc after the
+        // guard is released: if this call holds the last reference,
+        // `Session::Drop` (stop trigger + broker notification) runs
+        // without the global session map locked, so nothing the teardown
+        // path touches can re-enter these manager methods under the lock.
+        let session = {
+            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+            sessions.remove(id)
+        };
+        if let Some(session) = session {
             session.stop.trigger();
             // Drop the UDP leg from the relay token map, if any.
             if let Some(udp) = session.udp() {
                 crate::udp::unregister_token(&udp.token);
             }
-            sessions.remove(id);
+            // `session` is dropped here, outside the write lock. The
+            // session's `current_equiv_id` lives inside the Session and
+            // is dropped together with the Arc, so no global equiv map
+            // needs to be cleaned up here.
         }
-        // The session's `current_equiv_id` lives inside the Session and
-        // is dropped together with the Arc, so no global equiv map needs
-        // to be cleaned up here.
     }
 
     pub async fn finish_all_sessions(&self) {
@@ -148,7 +159,7 @@ impl SessionManager {
             // `Session::Drop` could be killed before the runtime shuts
             // down.
             let sessions: Vec<Arc<Session>> = {
-                let mut sessions = self.sessions.write().unwrap();
+                let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
                 sessions.drain().map(|(_, session)| session).collect()
             };
             if sessions.is_empty() {
@@ -203,14 +214,17 @@ impl SessionManager {
     }
 
     pub fn count(&self) -> usize {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.len()
     }
 
     /// Effective cap from `ServerConfig::max_sessions()`. Convenience
     /// for tests and for the connection layer when logging rejections.
     pub fn max_sessions(&self) -> usize {
-        config::get().read().unwrap().max_sessions()
+        config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_sessions()
     }
 
     /// Number of currently registered sessions whose `src_ip` matches
@@ -218,7 +232,7 @@ impl SessionManager {
     /// configured, otherwise the global `add_session` cap already
     /// bounds the active set.
     pub fn count_by_remote(&self, remote: std::net::SocketAddr) -> usize {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.values().filter(|s| s.src_ip() == remote).count()
     }
 
@@ -254,7 +268,7 @@ impl SessionManager {
     /// that the client knows is accepted; the internal session id is
     /// never exposed and is not a valid key.
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions
             .values()
             .find(|s| s.current_equiv_id().as_ref() == Some(id))
@@ -278,7 +292,7 @@ impl SessionManager {
     /// any. Used by `recover::recover` to invalidate the inbound
     /// recover_session_id before minting a new one.
     pub fn remove_equiv_session(&self, from: &SessionId) {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = sessions
             .values()
             .find(|s| s.current_equiv_id().as_ref() == Some(from))
