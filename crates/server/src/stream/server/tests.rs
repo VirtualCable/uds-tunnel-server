@@ -776,7 +776,13 @@ async fn recovery_buffer_labels_match_the_sequence_on_the_wire() -> Result<()> {
     let (_, stream_crypt) = session.server_tunnel_crypts()?;
     let stop = Trigger::new();
     let (tx, rx) = flume::bounded(100);
-    let (client, server) = tokio::io::duplex(65536);
+    // Capacity 1, not 64 KiB: every duplex write must hand its bytes to the
+    // reader before it can continue, so the writer task genuinely yields
+    // between frames and the interloper's encrypt is guaranteed to slip in.
+    // A large buffer lets the writer drain all payloads in one go under CPU
+    // contention, and the test's precondition ("the interleave consumed a
+    // seq") degenerates ~half the time.
+    let (client, server) = tokio::io::duplex(1);
     let (mut client_reader, _client_write) = tokio::io::split(client);
 
     let mut outbound = TunnelServerOutboundStream::new(

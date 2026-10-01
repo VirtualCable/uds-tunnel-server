@@ -50,8 +50,6 @@ use super::consts;
 #[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct SharedSecret([u8; 32]);
 
-/// This code block is implementing functionality for the `SharedSecret` struct in Rust. Here's a
-/// breakdown of what each part is doing:
 impl SharedSecret {
     pub fn new(secret: [u8; 32]) -> Self {
         SharedSecret(secret)

@@ -29,7 +29,14 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+// Module-wide allowance, deliberate: the handshake paths are driven through
+// the public entry points, so some constructors are only exercised by tests
+// (e.g. `OpenResponse::new`, the no-UDP/OFF shape) and a few helper
+// signatures keep parameters for symmetry that single call sites do not
+// read. Without this, `cargo build` (no cfg(test)) flags the test-only
+// constructors as dead and the symmetric helpers as unused.
 #![allow(dead_code, unused_variables)]
+
 use anyhow::Result;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

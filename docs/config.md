@@ -16,17 +16,25 @@ field accepted by the file. Unknown fields are ignored by
 
 ## Environment overrides
 
-Three settings can be overridden via environment variables
-without editing the file. They are applied once, when the
+The knobs below can be overridden via environment variables without
+editing the file. Config overrides are applied once, when the
 configuration is first read at startup; the effective config is
 cached in a process-wide `OnceLock`, so editing the file or the
 environment afterwards has no effect until the server is restarted.
 
-| Variable                   | Overrides                  |
-|----------------------------|----------------------------|
-| `UDSTUNNEL_LISTEN_ADDR`    | `listen_addr`              |
-| `UDSTUNNEL_LISTEN_PORT`    | `listen_port` (must parse) |
-| `UDSTUNNEL_UDP_LISTEN_PORT`| `udp_listen_port` (must parse) |
+| Variable                    | Overrides                                            |
+|-----------------------------|------------------------------------------------------|
+| `UDSTUNNEL_LISTEN_ADDR`     | `listen_addr`                                        |
+| `UDSTUNNEL_LISTEN_PORT`     | `listen_port` (must parse)                           |
+| `UDSTUNNEL_UDP_LISTEN_PORT` | `udp_listen_port` (must parse)                       |
+| `UDSTUNNEL_TUNNEL_LOG_LEVEL`| `log_level` (the tracing filter level)               |
+| `UDSTUNNEL_TUNNEL_LOG_PATH` | Directory the `uds-tunnel.log` file lives in         |
+| `UDSTUNNEL_STDERR_LOG_FILE` | stderr log target override (release builds)          |
+
+The log variables are read by the logging setup rather than the
+config loader, so they apply regardless of the TOML file's own
+`log_level`; the entrypoint sets `UDSTUNNEL_TUNNEL_LOG_PATH` for the
+Docker image.
 
 ## Fields
 
@@ -173,7 +181,8 @@ environment afterwards has no effect until the server is restarted.
 
 #### `rekey_seq_log2`
 
-- Type: unsigned integer (`0..=63`)
+- Type: unsigned 8-bit integer (stored as `0..=255`; the effective
+  threshold is clamped to `0..=63`, see below)
 - Default: `20` (see `DEFAULT_REKEY_LOG2` in `crates/shared/src/crypt/rekey.rs`)
 - Rekeying threshold, as log2 of the frames per AES-GCM key epoch: every
   `2^k` sequence numbers (per direction, per transport), the tunnel re-derives
@@ -181,8 +190,12 @@ environment afterwards has no effect until the server is restarted.
   so a single key never protects more than `2^k` AES-GCM invocations (the
   NIST SP 800-38D per-key bound). `0` disables rekeying entirely (single key
   for the whole session lifetime, the pre-rekeying wire format); `1..=63`
-  re-derives `epoch = seq >> k` deterministically, with no rekey handshake
-  and no transition window. Values above `63` would make `seq >> k` undefined,
+  re-derives `epoch = saturating_sub(seq, seq_base) >> k` deterministically,
+  with no rekey handshake and no transition window. `seq_base` is the
+  per-transport epoch anchor: `0` for the TCP leg (counters start near zero)
+  and `2^63` (`datagram::INITIAL_SEQ`) for the UDP leg — whose first
+  datagram must sit in epoch 0 on the legacy key despite its huge absolute
+  seq. Values of `k` above `63` would make the shift undefined,
   so they are clamped to `63` with a warning instead of poisoning the
   handshake.
 - **Rollout:** the threshold is owned by the server and adopted by the

@@ -366,7 +366,7 @@ async fn timed_out_recover_preserves_legitimate_recovery() -> anyhow::Result<()>
 /// *same* `k` even if the config changed meanwhile: the handler re-advertises
 /// `session.rekey_log2()` (never re-reads the config) and the crypts it
 /// rebuilds for the session epoch by the pinned threshold. Threat model for
-/// rekeying (docs/plan/rekeying.md §3): if a recover re-read config, a
+/// rekeying (docs/rekeying-contract.md §4): if a recover re-read config, a
 /// mid-life config flip would silently drift the key schedule and the
 /// launcher — still holding the original `k` — would diverge hard.
 #[serial_test::serial(config, manager)]

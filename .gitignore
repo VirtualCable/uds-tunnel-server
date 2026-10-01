@@ -8,3 +8,4 @@ AGENTS.md
 opencode.jsonc
 # Added by code-review-graph
 .code-review-graph/
+/REVIEW*.md

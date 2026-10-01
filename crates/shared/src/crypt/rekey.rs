@@ -87,7 +87,7 @@ pub const MAX_REKEY_LOG2: u8 = 63;
 
 /// Default rekey threshold (`2^20` frames per epoch). Unset in the server
 /// config resolves to this; justified against NIST SP 800-38D limits in the
-/// design doc (`docs/plan/rekeying.md` §2).
+/// cross-repo contract (`docs/rekeying-contract.md` §9).
 pub const DEFAULT_REKEY_LOG2: u8 = 20;
 
 /// The HKDF PRK of a session: `Extract(salt = ticket, IKM = shared_secret)`.
@@ -130,7 +130,13 @@ impl SessionPrk {
             &mut okm,
         )
         .unwrap_or_else(|_| unreachable!("32-byte output is always within the HKDF limit"));
-        SharedSecret::new(okm)
+        // `okm` is a `[u8; 32]`, i.e. `Copy`: the array is copied into the
+        // `SharedSecret` (which is itself `ZeroizeOnDrop`) and this local
+        // still holds the raw key material, so it must be wiped explicitly,
+        // exactly as `derive_tunnel_material` does for its 108-byte okm.
+        let secret = SharedSecret::new(okm);
+        okm.zeroize();
+        secret
     }
 }
 
@@ -235,6 +241,11 @@ impl RekeyState {
         if epoch == 0 {
             return self.epoch0_cipher.clone();
         }
+        // `epoch0_only` carries a zero PRK: with `k == 0` the epoch is
+        // pinned to 0 by `epoch_of`, so expanding anything past epoch 0 here
+        // would derive a key from a public (all-zero) PRK. Unreachable by
+        // construction today; assert it stays that way.
+        assert!(self.k != 0, "epoch > 0 with rekeying OFF (zero-PRK state)");
         let key = self
             .prk
             .expand_epoch_key(self.transport, self.dir, self.k, epoch);
@@ -413,5 +424,66 @@ mod tests {
         assert_eq!(udp.epoch_of(0), 0);
         // A crafted seq at u64::MAX cannot panic the shift.
         assert_eq!(udp.epoch_of(u64::MAX), (u64::MAX - INITIAL_SEQ) >> 8);
+    }
+
+    /// Known-answer table for `epoch_of`, the counter→epoch mapping. The
+    /// expected values are *independent literals* (decimal, computed with a
+    /// bignum calculator outside this crate, not by `epoch_of` itself), so
+    /// the test pins the whole contract — anchor, saturation, the `k = 0`
+    /// rule — not just a self-consistent recomputation of the same formula.
+    /// `seq_base` is `0` for the TCP leg (counters start near zero) and
+    /// `2^63` for UDP (its first datagram, at `INITIAL_SEQ + 1`, must sit in
+    /// epoch 0 on the legacy key despite the huge absolute seq). Any drift
+    /// against the launcher's mirror table breaks both repos in lockstep.
+    #[test]
+    fn epoch_of_known_answer() {
+        const INITIAL_SEQ: u64 = 1 << 63;
+        const TCP: u64 = 0;
+        let (secret, ticket) = fixture();
+        let prk = Arc::new(SessionPrk::derive(&secret, &ticket));
+        let epoch0_cipher = Arc::new(Aes256Gcm::new(
+            SharedSecret::new([0xCCu8; 32]).as_ref().into(),
+        ));
+        let state = |k: u8, seq_base: u64| {
+            RekeyState::new(
+                prk.clone(),
+                TRANSPORT_TCP,
+                DIR_SERVER_TO_LAUNCHER,
+                k,
+                seq_base,
+                epoch0_cipher.clone(),
+            )
+        };
+
+        // (k, seq_base, seq, expected epoch) — literals from a bignum tool.
+        let cases: [(u8, u64, u64, u64); 14] = [
+            // TCP anchor (base 0), k = 8: boundaries at 256 and 512.
+            (8, TCP, 0, 0),
+            (8, TCP, 255, 0),
+            (8, TCP, 256, 1),
+            (8, TCP, 512, 2),
+            (8, TCP, u64::MAX, 72057594037927935),
+            // UDP anchor (base 2^63), k = 8: same boundaries relative to the
+            // base, so the first datagram is epoch 0.
+            (8, INITIAL_SEQ, INITIAL_SEQ + 1, 0),
+            (8, INITIAL_SEQ, INITIAL_SEQ + 255, 0),
+            (8, INITIAL_SEQ, INITIAL_SEQ + 256, 1),
+            (8, INITIAL_SEQ, INITIAL_SEQ + 512, 2),
+            (8, INITIAL_SEQ, u64::MAX, 36028797018963967),
+            // Crafted seqs below the anchor saturate to epoch 0 (the AEAD
+            // check rejects them later; the epoch math must not underflow).
+            (8, INITIAL_SEQ, 0, 0),
+            (8, INITIAL_SEQ, 7, 0),
+            // k = 0 (OFF): every seq is epoch 0, whatever the anchor.
+            (0, TCP, 0, 0),
+            (0, INITIAL_SEQ, u64::MAX, 0),
+        ];
+        for (k, seq_base, seq, expected) in cases {
+            assert_eq!(
+                state(k, seq_base).epoch_of(seq),
+                expected,
+                "k={k} base={seq_base} seq={seq}"
+            );
+        }
     }
 }

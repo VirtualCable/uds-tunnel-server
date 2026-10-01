@@ -29,11 +29,8 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-// Version of server
-pub const VERSION: &str = "v5.0.0";
-
-// HTTP related constants
-pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
+// User-Agent sent to the broker API (broker-side logging correlates on it).
+pub const BROKER_USER_AGENT: &str = "UDSTunnelServer/5.0";
 
 // Timeout constants
 pub const SERVER_RECOVERY_GRACE_SECS: u64 = 5; // Time given to recover server connection

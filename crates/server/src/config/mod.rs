@@ -106,6 +106,28 @@ impl ServerConfig {
                  Use only for diagnostics against self-signed brokers; never in production."
             );
         }
+        // Rekeying explicitly switched off. The per-epoch key rotation exists
+        // to bound AEAD invocations per key (NIST SP 800-38D); `0` gives up
+        // that bound for the whole session lifetime.
+        if self.rekey_seq_log2 == Some(0) {
+            log::warn!(
+                "rekey_seq_log2 = 0: tunnel key rotation is DISABLED. Every frame of a \
+                 session is encrypted under one key, with no bound on AEAD invocations \
+                 per key (NIST SP 800-38D). Use only for pre-rekeying compatibility \
+                 diagnostics; never in production."
+            );
+        }
+        // Data-idle session recycling explicitly disabled: a session that
+        // stops carrying payload lives forever (leg keep-alive Nops do not
+        // count as data), widening the window of a leaked-but-open tunnel.
+        if self.session_idle_data_timeout_secs == Some(0) {
+            log::warn!(
+                "session_idle_data_timeout_secs = 0: idle-session recycling is DISABLED. \
+                 Sessions without payload traffic are never ended. Prefer the default \
+                 ({} s) unless a broker-side lifecycle fully replaces it.",
+                DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS
+            );
+        }
     }
 
     pub fn listen_sockaddr(&self) -> SocketAddr {

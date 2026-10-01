@@ -63,15 +63,22 @@ enum CommandType {
     ChannelError,
     // ConnectionError:
     //   - From client to tunnel, not used
-    //   - From tunnel to client, means "an error happened on connection", should not happpen, so this may be considered fatal?
+    //   - From tunnel to client, means "an error happened on the connection".
+    //     Currently the server only ever *parses* this command: its own fatal
+    //     errors tear the leg down directly, without sending the frame.
     ConnectionError,
-    // NOP: Used to skip a packet, for example, on a out of order packet, or a se keep-alive
-    //   - From client to tunnel, means "this packet is a NOP, ignore it"
-    //   - From tunnel to client, means "this packet is a NOP, ignore
+    // NOP: skip / no-op frame. In practice it is the launcher's keep-alive on
+    // channel 0: the server tunnel consumes it (proves the leg alive) and it
+    // never counts as session payload data for the idle-data cap.
+    //   - From client to tunnel: consumed by the server inbound stream.
+    //   - From tunnel to client: the launcher ignores it.
     Nop,
 
     // Unknown command:
-    //    - Just a placeholder for unknown commands. Will cause a ConnectionError ALWAYS
+    //    - Placeholder for command bytes this version does not know. Parsing
+    //      fails ("Unknown command received"), and a parse error on the
+    //      control channel is fatal for the session; the peer is simply
+    //      dropped (no ConnectionError frame is sent).
     #[num_enum(default)]
     Unknown = 255,
 }

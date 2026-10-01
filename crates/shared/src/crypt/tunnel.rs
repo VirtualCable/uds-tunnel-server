@@ -121,23 +121,6 @@ pub struct TunnelRekeys {
     pub outbound: Arc<RekeyState>,
 }
 
-/// Builds the server-perspective TCP rekey states for a session negotiated
-/// with threshold `k` (0 = OFF: each state collapses to a single epoch whose
-/// cipher is the legacy tunnel key, byte-identical to a pre-rekeying wire).
-pub fn build_tunnel_rekeys(
-    shared_secret: &SharedSecret,
-    ticket: &ticket::Ticket,
-    k: u8,
-) -> Result<TunnelRekeys> {
-    let material = derive_tunnel_material(shared_secret, ticket)?;
-    Ok(TunnelRekeys::from_material(
-        &material,
-        shared_secret,
-        ticket,
-        k,
-    ))
-}
-
 impl TunnelRekeys {
     /// Build the pair from a session's shared PRK and already-derived
     /// epoch-0 material (the server `Session` keeps the PRK for its whole

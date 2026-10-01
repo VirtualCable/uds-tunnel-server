@@ -221,8 +221,8 @@ where
             let response =
                 // `rekey_log2` is re-advertised from the session, never
                 // re-read from the config: a Recover must not renegotiate
-                // the key epoching of a live session (docs/plan/rekeying.md
-                // §3). The launcher already knows `k` from its Open; the
+                // the key epoching of a live session (docs/rekeying-contract.md
+                // §4). The launcher already knows `k` from its Open; the
                 // crypts above were rebuilt from `session.k` too.
                 OpenResponse::with_udp(
                     equiv_id,

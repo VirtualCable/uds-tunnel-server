@@ -477,11 +477,12 @@ async fn return_task_overshoots_the_reap_by_up_to_its_alive_check() {
 }
 
 // ---------------------------------------------------------------------------
-// 10. The return path is not pinned to the first source: ANY source that can
-//     present a valid (token, AEAD) pair becomes the return target. In the
-//     real world the source address is attacker-chosen (UDP has no handshake
-//     and source spoofing is free), which is the precondition for using the
-//     relay as a reflector.
+// 10. The return path is not pinned to the first *socket*: the port may move
+//     (NAT rebinding) — any source that presents a valid (token, AEAD) pair
+//     from the tunnel peer's *ip* re-points the return target (the ip pin of
+//     vuln-0011 rejects foreign ips outright; see probe 13). Both sources
+//     here are 127.0.0.1 with different ports, which is exactly the rebinding
+//     case the pin must keep accepting.
 // ---------------------------------------------------------------------------
 
 #[serial_test::serial(config, manager)]
@@ -545,11 +546,22 @@ async fn any_authenticating_source_can_repoint_the_return_path() {
 
 // ---------------------------------------------------------------------------
 // 11. The single relay task performs remote-leg creation INLINE. When the
-//     remote is a name that cannot be resolved, the lookup (a blocking
-//     getaddrinfo awaited on the shared loop) is retried on *every*
-//     datagram and stalls the relay for every other session.
+//     remote is a name that cannot be resolved, the *first* attempt runs a
+//     blocking getaddrinfo awaited on the shared loop and stalls every other
+//     session behind it (later datagrams of the same session are skipped by
+//     the leg-retry cooldown — probe 14 pins that).
+//
+//     IGNORED: the point of the probe is a real resolver round-trip, so it
+//     cannot be made hermetic without replacing the relay's DNS path. On a
+//     network with a black-holed resolver the lookup can take minutes, and it
+//     runs inside the `serial(config, manager)` group — far too risky for the
+//     default suite. Run explicitly (e.g. to re-baseline the head-of-line
+//     cost before changing leg creation): `cargo test -- --ignored
+//     a_failing_remote_lookup_stalls_the_shared_relay_loop`.
 // ---------------------------------------------------------------------------
 
+#[ignore = "performs a real DNS lookup for a .invalid name; stalls the serial \
+             config/manager group on networks with black-holed resolvers"]
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn a_failing_remote_lookup_stalls_the_shared_relay_loop() {
@@ -792,10 +804,17 @@ async fn source_ip_must_match_the_tcp_peer_before_repointing_the_return_path() {
 // ---------------------------------------------------------------------------
 // 14. Leg-creation backoff: after a remote-leg creation failure, the *next*
 //     datagrams of that session are skipped during the cooldown instead of
-//     repeating the (slow) address resolution inline on the shared relay loop. Only the first attempt may
-//     delay other sessions.
+//     repeating the (slow) address resolution inline on the shared relay loop.
+//     Only the first attempt may delay other sessions.
+//
+//     IGNORED for the same reason as probe 11: the first attempt is a real
+//     resolver round-trip, and it runs inside the `serial(config, manager)`
+//     group. The cooldown assertions themselves are hermetic; only the priming
+//     lookup touches DNS. Run explicitly when touching leg creation.
 // ---------------------------------------------------------------------------
 
+#[ignore = "first leg-creation attempt does a real .invalid DNS lookup; can stall \
+            the serial config/manager group on black-holed resolvers"]
 #[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn a_failing_remote_leg_only_delays_the_shared_loop_once() {

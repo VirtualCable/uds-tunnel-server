@@ -72,17 +72,6 @@ const MAX_DATAGRAM_SIZE: usize = DATAGRAM_HEADER_SIZE + MAX_DATAGRAM_PAYLOAD + c
 /// 1M datagrams/second would take ~292,000 years.
 pub const INITIAL_SEQ: u64 = 1 << 63;
 
-/// AEAD crypt for the UDP leg of the tunnel.
-///
-/// Same AES-256-GCM construction as the stream `Crypt` (nonce = seq padded to
-/// 12 bytes), but with ordering semantics relaxed for datagrams: the receiver
-/// tracks seen sequence numbers with a sliding `ReplayWindow` instead of
-/// requiring strictly increasing values, and AAD binds the session token so a
-/// datagram cannot be replayed across sessions.
-///
-/// Keys and sequence numbers are fully independent of the TCP leg. There is
-/// no retransmission and no reordering: what is lost is lost (RDPUDP handles
-/// reliability end to end).
 /// Generates a fresh random session token. Uses the same CSPRNG-backed
 /// `rand::rng()` as `Ticket::new_random`. A zero token is reserved for
 /// "UDP disabled" and is never produced here (128 random bits; the
@@ -101,6 +90,22 @@ pub fn random_token() -> UdpToken {
     token
 }
 
+/// AEAD crypt for the UDP leg of the tunnel.
+///
+/// Same AES-256-GCM construction as the stream `Crypt` (nonce = seq padded to
+/// 12 bytes), but with ordering semantics relaxed for datagrams: the receiver
+/// tracks seen sequence numbers with a sliding `ReplayWindow` instead of
+/// requiring strictly increasing values, and AAD binds the session token so a
+/// datagram cannot be replayed across sessions.
+///
+/// Keys and sequence numbers are fully independent of the TCP leg. There is
+/// no retransmission and no reordering: what is lost is lost (RDPUDP handles
+/// reliability end to end).
+///
+/// With rekeying (`k > 0`) the per-epoch key is anchored at `INITIAL_SEQ`, so
+/// the first datagram of a session sits in epoch 0 on the legacy key despite
+/// its huge absolute seq (`k = 0` collapses to a single epoch forever,
+/// byte-identical to the pre-rekeying wire format).
 pub struct DatagramCrypt {
     /// Cipher for the last datagram this crypt encrypted or authenticated.
     /// Kept as an `Arc` so an epoch crossing re-derives once and staying

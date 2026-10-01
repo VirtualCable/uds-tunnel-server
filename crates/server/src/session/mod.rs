@@ -138,8 +138,11 @@ impl UdpState {
         *self.client_addr.read().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Update the client address after a successful decrypt. Safe for
-    /// NAT rebinding: only authenticated datagrams reach this point.
+    /// Update the client address after a successful decrypt. The caller —
+    /// the UDP relay — additionally pins the *ip* to the tunnel peer
+    /// (`udp/mod.rs`): a datagram from a foreign address authenticates under
+    /// the session key but is never made the return target (anti-
+    /// reflection). Port changes (NAT rebinding) are accepted.
     pub fn set_client_addr(&self, addr: SocketAddr) {
         let mut lock = self.client_addr.write().unwrap_or_else(|e| e.into_inner());
         if *lock != Some(addr) {
@@ -383,8 +386,8 @@ pub struct Session {
     seq_out: Arc<AtomicU64>,
 
     // Session-wide rekeying parameters, owned at handshake time and NEVER
-    // renegotiated (a `Recover` reuses these exactly; docs/plan/rekeying.md
-    // §3). `rekey_log2 = 0` is OFF (single key for the session lifetime,
+    // renegotiated (a `Recover` reuses these exactly; docs/rekeying-contract.md
+    // §4). `rekey_log2 = 0` is OFF (single key for the session lifetime,
     // the pre-rekeying wire format). The PRK lives here so the HKDF extract
     // runs once per session; every crypt pair rebuilds its `RekeyState`
     // from it (cheap, no secret cloning per stream).

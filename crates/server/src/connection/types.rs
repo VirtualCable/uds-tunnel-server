@@ -16,17 +16,19 @@ const RESERVED_LENGTH: usize = 6;
 /// disallows it); the launcher then simply does not open the UDP leg.
 ///
 /// `udp_port` is the port the server's UDP relay is actually bound to,
-/// letting a deployment split TCP and UDP onto different ports. 0 means
-/// "same port as the TCP connection" (the default).
+/// letting a deployment split TCP and UDP onto different ports. The server
+/// always advertises the resolved relay port when UDP is enabled; `0` only
+/// comes with the all-zero token (UDP disabled), where it is ignored.
 ///
 /// `rekey_log2` is the session's rekeying threshold (log2 of the frames per
 /// key epoch): `0` = OFF (single key forever), `1..=MAX_REKEY_LOG2` =
-/// `epoch = seq >> k` (see `shared::crypt::rekey`). The value is owned by
+/// `epoch = saturating_sub(seq, seq_base) >> k` (see `shared::crypt::rekey`;
+/// `seq_base` is 0 for TCP, `2^63` for UDP). The value is owned by
 /// the server config and adopted by the launcher; parsing a value above
 /// `MAX_REKEY_LOG2` rejects the handshake (`seq >> k` would be an undefined
 /// shift). A pre-rekeying launcher cannot even parse this response (90 !=
 /// 91 bytes): the incompatibility is hard and immediate, which is the point
-/// of the atomic rollout (`docs/plan/rekeying.md` §1/§4).
+/// of the atomic rollout (`docs/rekeying-contract.md` §1).
 pub struct OpenResponse {
     pub session_id: Ticket,
     pub channel_count: u16,
@@ -248,7 +250,7 @@ mod tests {
         assert!(OpenResponse::try_from(data.as_slice()).is_err());
         // The pre-rekeying 90-byte layout (no rekey_log2): a launcher or
         // server that still speaks it must be rejected, not silently
-        // tolerated (atomic rollout, docs/plan/rekeying.md §1).
+        // tolerated (atomic rollout, docs/rekeying-contract.md §1).
         let data = vec![0u8; WIRE_LENGTH - 1];
         assert!(OpenResponse::try_from(data.as_slice()).is_err());
         // Too long

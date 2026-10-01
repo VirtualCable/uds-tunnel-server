@@ -114,7 +114,7 @@ fn shared_client(dangerous_disable_ssl_verify: bool) -> Client {
 
             Client::builder()
                 .use_rustls_tls()
-                .user_agent("UDSTunnelServer/5.0")
+                .user_agent(crate::consts::BROKER_USER_AGENT)
                 .default_headers(headers)
                 .danger_accept_invalid_certs(danger_accept_invalid_certs)
                 .build()

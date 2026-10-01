@@ -46,8 +46,10 @@ const WINDOW_WORDS: usize = (REPLAY_WINDOW_BITS / 64) as usize;
 /// number within the last `REPLAY_WINDOW_BITS` values and rejects duplicates
 /// and anything too old.
 ///
-/// Sequence numbers start at 1 (senders pre-increment from 0, matching the
-/// `Crypt` convention); `seq == 0` is always rejected.
+/// Sequence numbers never start at 0: the only user, the UDP relay leg,
+/// anchors its counter at `datagram::INITIAL_SEQ` (= `2^63`) and
+/// pre-increments, so valid seqs begin at `2^63 + 1`. `seq == 0` is always
+/// rejected.
 #[derive(Debug, Clone)]
 pub struct ReplayWindow {
     /// Highest sequence number accepted so far. 0 means "nothing seen yet"

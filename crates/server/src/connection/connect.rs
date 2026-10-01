@@ -131,8 +131,9 @@ where
     let session_manager = SessionManager::get_instance();
     let broker = broker::get();
     match broker.start_connection(ticket, src_ip).await {
-        // Note: On a future, the broker could return more than a single channel stream id
-        // But currently, only one is supported, althout it's prepared to be extended later
+        // One ticket may name several remotes (`channel_count =
+        // remotes_count()`, capped by `MAX_CHANNEL_ID`); each opens its own
+        // data channel on the same tunnel.
         Ok(ticket_info) => {
             log::debug!("Received ticket info from broker: {:?}", ticket_info);
             // The broker reserved a tunnel for us; the notify ticket is

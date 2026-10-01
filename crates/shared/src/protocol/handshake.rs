@@ -53,10 +53,14 @@ pub enum HandshakeCommand {
 // Posible handshakes:
 //   - With or without PROXY protocol v2 header
 //   - HANDSHAKE_V2 | cmd:u8 | payload_cmd_dependent
-//        Test | no payload
-//        Open | ticket[48] | ticket encrpyted with HKDF-derived key  --> returns session id for new session
-//        Recover | ticket[48] | ticket encrypted with HKDF-derived key (this ticket is the session id of the lost session) -> returns same as Open (new session id)
-//   - Full handshake should occur on at most 0.2 seconds
+//        Test    | no payload
+//        Open    | ticket[48]
+//        Recover | ticket[48] | in_seq:u64 | out_seq:u64
+//     (the ticket is HKDF-derived-key encrypted; Open/Recover return the
+//     session id for the new / recovered session)
+//   - The header + ticket (+ recover seqs) parse must complete within
+//     HANDSHAKE_TIMEOUT_MS (0.2 s); the encrypted ticket *confirm* that
+//     follows is timed separately by HANDSHAKE_CONFIRM_TIMEOUT_SECS.
 //   - Any failed handhsake, closes without response (hide server presence as much as possible)
 //   - TODO: Make some kind of block by IP if too many failed handshakes in short time
 

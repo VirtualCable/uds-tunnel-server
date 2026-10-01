@@ -38,6 +38,14 @@
 //! forwarded, and the relay never *sends* to a client address that has
 //! not previously produced a valid datagram (anti-amplification).
 //!
+//! Return-path pinning: an authenticating datagram re-points the return
+//! path only when its *ip* matches the tunnel peer (`session.src_ip()`) —
+//! a key-holder can spoof any source address on UDP, and without the ip
+//! pin the relay would aim the remote's replies at a third party. Port
+//! changes from NAT rebinding are still accepted; foreign-ip datagrams
+//! authenticate but never become the return target (see the pin comment
+//! in `handle_datagram`).
+//!
 //! Registration lifecycle lives in `SessionManager` (`add_session` /
 //! `remove_session`), which calls [`register_session`] /
 //! [`unregister_token`] here; both are no-ops when the relay is not
