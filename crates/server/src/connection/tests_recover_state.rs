@@ -362,6 +362,130 @@ async fn timed_out_recover_preserves_legitimate_recovery() -> anyhow::Result<()>
     Ok(())
 }
 
+/// A session negotiated with `k = 8` must survive a `Recover` under the
+/// *same* `k` even if the config changed meanwhile: the handler re-advertises
+/// `session.rekey_log2()` (never re-reads the config) and the crypts it
+/// rebuilds for the session epoch by the pinned threshold. Threat model for
+/// rekeying (docs/plan/rekeying.md §3): if a recover re-read config, a
+/// mid-life config flip would silently drift the key schedule and the
+/// launcher — still holding the original `k` — would diverge hard.
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn recover_reuses_the_persisted_session_k() -> anyhow::Result<()> {
+    use shared::crypt::tunnel::get_tunnel_crypts;
+
+    let tag = 11u8;
+    let shared_secret = SharedSecret::new([tag; 32]);
+    let ticket = Ticket::new([b'K' + (tag % 26); TICKET_LENGTH]);
+    let equiv = Ticket::new([b'k' + (tag % 26); TICKET_LENGTH]);
+
+    // Session negotiated with k = 8 (rotates every 256 frames).
+    let session = Session::with_rekey_log2(
+        shared_secret.clone(),
+        ticket,
+        Trigger::new(),
+        ORIG_IP,
+        vec!["127.0.0.1:3389".to_string()],
+        None,
+        8,
+    );
+    session.set_current_equiv_id(Some(equiv));
+    let session = SessionManager::get_instance()
+        .add_session(session)
+        .expect("add_session");
+    push_buffered(&session, 2);
+
+    // The config now advertises a DIFFERENT threshold: any drift in the
+    // recover path would leak it into the handshake or the rebuilt crypts.
+    let previous = {
+        let cfg = crate::config::get();
+        let mut cfg = cfg.write().unwrap_or_else(|e| e.into_inner());
+        let previous = cfg.rekey_seq_log2;
+        cfg.rekey_seq_log2 = Some(20);
+        previous
+    };
+
+    let material = derive_tunnel_material(&shared_secret, &ticket)?;
+
+    // Leg + real recover handshake: confirm at seq 1 (epoch 0 under any k,
+    // the legacy material), OpenResponse read by the launcher mirror.
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (r, w) = tokio::io::split(server);
+    let equiv_owned = equiv;
+    let handle = tokio::spawn(async move { recover(r, w, &equiv_owned, (3, 1), ORIG_IP).await });
+
+    let mut confirm = PacketBuffer::new();
+    confirm.set_data(equiv.as_ref())?;
+    Crypt::new(&material.key_receive, 0).encrypt(0, equiv.as_ref().len(), &mut confirm)?;
+    confirm.write(&mut client).await?;
+
+    let mut resp_buf = PacketBuffer::new();
+    let (data, _ch) = Crypt::new(&material.key_send, 0)
+        .read(&mut client, &mut resp_buf)
+        .await?;
+    let response = super::types::OpenResponse::try_from(data)?;
+
+    // THE PIN: the advertised threshold is the session's persisted k, not
+    // the config's current one.
+    assert_eq!(response.rekey_log2, 8, "recover must not renegotiate k");
+    assert_eq!(session.rekey_log2(), 8);
+
+    // Rebuilt crypts epoch by the session's k, never the config's. A
+    // launcher->server frame deep in epoch 19 (seq 5000 >> 8) must decrypt
+    // through the session's inbound...
+    let mut launcher_mirror = get_tunnel_crypts(
+        &shared_secret,
+        &ticket,
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(4999)),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        session.rekey_log2(),
+    )?
+    .0;
+    let mut frame = PacketBuffer::new();
+    frame.set_data(b"across-epoch-boundary")?;
+    launcher_mirror.encrypt(1, 21, &mut frame)?;
+    assert_eq!(frame.seq().unwrap(), 5000);
+    let mut session_in = session.server_tunnel_crypts()?.0;
+    session_in
+        .decrypt(&mut frame)
+        .expect("rebuilt session crypt must epoch by the session's k (5000 >> 8 = 19)");
+    assert_eq!(frame.data(), b"across-epoch-boundary");
+    assert_eq!(session.seqs().0, 5001);
+
+    // ...while a peer that had re-read the config (k = 20: seq 5000 still
+    // epoch 0, legacy key) produces a frame the session crypt rejects at
+    // the AEAD — the divergence is loud, silent corruption impossible.
+    let mut config_drifted = get_tunnel_crypts(
+        &shared_secret,
+        &ticket,
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(5999)),
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        20,
+    )?
+    .0;
+    let mut wrong = PacketBuffer::new();
+    wrong.set_data(b"wrong-k")?;
+    config_drifted.encrypt(1, 7, &mut wrong)?;
+    let err = session
+        .server_tunnel_crypts()?
+        .0
+        .decrypt(&mut wrong)
+        .expect_err("a config-drifted peer must not decrypt under the session k");
+    assert!(
+        err.to_string().contains("decryption failure"),
+        "expected AEAD rejection of a drifted-k frame, got: {err}"
+    );
+
+    handle.abort();
+    drop(client);
+    let cfg = crate::config::get();
+    cfg.write()
+        .unwrap_or_else(|e| e.into_inner())
+        .rekey_seq_log2 = previous;
+    SessionManager::get_instance().remove_session(session.id());
+    Ok(())
+}
+
 /// Characterisation (ignored by default): with a shared `seq_in`, `Crypt::decrypt` is check-then-act
 /// — it loads `current_seq`, runs the whole AES-GCM verification, and only then
 /// `fetch_max`es the counter. Two inbound crypts that share one counter

@@ -44,6 +44,7 @@ use shared::{
     crypt::{
         self,
         datagram::{DatagramCrypt, UdpToken},
+        rekey::{MAX_REKEY_LOG2, SessionPrk},
         types::SharedSecret,
     },
     log,
@@ -381,6 +382,15 @@ pub struct Session {
     seq_in: Arc<AtomicU64>,
     seq_out: Arc<AtomicU64>,
 
+    // Session-wide rekeying parameters, owned at handshake time and NEVER
+    // renegotiated (a `Recover` reuses these exactly; docs/plan/rekeying.md
+    // §3). `rekey_log2 = 0` is OFF (single key for the session lifetime,
+    // the pre-rekeying wire format). The PRK lives here so the HKDF extract
+    // runs once per session; every crypt pair rebuilds its `RekeyState`
+    // from it (cheap, no secret cloning per stream).
+    rekey_log2: u8,
+    rekey_prk: Arc<SessionPrk>,
+
     // External (equiv) session id the client uses to talk to us. `None`
     // until the first Recover mints one, after which it is the only
     // valid id for this session (the internal `id` is never exposed).
@@ -423,6 +433,16 @@ impl Session {
         Self::with_broker_stop_ticket(shared_secret, ticket, stop, src_ip, remotes, None)
     }
 
+    /// Rekey threshold (`k`) pinned to this session at handshake time.
+    /// `0` = OFF. This is the single source of truth for the
+    /// `OpenResponse.rekey_log2` the server advertises and for every crypt
+    /// the session hands out (streams, replacements, recovery): none of
+    /// them re-reads the config, so a Recover can never drift the key
+    /// epoching of an ongoing session.
+    pub fn rekey_log2(&self) -> u8 {
+        self.rekey_log2
+    }
+
     /// Build a session that must notify the broker when it ends.
     ///
     /// `broker_stop_ticket` is the notify ticket the broker returned at
@@ -438,6 +458,41 @@ impl Session {
         remotes: Vec<String>,
         broker_stop_ticket: Option<ticket::Ticket>,
     ) -> Self {
+        // OFF (k = 0): the legacy single-key construction. Sessions that
+        // must rekey are built through `with_rekey_log2`; the production
+        // handshake (connection::connect) always goes through it, so this
+        // wrapper is only the tests'/manual-plumbing default.
+        Self::with_rekey_log2(
+            shared_secret,
+            ticket,
+            stop,
+            src_ip,
+            remotes,
+            broker_stop_ticket,
+            0,
+        )
+    }
+
+    /// Build a session with the rekeying threshold `k` (log2 of frames per
+    /// AES-GCM key epoch; `0` = OFF) adopted at the `Open` handshake.
+    /// `k` values above the shift-safe bound (`MAX_REKEY_LOG2`) would make
+    /// `seq >> k` undefined, so they are clamped (the config getter
+    /// normally already clamped them).
+    pub fn with_rekey_log2(
+        shared_secret: SharedSecret,
+        ticket: ticket::Ticket,
+        stop: Trigger,
+        src_ip: SocketAddr,
+        remotes: Vec<String>,
+        broker_stop_ticket: Option<ticket::Ticket>,
+        k: u8,
+    ) -> Self {
+        let k = k.min(MAX_REKEY_LOG2);
+        // Derive the session PRK before the material is moved into the
+        // struct: one HKDF extract per session, shared by every crypt pair
+        // the session hands out afterwards.
+        let rekey_prk = Arc::new(SessionPrk::derive(&shared_secret, &ticket));
+
         let (proxy, session_proxy) = proxy::Proxy::new(stop.clone());
         let id = SessionId::new_random();
 
@@ -464,6 +519,8 @@ impl Session {
             rx,
             seq_in: Arc::new(AtomicU64::new(0)),
             seq_out: Arc::new(AtomicU64::new(0)),
+            rekey_log2: k,
+            rekey_prk,
             current_equiv_id: RwLock::new(None),
             src_ip: RwLock::new(src_ip),
             remotes,
@@ -698,13 +755,25 @@ impl Session {
     /// launcher-facing stream, each recovery handshake) gets crypts whose
     /// nonce counters are the *same* atomics, so sequence numbers advance
     /// once per direction across stream replacements with no coordination.
+    /// Builds the launcher-leg crypt pair sharing the session's live
+    /// per-direction counters and rekeying under the session's own `k`.
+    /// Every caller (connect handshake, each launcher-facing stream, each
+    /// recovery handshake) gets crypts whose nonce counters are the *same*
+    /// atomics, so sequence numbers advance once per direction across
+    /// stream replacements with no coordination — and the epoch of any
+    /// frame is decided by its own seq under the *same* session PRK, never
+    /// by a per-stream clock or a re-read of the config.
     pub fn server_tunnel_crypts(&self) -> Result<(crypt::Crypt, crypt::Crypt)> {
-        crypt::tunnel::get_tunnel_crypts(
-            &self.shared_secret,
-            self.ticket(),
-            self.seq_in.clone(),
-            self.seq_out.clone(),
-        )
+        let material = crypt::tunnel::derive_tunnel_material(&self.shared_secret, self.ticket())?;
+        let rekeys = crypt::tunnel::TunnelRekeys::from_parts(
+            self.rekey_prk.clone(),
+            &material,
+            self.rekey_log2,
+        );
+        Ok((
+            crypt::Crypt::with_rekey(self.seq_in.clone(), rekeys.inbound),
+            crypt::Crypt::with_rekey(self.seq_out.clone(), rekeys.outbound),
+        ))
     }
 
     pub(super) async fn fail_server(&self) {
@@ -760,6 +829,144 @@ mod tests {
             crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())
                 .unwrap();
         crypt::Crypt::new(&material.key_receive, seq)
+    }
+
+    /// Session-pinned `k` must survive crypt rebuilds (the stream-
+    /// replacement / recovery path): a mirror pair built through the public
+    /// factory with the session's `k` decrypts every frame the session's
+    /// outbound encrypted across epoch boundaries — proving the rebuilt
+    /// crypts agree on `epoch(seq)` without re-reading anything.
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn session_k_survives_crypt_rebuild_across_epochs() {
+        let session = Session::with_rekey_log2(
+            SharedSecret::new([0x77u8; 32]),
+            ticket::Ticket::new_random(),
+            Trigger::new(),
+            "127.0.0.1:0".parse().unwrap(),
+            vec![],
+            None,
+            2, // epoch rotates every 4 frames
+        );
+        assert_eq!(session.rekey_log2(), 2);
+
+        let mut outbound = session.server_tunnel_crypts().unwrap().1;
+        let mut mirror = crypt::tunnel::get_tunnel_crypts(
+            session.shared_secret(),
+            session.ticket(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            session.rekey_log2(),
+        )
+        .unwrap();
+
+        // 12 frames span epochs 0, 1, 2. Each one decrypts through the
+        // mirror's s2c side (same PRK, same k, same dir — the launcher's
+        // view of the session's key schedule).
+        for i in 1..=12u64 {
+            let payload = format!("k-{i}");
+            let mut buf = crypt::types::PacketBuffer::new();
+            buf.set_data(payload.as_bytes()).unwrap();
+            outbound.encrypt(1, payload.len(), &mut buf).unwrap();
+            mirror
+                .1
+                .decrypt(&mut buf)
+                .unwrap_or_else(|e| panic!("rebuilt crypt must authenticate frame {i}: {e}"));
+            assert_eq!(buf.data(), payload.as_bytes());
+        }
+        assert_eq!(session.seqs().1, 12);
+    }
+
+    /// Design doc test 7: a session running with a small `k` (4) relays
+    /// `2^k + m` frames in BOTH directions across the epoch boundary and
+    /// nothing breaks. Default sessions (k = 20) never reach an epoch in
+    /// the test suite; this pins the machinery with a config-realistic
+    /// small threshold.
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn session_relays_across_epoch_boundary_with_small_k() {
+        let session = Session::with_rekey_log2(
+            SharedSecret::new([0x88u8; 32]),
+            ticket::Ticket::new_random(),
+            Trigger::new(),
+            "127.0.0.1:0".parse().unwrap(),
+            vec![],
+            None,
+            4, // epoch rotates every 16 frames
+        );
+
+        let (mut s_in, mut s_out) = session.server_tunnel_crypts().unwrap();
+        // The launcher pair: mirror of the session's key schedule (server-
+        // perspective factory; `inbound` is the launcher's *send* side —
+        // same key/direction domain as the server's inbound decrypts).
+        let (mut l_send, mut l_recv) = crypt::tunnel::get_tunnel_crypts(
+            session.shared_secret(),
+            session.ticket(),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU64::new(0)),
+            session.rekey_log2(),
+        )
+        .unwrap();
+
+        // 40 server->launcher frames (epochs 0, 1, 2).
+        for i in 1..=40u64 {
+            let payload = format!("e2e-s2c-{i}");
+            let mut buf = crypt::types::PacketBuffer::new();
+            buf.set_data(payload.as_bytes()).unwrap();
+            s_out.encrypt(3, payload.len(), &mut buf).unwrap();
+            l_recv
+                .decrypt(&mut buf)
+                .unwrap_or_else(|e| panic!("s2c frame {i} (epoch {}): {e}", (i - 1) >> 4));
+            assert_eq!(buf.data(), payload.as_bytes());
+        }
+
+        // 40 launcher->server frames across the same boundaries.
+        for i in 1..=40u64 {
+            let payload = format!("e2e-c2s-{i}");
+            let mut buf = crypt::types::PacketBuffer::new();
+            buf.set_data(payload.as_bytes()).unwrap();
+            l_send.encrypt(3, payload.len(), &mut buf).unwrap();
+            s_in.decrypt(&mut buf)
+                .unwrap_or_else(|e| panic!("c2s frame {i} (epoch {}): {e}", (i - 1) >> 4));
+            assert_eq!(buf.data(), payload.as_bytes());
+        }
+
+        // decrypt advances via fetch_max(last_used + 1): the last c2s frame
+        // was 40, so the inbound counter sits at 41; 40 frames were
+        // encrypted on the outbound side.
+        assert_eq!(session.seqs(), (41, 40));
+    }
+
+    /// `k` outside the shift-safe bound is clamped, never propagated: a
+    /// session built with e.g. 200 must behave as a `k = 63` session
+    /// (`seq >> k` for a larger `k` would be undefined at the crypt).
+    #[serial_test::serial(manager)]
+    #[tokio::test]
+    async fn session_clamps_out_of_range_k() {
+        let session = Session::with_rekey_log2(
+            SharedSecret::new([0x99u8; 32]),
+            ticket::Ticket::new_random(),
+            Trigger::new(),
+            "127.0.0.1:0".parse().unwrap(),
+            vec![],
+            None,
+            200,
+        );
+        assert_eq!(session.rekey_log2(), crypt::rekey::MAX_REKEY_LOG2);
+        // ... and its crypts still work (single epoch for any real load).
+        // Same-direction rebuild: a freshly built outbound crypt decrypts
+        // the frame the session's outbound encrypted (both sit on the
+        // session's s2c key domain).
+        let mut outbound = session.server_tunnel_crypts().unwrap().1;
+        let mut buf = crypt::types::PacketBuffer::new();
+        buf.set_data(b"hi").unwrap();
+        outbound.encrypt(1, 2, &mut buf).unwrap();
+        session
+            .server_tunnel_crypts()
+            .unwrap()
+            .1
+            .decrypt(&mut buf)
+            .unwrap();
     }
 
     /// The session's crypts share the session's live counters: every holder

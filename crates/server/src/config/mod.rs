@@ -26,6 +26,7 @@ pub struct ServerConfig {
     pub max_sessions: Option<usize>, // Hard cap on concurrent sessions, default: DEFAULT_MAX_SESSIONS (8192)
     pub max_sessions_per_remote: Option<usize>, // Per-source-IP cap. None = disabled (no per-IP check).
     pub session_idle_data_timeout_secs: Option<u64>, // Data-idle session cap. None = DEFAULT (120), Some(0) = disabled.
+    pub rekey_seq_log2: Option<u8>, // Rekey threshold: log2 frames per AES-GCM key epoch. None = DEFAULT (20), Some(0) = OFF, Some(1..=63) = that threshold.
 }
 
 impl ServerConfig {
@@ -50,6 +51,28 @@ impl ServerConfig {
             None => Some(std::time::Duration::from_secs(
                 DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS,
             )),
+        }
+    }
+
+    /// Effective rekeying threshold (`k`, log2 of the frames per key epoch)
+    /// advertised to launchers in `OpenResponse.rekey_log2` and pinned to
+    /// every session. `None` falls back to `DEFAULT_REKEY_LOG2` (2^20
+    /// frames per key); `Some(0)` disables rekeying entirely (single key
+    /// for the session lifetime, the pre-rekeying wire format). Values
+    /// above the shift-safe bound (`63`) would make `seq >> k` undefined,
+    /// so they are clamped with a warning instead of poisoning the
+    /// handshake (the launcher-side bound is a hard rejection).
+    pub fn rekey_log2(&self) -> u8 {
+        match self.rekey_seq_log2 {
+            Some(k) if k > shared::crypt::rekey::MAX_REKEY_LOG2 => {
+                log::warn!(
+                    "rekey_seq_log2 = {k} exceeds the shift-safe bound {}; clamping to it",
+                    shared::crypt::rekey::MAX_REKEY_LOG2
+                );
+                shared::crypt::rekey::MAX_REKEY_LOG2
+            }
+            Some(k) => k,
+            None => shared::crypt::rekey::DEFAULT_REKEY_LOG2,
         }
     }
 
@@ -124,6 +147,7 @@ pub fn get() -> Arc<RwLock<ServerConfig>> {
                     max_sessions: None,
                     max_sessions_per_remote: None,
                     session_idle_data_timeout_secs: None,
+                    rekey_seq_log2: None,
                 }
             };
 
@@ -175,6 +199,70 @@ mod tests {
         assert_eq!(config.udp_listen_port, None);
         assert!(config.udp_enabled());
         assert_eq!(config.udp_sockaddr(), "127.0.0.1:443".parse().unwrap());
+    }
+
+    /// `rekey_seq_log2`: unset resolves to `DEFAULT_REKEY_LOG2`; explicit
+    /// values (0 = OFF, 8, 63) resolve as-is; out-of-bound `>= 64` clamps
+    /// to the shift-safe bound rather than poisoning the handshake with an
+    /// undefined `seq >> k`.
+    #[test]
+    fn test_parse_config_rekey_log2() {
+        let base = r#"
+            ticket_api_url = "https://broker.example.com/uds/rest/ticket"
+            broker_auth_token = "test_token"
+        "#;
+
+        // unset -> default (20)
+        let config = ServerConfig::from_toml_str(base).unwrap();
+        assert_eq!(config.rekey_seq_log2, None);
+        assert_eq!(
+            config.rekey_log2(),
+            shared::crypt::rekey::DEFAULT_REKEY_LOG2
+        );
+
+        // explicit 0 -> OFF
+        let config =
+            ServerConfig::from_toml_str(&(base.to_string() + "\nrekey_seq_log2 = 0")).unwrap();
+        assert_eq!(config.rekey_log2(), 0);
+
+        // explicit 8
+        let config =
+            ServerConfig::from_toml_str(&(base.to_string() + "\nrekey_seq_log2 = 8")).unwrap();
+        assert_eq!(config.rekey_log2(), 8);
+
+        // explicit 63 (max shift-safe)
+        let config =
+            ServerConfig::from_toml_str(&(base.to_string() + "\nrekey_seq_log2 = 63")).unwrap();
+        assert_eq!(config.rekey_log2(), shared::crypt::rekey::MAX_REKEY_LOG2);
+
+        // out-of-range 64 / 128 / 200 -> clamped to MAX_REKEY_LOG2
+        for raw in [64u8, 128, 200, 255] {
+            let toml = base.to_string() + &format!("\nrekey_seq_log2 = {raw}");
+            let config = ServerConfig::from_toml_str(&toml).unwrap();
+            assert_eq!(
+                config.rekey_log2(),
+                shared::crypt::rekey::MAX_REKEY_LOG2,
+                "k = {raw} must clamp, not propagate an undefined shift"
+            );
+        }
+    }
+
+    /// `rekey_seq_log2` must parse as a `u8` (1..=255), never silently
+    /// accept a non-integer or a value wider than the wire's single byte.
+    /// A TOML type error propagates (the config file must not start the
+    /// server with a half-read knob).
+    #[test]
+    fn test_parse_config_rekey_log2_type_errors() {
+        let base = r#"
+            ticket_api_url = "https://broker.example.com/uds/rest/ticket"
+            broker_auth_token = "test_token"
+        "#;
+        // Non-integer (string) rejected by serde
+        let bad_str = base.to_string() + "\nrekey_seq_log2 = \"8\"";
+        assert!(ServerConfig::from_toml_str(&bad_str).is_err());
+        // Above u8 range rejected by serde
+        let bad_num = base.to_string() + "\nrekey_seq_log2 = 300";
+        assert!(ServerConfig::from_toml_str(&bad_num).is_err());
     }
 
     #[test]

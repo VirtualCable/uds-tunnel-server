@@ -26,7 +26,7 @@ const T: std::time::Duration = std::time::Duration::from_secs(2);
 fn mk_session(remote: &str, tag: u8) -> (Arc<Session>, UdpToken, SharedSecret, Ticket) {
     let shared_secret = SharedSecret::new([tag; 32]);
     let ticket = Ticket::new([tag; TICKET_LENGTH]);
-    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket).unwrap();
+    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket, 0).unwrap();
     let token = random_token();
     let session = Arc::new(Session::new(
         shared_secret.clone(),
@@ -41,8 +41,8 @@ fn mk_session(remote: &str, tag: u8) -> (Arc<Session>, UdpToken, SharedSecret, T
 
 /// Launcher-side mirror: (send = c2s, recv = s2c).
 fn launcher(secret: &SharedSecret, ticket: &Ticket) -> (DatagramCrypt, DatagramCrypt) {
-    let (send, _) = get_udp_crypts(secret, ticket).unwrap();
-    let (_, recv) = get_udp_crypts(secret, ticket).unwrap();
+    let (send, _) = get_udp_crypts(secret, ticket, 0).unwrap();
+    let (_, recv) = get_udp_crypts(secret, ticket, 0).unwrap();
     (send, recv)
 }
 

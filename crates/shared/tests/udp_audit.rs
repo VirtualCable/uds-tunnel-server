@@ -152,7 +152,7 @@ fn token() -> UdpToken {
 fn udp_directions_use_distinct_keys() {
     let secret = key();
     let ticket: shared::protocol::ticket::Ticket = [3u8; 48].into();
-    let (mut inbound, mut outbound) = get_udp_crypts(&secret, &ticket).unwrap();
+    let (mut inbound, mut outbound) = get_udp_crypts(&secret, &ticket, 0).unwrap();
 
     // Same (token, first seq) in both directions must produce different wire
     // bytes: proof the two keys differ. If they were equal this would be
@@ -171,7 +171,7 @@ fn udp_key_matches_tcp_label_separation() {
     // UDP okm must not equal any of the TCP okm segments.
     let secret = SharedSecret::new([1u8; 32]);
     let ticket: shared::protocol::ticket::Ticket = [2u8; 48].into();
-    let (udp_in, udp_out) = get_udp_crypts(&secret, &ticket).unwrap();
+    let (udp_in, udp_out) = get_udp_crypts(&secret, &ticket, 0).unwrap();
     let tcp = shared::crypt::tunnel::derive_tunnel_material(&secret, &ticket).unwrap();
 
     // Encrypt on the UDP outbound key; none of the TCP keys may decrypt it.

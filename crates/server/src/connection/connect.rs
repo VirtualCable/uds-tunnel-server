@@ -184,13 +184,25 @@ where
 
             let stop = Trigger::new();
             let shared_secret = ticket_info.get_shared_secret()?;
-            let session = Session::with_broker_stop_ticket(
+
+            // Session rekeying threshold, read ONCE here (the same value is
+            // advertised in `OpenResponse.rekey_log2` and pinned into the
+            // session, so every crypt the session hands out afterwards —
+            // streams, replacements, recovery — epochs identically without
+            // ever touching the config again).
+            let rekey_log2 = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .rekey_log2();
+
+            let session = Session::with_rekey_log2(
                 shared_secret.clone(),
                 *ticket,
                 stop.clone(),
                 src_ip,
                 ticket_info.channels_remotes(),
                 broker_alloc.handoff(),
+                rekey_log2,
             );
 
             // UDP relay leg: only when both the broker flag and the server
@@ -203,7 +215,7 @@ where
                 .udp_enabled();
             let (udp_token, udp_port) = if ticket_info.enable_udp() && udp_enabled {
                 let token = random_token();
-                let (inbound, outbound) = get_udp_crypts(&shared_secret, ticket)?;
+                let (inbound, outbound) = get_udp_crypts(&shared_secret, ticket, rekey_log2)?;
                 session.set_udp(UdpState::new(token, inbound, outbound));
                 log::debug!("UDP relay leg enabled for ticket {:?}", ticket);
                 // Advertise the resolved UDP port so the client can reach
@@ -274,6 +286,7 @@ where
                 1,
                 udp_token,
                 udp_port,
+                rekey_log2,
             );
             let response_data = response.as_vec();
             // Send the OpenResponse

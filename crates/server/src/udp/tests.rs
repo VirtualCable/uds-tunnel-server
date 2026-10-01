@@ -51,7 +51,7 @@ const NO_TRAFFIC_WINDOW: std::time::Duration = std::time::Duration::from_millis(
 async fn new_udp_session(remote: &str) -> (Arc<Session>, UdpToken, SharedSecret, Ticket) {
     let shared_secret = SharedSecret::new([7u8; 32]);
     let ticket = Ticket::new([3u8; TICKET_LENGTH]);
-    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket).unwrap();
+    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket, 0).unwrap();
     let token = random_token();
     let session = Arc::new(Session::new(
         shared_secret.clone(),
@@ -71,8 +71,18 @@ fn launcher_crypts(
     shared_secret: &SharedSecret,
     ticket: &Ticket,
 ) -> (DatagramCrypt, DatagramCrypt) {
-    let (send, _) = get_udp_crypts(shared_secret, ticket).unwrap();
-    let (_, recv) = get_udp_crypts(shared_secret, ticket).unwrap();
+    launcher_crypts_with_k(shared_secret, ticket, 0)
+}
+
+/// Mirror crypts adopting the session's advertised rekey threshold (as the
+/// real launcher does with `OpenResponse.rekey_log2`).
+fn launcher_crypts_with_k(
+    shared_secret: &SharedSecret,
+    ticket: &Ticket,
+    k: u8,
+) -> (DatagramCrypt, DatagramCrypt) {
+    let (send, _) = get_udp_crypts(shared_secret, ticket, k).unwrap();
+    let (_, recv) = get_udp_crypts(shared_secret, ticket, k).unwrap();
     (send, recv)
 }
 
@@ -346,10 +356,11 @@ mod e2e {
 
     // OpenResponse wire offsets (connection::types is private to that
     // module, so the e2e asserts on the raw layout directly):
-    // session_id:48 | channel_count:u16 | inbound_seq:u64 | outbound_seq:u64 | udp_token:16 | udp_port:u16 | reserved:6
+    // session_id:48 | channel_count:u16 | inbound_seq:u64 | outbound_seq:u64 | udp_token:16 | udp_port:u16 | rekey_log2:u8 | reserved:6
     const TOKEN_OFFSET: usize = TICKET_LENGTH + 2 + 8 + 8;
     const PORT_OFFSET: usize = TOKEN_OFFSET + TOKEN_LENGTH;
-    const OPENRESPONSE_LEN: usize = PORT_OFFSET + 2 + 6;
+    const REKEY_OFFSET: usize = PORT_OFFSET + 2;
+    const OPENRESPONSE_LEN: usize = PORT_OFFSET + 2 + 1 + 6;
 
     /// Builds the encrypted broker ticket response exactly as the real
     /// broker would: ML-KEM encapsulation against the server's (debug)
@@ -516,9 +527,19 @@ mod e2e {
             "session token must be registered in the relay after connect"
         );
 
-        // Simulated launcher UDP side: mirror crypts of the server pair.
+        // Simulated launcher UDP side: mirror crypts of the server pair,
+        // adopting the rekey threshold the server advertised in the
+        // OpenResponse (which the e2e handshake path takes from config;
+        // the test config leaves `rekey_seq_log2` unset, so this pins that
+        // the OFF-mirror construction stays byte-exact within epoch 0).
         let tunnel_secret = SharedSecret::from_hex(TUNNEL_SECRET_HEX).unwrap();
-        let (mut client_send, mut client_recv) = launcher_crypts(&tunnel_secret, &ticket);
+        let advertised_k = response[REKEY_OFFSET];
+        assert!(
+            advertised_k <= shared::crypt::rekey::MAX_REKEY_LOG2,
+            "advertised k must be shift-safe, got {advertised_k}"
+        );
+        let (mut client_send, mut client_recv) =
+            launcher_crypts_with_k(&tunnel_secret, &ticket, advertised_k);
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
 
         let datagram = client_send.encrypt(&token, b"rdp-e2e-data").unwrap();

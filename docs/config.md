@@ -171,6 +171,30 @@ environment afterwards has no effect until the server is restarted.
   session. This is the defence against a client with a valid ticket
   parking a slot forever with `Nop`s only.
 
+#### `rekey_seq_log2`
+
+- Type: unsigned integer (`0..=63`)
+- Default: `20` (see `DEFAULT_REKEY_LOG2` in `crates/shared/src/crypt/rekey.rs`)
+- Rekeying threshold, as log2 of the frames per AES-GCM key epoch: every
+  `2^k` sequence numbers (per direction, per transport), the tunnel re-derives
+  a fresh key from the session's HKDF PRK with the frame's own epoch number,
+  so a single key never protects more than `2^k` AES-GCM invocations (the
+  NIST SP 800-38D per-key bound). `0` disables rekeying entirely (single key
+  for the whole session lifetime, the pre-rekeying wire format); `1..=63`
+  re-derives `epoch = seq >> k` deterministically, with no rekey handshake
+  and no transition window. Values above `63` would make `seq >> k` undefined,
+  so they are clamped to `63` with a warning instead of poisoning the
+  handshake.
+- **Rollout:** the threshold is owned by the server and adopted by the
+  launcher through `OpenResponse.rekey_log2` (a byte added to the wire:
+  90 -> 91 bytes). The change is **not backward-compatible**: a pre-rekeying
+  launcher cannot parse the new `OpenResponse` (length mismatch), and the
+  server never re-advertises a different `k` on `Recover` — the threshold is
+  pinned to the session and survives stream replacements and re-connections.
+- **Perf cost:** negligible. The re-derivation runs once per epoch boundary;
+  `k = 20` means one HKDF expand + one AES key schedule per million frames
+  per direction, and staying inside an epoch costs a comparison and a shift.
+
 ## Behaviour summary
 
 | Concern                          | Knob                          | Default      |
@@ -185,6 +209,7 @@ environment afterwards has no effect until the server is restarted.
 | Total session cap                | `max_sessions`                | 8192         |
 | Per source-IP session cap        | `max_sessions_per_remote`     | disabled     |
 | Data-idle session cap            | `session_idle_data_timeout_secs` | 120 s      |
+| Key-epoch rekeying               | `rekey_seq_log2`               | 20         |
 
 ## Validation
 

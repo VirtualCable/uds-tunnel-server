@@ -219,7 +219,20 @@ where
                 None => ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0),
             };
             let response =
-                OpenResponse::with_udp(equiv_id, 0, in_seq, out_seq, udp_token, udp_port); // On recover, no new streams are created
+                // `rekey_log2` is re-advertised from the session, never
+                // re-read from the config: a Recover must not renegotiate
+                // the key epoching of a live session (docs/plan/rekeying.md
+                // §3). The launcher already knows `k` from its Open; the
+                // crypts above were rebuilt from `session.k` too.
+                OpenResponse::with_udp(
+                    equiv_id,
+                    0,
+                    in_seq,
+                    out_seq,
+                    udp_token,
+                    udp_port,
+                    session.rekey_log2(),
+                ); // On recover, no new streams are created
             let response_data = response.as_vec();
             log::debug!(
                 "Recovering session {:?} for client {:?}, sending OpenResponse {:?}",

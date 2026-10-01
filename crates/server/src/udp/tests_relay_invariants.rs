@@ -39,7 +39,7 @@ async fn udp_session_full(
 ) -> (Arc<Session>, UdpToken, SharedSecret, Ticket) {
     let shared_secret = SharedSecret::new([seed; 32]);
     let ticket = Ticket::new([seed; TICKET_LENGTH]);
-    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket).unwrap();
+    let (inbound, outbound) = get_udp_crypts(&shared_secret, &ticket, 0).unwrap();
     let token = random_token();
     let session = Arc::new(Session::new(
         shared_secret.clone(),
@@ -53,8 +53,8 @@ async fn udp_session_full(
 }
 
 fn launcher(secret: &SharedSecret, ticket: &Ticket) -> (DatagramCrypt, DatagramCrypt) {
-    let (send, _) = get_udp_crypts(secret, ticket).unwrap();
-    let (_, recv) = get_udp_crypts(secret, ticket).unwrap();
+    let (send, _) = get_udp_crypts(secret, ticket, 0).unwrap();
+    let (_, recv) = get_udp_crypts(secret, ticket, 0).unwrap();
     (send, recv)
 }
 
