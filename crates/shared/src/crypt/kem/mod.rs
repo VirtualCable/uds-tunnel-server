@@ -8,8 +8,8 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub use libcrux_ml_kem::{
     KEY_GENERATION_SEED_SIZE,
     mlkem768::{
-        MlKem768Ciphertext as CipherText, MlKem768PrivateKey as PrivateKey, decapsulate,
-        generate_key_pair,
+        MlKem768Ciphertext as CipherText, MlKem768PrivateKey as PrivateKey,
+        MlKem768PublicKey as PublicKey, decapsulate, encapsulate, generate_key_pair,
     },
 };
 

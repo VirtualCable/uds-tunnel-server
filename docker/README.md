@@ -18,12 +18,16 @@ with a single `--build-arg DISTRO_VERSION=forky`.
 ```
                   ┌────────────── Docker Container ──────────────┐
                   │                                               │
-   Host:4443 ───►│  udstunnel :4443 (TCP/TLS)                    │
+   Host:4443 ───►│  udstunnel :4443 (TCP + UDP relay)            │
                   │                                               │
                   └───────────────────────────────────────────────┘
 ```
 
 - **udstunnel** listens directly on the configured port (default 4443).
+- With `udp_enabled = true` (the default) the server also binds a shared UDP
+  relay socket on the same port (or `udp_listen_port`); it must be published
+  with `/udp`, otherwise the RDP-UDP leg silently fails and sessions fall back
+  to TCP-only.
 - Logs are stored in `/var/log/udstunnel` (should be mounted as a volume for persistence).
 
 ## Quick Start
@@ -62,6 +66,7 @@ Edit `udstunnel.conf` with your broker details and token.
 docker run -d \
   --name udstunnel \
   -p 4443:4443 \
+  -p 4443:4443/udp \
   --ulimit nofile=262144:262144 \
   -v $(pwd)/udstunnel.conf:/etc/udstunnel.conf:ro \
   -v /path/to/logs:/var/log/udstunnel \
@@ -109,14 +114,20 @@ docker exec udstunnel sh -c 'ulimit -Sn; ulimit -Hn'
 | Container Port | Protocol | Description |
 |----------------|----------|-------------|
 | `4443` | TCP | Tunnel Server Listener |
+| `4443` | UDP | UDP relay leg (unless `udp_enabled = false`) |
 
-Typical mapping: `-p 4443:4443`
+Typical mapping: `-p 4443:4443 -p 4443:4443/udp`
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `UDSTUNNEL_LISTEN_ADDR` | `0.0.0.0` | Bind address (set by the entrypoint). |
+| `UDSTUNNEL_LISTEN_PORT` | `4443` | TCP/UDP port (set by the entrypoint; overrides the config file). |
+| `UDSTUNNEL_UDP_LISTEN_PORT` | — | Split the UDP relay onto its own port (must also be published). |
+| `UDSTUNNEL_TUNNEL_LOG_LEVEL` | `info` | Tracing filter level override. |
 | `UDSTUNNEL_TUNNEL_LOG_PATH` | `/var/log/udstunnel` | Directory where logs and panic logs are stored. |
+| `UDSTUNNEL_STDERR_LOG_FILE` | — | Override the stderr log target (release builds). |
 
 ## Troubleshooting
 

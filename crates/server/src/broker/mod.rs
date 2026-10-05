@@ -44,6 +44,20 @@ use shared::{
 mod request;
 mod response;
 
+/// Upper bound for the pre-authentication broker ticket call.
+///
+/// `connect` issues this request for every `Open` handshake *before* the
+/// per-remote-IP cap and `add_session`/`max_sessions` are consulted, and the
+/// handshake itself is not authenticated yet: an attacker only needs the
+/// static signature plus 48 alphanumeric bytes. Without a bound here, a
+/// slow or hung broker turns each unauthenticated 57-byte open into a
+/// pinned server task + socket + outbound HTTP request, unbounded by the
+/// session caps. 5s is generous for a healthy broker (it answers in ms) and
+/// keeps the worst-case pinned window short; it is deliberately tighter
+/// than [`stop_connection`]'s 10s, which is a best-effort post-session
+/// notification on an already-authenticated path.
+pub(crate) const START_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 // For converting from encrypted tycket response to normal response
 use response::EncryptedTicketResponse;
 
@@ -54,14 +68,67 @@ pub trait BrokerApi {
         ticket: &Ticket,
         ip: SocketAddr,
     ) -> Result<response::TicketResponse>;
-    async fn stop_connection(&self, ticket: &Ticket) -> Result<()>;
+    async fn stop_connection(&self, ticket: &Ticket, sent: u64, recv: u64) -> Result<()>;
 }
 
 pub struct HttpBrokerApi {
     client: Client,
     ticket_rest_url: String,
+    auth_header: reqwest::header::HeaderValue,
     public_key: [u8; PUBLIC_KEY_SIZE],
     private_key: [u8; PRIVATE_KEY_SIZE],
+}
+
+/// Shared HTTP clients for the broker API, one per SSL-verification mode.
+///
+/// Building a `reqwest::Client` loads the system root-certificate store and
+/// creates the connection pool: doing it per handshake and per stop
+/// notification burned CPU and file descriptors on every connection (and, at
+/// the 32-connection scale, made the broker-timeout regression test race its
+/// own deadline). `Client` is cheap-clone and pool-backed, so cloning the
+/// cached instance shares one pool per mode. The `Authorization` header is
+/// per-request because the cached client must not depend on the configured
+/// token; the ML-KEM keypair stays per `HttpBrokerApi` instance so each
+/// ticket still gets a fresh encryption key.
+///
+/// A build failure here is a broken TLS backend, not operator error: it can
+/// only happen once per process now, and the `expect` names the cause.
+fn shared_client(dangerous_disable_ssl_verify: bool) -> Client {
+    use std::sync::OnceLock;
+
+    static CLIENTS: OnceLock<(Client, Client)> = OnceLock::new();
+
+    let (verify_on, verify_off) = CLIENTS.get_or_init(|| {
+        // `ClientBuilder` is not `Clone`: both variants are built from the
+        // same settings, differing only in the cert-verification flag.
+        fn build(danger_accept_invalid_certs: bool) -> Client {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_static("application/json"),
+            );
+
+            Client::builder()
+                .use_rustls_tls()
+                .user_agent(crate::consts::BROKER_USER_AGENT)
+                .default_headers(headers)
+                .danger_accept_invalid_certs(danger_accept_invalid_certs)
+                .build()
+                .expect("broker HTTP client failed to build")
+        }
+
+        (build(false), build(true))
+    });
+
+    if dangerous_disable_ssl_verify {
+        verify_off.clone()
+    } else {
+        verify_on.clone()
+    }
 }
 
 impl HttpBrokerApi {
@@ -79,7 +146,7 @@ impl HttpBrokerApi {
     ) -> Self {
         // Remove trailing slash if present
         let ticket_rest_url = ticket_rest_url.trim_end_matches('/');
-        log::info!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
+        log::debug!("Creating HttpBrokerApi with URL: {}", ticket_rest_url);
         let keys = comms_keypair();
 
         // Build the `Authorization: Bearer sk-...` header value once.
@@ -93,34 +160,13 @@ impl HttpBrokerApi {
         } else {
             format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token)
         };
+        let auth_header = reqwest::header::HeaderValue::from_str(&auth_header_value)
+            .expect("auth token value is not a valid HTTP header value");
 
         HttpBrokerApi {
-            client: Client::builder()
-                .use_rustls_tls()
-                .user_agent("UDSTunnelServer/5.0")
-                .default_headers({
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    headers.insert(
-                        reqwest::header::ACCEPT,
-                        reqwest::header::HeaderValue::from_static("application/json"),
-                    );
-                    headers.insert(
-                        reqwest::header::CONTENT_TYPE,
-                        reqwest::header::HeaderValue::from_static("application/json"),
-                    );
-                    // Tunnel-server authenticates exclusively via the
-                    // `Authorization: Bearer sk-<token>` header.
-                    headers.insert(
-                        reqwest::header::AUTHORIZATION,
-                        reqwest::header::HeaderValue::from_str(&auth_header_value)
-                            .expect("auth token value is not a valid HTTP header value"),
-                    );
-                    headers
-                })
-                .danger_accept_invalid_certs(dangerous_disable_ssl_verify)
-                .build()
-                .unwrap(), // If not built, panic intentionally
+            client: shared_client(dangerous_disable_ssl_verify),
             ticket_rest_url: ticket_rest_url.to_string(),
+            auth_header,
             public_key: keys.public_key,
             private_key: keys.private_key,
         }
@@ -150,7 +196,7 @@ impl BrokerApi for HttpBrokerApi {
     ) -> Result<response::TicketResponse> {
         log::debug!(
             "Starting connection with broker for ticket: {}, ip: {}",
-            ticket.as_str(),
+            ticket.redacted(),
             ip
         );
         let ticket_request = request::TicketRequest::new_start(
@@ -160,7 +206,9 @@ impl BrokerApi for HttpBrokerApi {
         );
         self.client
             .post(&self.ticket_rest_url)
+            .header(reqwest::header::AUTHORIZATION, self.auth_header.clone())
             .json(&ticket_request)
+            .timeout(START_CONNECTION_TIMEOUT)
             .send()
             .await?
             .error_for_status()?
@@ -173,23 +221,31 @@ impl BrokerApi for HttpBrokerApi {
             })?
     }
 
-    async fn stop_connection(&self, ticket: &Ticket) -> Result<()> {
+    async fn stop_connection(&self, ticket: &Ticket, sent: u64, recv: u64) -> Result<()> {
         log::debug!(
-            "Stopping connection with broker for ticket: {}",
-            ticket.as_str()
+            "Stopping connection with broker for ticket: {} (sent: {}, recv: {})",
+            ticket.redacted(),
+            sent,
+            recv
         );
         // No response body expected
-        let ticket_request = request::TicketRequest::new_stop(ticket, 0, 0);
+        let ticket_request = request::TicketRequest::new_stop(ticket, sent, recv);
         self.client
             .post(&self.ticket_rest_url)
+            .headers({
+                let mut h = reqwest::header::HeaderMap::new();
+                h.insert(reqwest::header::AUTHORIZATION, self.auth_header.clone());
+                h
+            })
             .json(&ticket_request)
+            .timeout(std::time::Duration::from_secs(10))
             .send()
             .await?
             .error_for_status()
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to stop connection for ticket {}: {}",
-                    ticket.as_str(),
+                    ticket.redacted(),
                     e
                 )
             })?;
@@ -198,9 +254,35 @@ impl BrokerApi for HttpBrokerApi {
     }
 }
 
+/// Best-effort broker stop notification from synchronous contexts
+/// (session teardown). Detaches the request on the current runtime so a
+/// slow or dead broker cannot block the Drop path; without a runtime,
+/// log and skip — the broker's own validity window bounds the damage.
+pub fn spawn_stop_notification(ticket: Ticket, sent: u64, recv: u64) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                if let Err(e) = get().stop_connection(&ticket, sent, recv).await {
+                    log::warn!(
+                        "Broker stop notification failed for notify ticket {}: {}",
+                        ticket.redacted(),
+                        e
+                    );
+                }
+            });
+        }
+        Err(_) => {
+            log::warn!(
+                "No tokio runtime on this thread; broker stop notification for ticket {} skipped",
+                ticket.redacted()
+            );
+        }
+    }
+}
+
 pub fn get() -> impl BrokerApi {
     let config = config::get();
-    let cfg = config.read().unwrap();
+    let cfg = config.read().unwrap_or_else(|e| e.into_inner());
     HttpBrokerApi::new(
         &cfg.ticket_api_url,
         &cfg.broker_auth_token,

@@ -12,7 +12,7 @@
 #     -t udstunnel .
 #
 # Run:
-#   docker run -d -p 4443:4443 \
+#   docker run -d -p 4443:4443 -p 4443:4443/udp \
 #     --ulimit nofile=262144:262144 \
 #     -v /path/to/udstunnel.conf:/etc/udstunnel.conf:ro \
 #     -v /path/to/logs:/var/log/udstunnel \
@@ -48,7 +48,9 @@ RUN chmod +x /opt/udstunnel/udstunnel
 COPY docker/entrypoint.sh /opt/udstunnel/entrypoint.sh
 RUN chmod +x /opt/udstunnel/entrypoint.sh
 
-# The server listens on 4443 by default
-EXPOSE 4443
+# The server listens on 4443 by default: TCP tunnel + (unless
+# udp_enabled = false) the UDP relay leg on the same port.
+EXPOSE 4443/tcp
+EXPOSE 4443/udp
 
 ENTRYPOINT ["/opt/udstunnel/entrypoint.sh"]

@@ -29,14 +29,23 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
-// Version of server
-pub const VERSION: &str = "v5.0.0";
-
-// HTTP related constants
-pub const USER_AGENT: &str = "UDSTunnel/5.0.0";
+// User-Agent sent to the broker API (broker-side logging correlates on it).
+pub const BROKER_USER_AGENT: &str = "UDSTunnelServer/5.0";
 
 // Timeout constants
 pub const SERVER_RECOVERY_GRACE_SECS: u64 = 5; // Time given to recover server connection
+
+// Launcher keep-alive: the launcher sends a `Nop` on the control channel
+// periodically; the server tears the launcher leg down when it sees no frame
+// at all for `KEEPALIVE_TIMEOUT_SECS` (any inbound frame, data or keep-alive,
+// refreshes the deadline).
+pub const KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+
+/// Time the server waits for the post-handshake AEAD confirm frame (the
+/// ticket echo on Open, the session-id echo on Recover). Shared by
+/// `connection::connect` and `connection::recover` so the two handshake
+/// paths cannot drift apart.
+pub const HANDSHAKE_CONFIRM_TIMEOUT_SECS: u64 = 1;
 
 #[cfg(debug_assertions)]
 pub const CONFIGFILE_PATH: &str = "udstunnel.conf";
@@ -56,3 +65,12 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 /// Open handshake at the SessionManager level — see
 /// `ServerConfig::max_sessions` for the override knob.
 pub const DEFAULT_MAX_SESSIONS: usize = 8192;
+
+/// Default session data-idle cap: a session whose launcher leg carries no
+/// payload bytes (data channels only — keep-alive `Nop` frames never count)
+/// for this long is ended. The keep-alive watchdog
+/// (`KEEPALIVE_TIMEOUT_SECS`) only proves the TCP leg is alive; this cap
+/// is what bounds the slot: a client cannot hold a session forever with
+/// `Nop` frames alone. Override with `session_idle_data_timeout_secs` in
+/// the server config; `0` disables the cap.
+pub const DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS: u64 = 120;

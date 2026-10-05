@@ -151,8 +151,14 @@ async fn test_server_inbound_basic() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelServerInboundStream::new(server, crypt_in, tx, stop.clone(), SessionId::new_random());
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt_in,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     tokio::spawn(async move {
         encrypted.write(&mut client).await.unwrap_or_else(|e| {
@@ -183,7 +189,14 @@ async fn test_server_inbound_remote_close_before_header() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound = TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), session_id);
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        session_id,
+        Arc::new(TrafficCounters::default()),
+    );
 
     drop(client);
 
@@ -208,6 +221,7 @@ async fn test_server_inbound_read_error() {
         tx,
         stop.clone(),
         SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
     );
 
     let res = inbound.run().await;
@@ -226,8 +240,14 @@ async fn test_server_inbound_stop_before_read() {
     let (tx, rx) = flume::bounded(10);
     let stop = Trigger::new();
 
-    let mut inbound =
-        TunnelServerInboundStream::new(server, crypt, tx, stop.clone(), SessionId::new_random());
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     stop.trigger();
 
@@ -247,8 +267,14 @@ async fn test_outbound_server_stores_recover_packet() -> Result<()> {
     let stop = Trigger::new();
     let (tx, rx) = flume::bounded(10);
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(FailingStream, crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        FailingStream,
+        crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     // Send a message to the outbound stream, which will cause it to attempt to write and fail
 
@@ -292,8 +318,14 @@ async fn test_outbound_server_recovers_with_empty_buffer() -> Result<()> {
     let (_tx, rx) = flume::bounded(10);
     let (_client, server) = tokio::io::duplex(1024);
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     let errored = Arc::new(AtomicBool::new(false));
     let outbound_handle = tokio::spawn({
@@ -358,8 +390,14 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
         )?;
     }
 
-    let mut outbound =
-        TunnelServerOutboundStream::new(server, out_crypt, rx, stop.clone(), *session.id());
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
 
     // Must not fail, so run on ea task to allow check
     let errored = Arc::new(AtomicBool::new(false));
@@ -395,6 +433,74 @@ async fn test_outbound_server_reads_recover_packet() -> Result<()> {
 
 #[serial_test::serial(manager)]
 #[tokio::test]
+async fn test_outbound_server_recover_buffer_requeues_on_send_failure() -> Result<()> {
+    // Regression test: when a replayed packet fails to send, the failed
+    // item AND all remaining drained items must go back into the recovery
+    // buffer, in FIFO order, so the next recovery attempt can retry them.
+    // Before the fix, drain-then-send dropped everything not yet sent.
+    log::setup_logging("debug", log::LogType::Test);
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, out_crypt) = make_test_crypts();
+    let stop = Trigger::new();
+    let (_tx, rx) = flume::bounded(10);
+
+    // Simulate three previous failed sends queued for replay.
+    {
+        let rec_buf = session.recovery_buffer();
+        let mut buffer = rec_buf.lock();
+        for (seq, payload) in [
+            (1u64, "one".as_bytes()),
+            (2, "two".as_bytes()),
+            (3, "three".as_bytes()),
+        ] {
+            buffer.push(
+                seq,
+                PayloadWithChannel {
+                    channel_id: 0,
+                    payload: payload.into(),
+                },
+            )?;
+        }
+        assert_eq!(buffer.len(), 3);
+    }
+
+    // Writer that fails on the very first write.
+    let mut outbound = TunnelServerOutboundStream::new(
+        FailingStream,
+        out_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
+
+    let res = outbound.recover_buffer().await;
+    assert!(res.is_err(), "recover_buffer must surface the send error");
+
+    // All three packets (the failed one plus the two not yet attempted)
+    // must be back in the buffer, in the original FIFO order.
+    let rec_buf = session.recovery_buffer();
+    let mut buffer = rec_buf.lock();
+    assert_eq!(
+        buffer.len(),
+        3,
+        "recover_buffer lost packets on send failure"
+    );
+    for (expected_seq, expected_payload) in [(1u64, "one".as_bytes()), (2, b"two"), (3, b"three")] {
+        let (item, old_seq) = buffer
+            .take_unsent_packet()
+            .expect("packet should still be buffered");
+        assert_eq!(old_seq, expected_seq);
+        assert_eq!(item.payload.as_ref(), expected_payload);
+    }
+
+    Ok(())
+}
+
+#[serial_test::serial(manager)]
+#[tokio::test]
 async fn test_server_stream_with_invalid_packet() {
     log::setup_logging("debug", log::LogType::Test);
 
@@ -413,6 +519,7 @@ async fn test_server_stream_with_invalid_packet() {
         tx,
         stop.clone(),
         SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
     );
 
     // Run the inbound stream in the background
@@ -462,7 +569,15 @@ async fn test_tunnel_inbound() -> Result<()> {
     // Add session to manager
     let session = SessionManager::get_instance().add_session(session).unwrap();
     let stop = session.stopper();
-    let (mut out_crypt, mut in_crypt) = session.server_tunnel_crypts().unwrap();
+    // The test plays the launcher side: private counters seeded at (0, 0),
+    // exactly like the real launcher. Sharing the session's live counters
+    // would make the test's encrypts collide with the sequence numbers the
+    // server's own decrypts advance.
+    let material =
+        shared::crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())
+            .unwrap();
+    let mut out_crypt = Crypt::new(&material.key_receive, 0);
+    let mut in_crypt = Crypt::new(&material.key_send, 0);
 
     let (mut client_side, tunnel_side) = tokio::io::duplex(1024);
     let (tunnel_reader, tunnel_writer) = tokio::io::split(tunnel_side);
@@ -495,5 +610,280 @@ async fn test_tunnel_inbound() -> Result<()> {
 
     // Stop the tunnel after some time to avoid hanging the test
     stop.trigger();
+    Ok(())
+}
+
+// Keep-alive watchdog regressions. Virtual time (start_paused) makes the
+// deadlines deterministic: `tokio::time::advance` moves the tokio clock the
+// inbound stream's watchdog reads, with no wall-clock sleeping.
+
+/// A half-open leg (peer gone, no FIN/RST) that stops sending frames is torn
+/// down after KEEPALIVE_TIMEOUT_SECS, running the normal end-of-stream path
+/// (stop triggered so the outbound half ends too).
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_timeout_ends_stream() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    // Client half is kept alive but never writes, so the server read stays
+    // pending and the only thing that can move is the watchdog timer.
+    let (_client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+
+    let (tx, _rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    // Not expired yet.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+    assert!(
+        !handle.is_finished(),
+        "stream must not die before the deadline"
+    );
+
+    // Past the deadline: the watchdog fires and ends the stream cleanly.
+    tokio::time::advance(std::time::Duration::from_secs(2)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
+}
+
+/// Periodic `Nop` frames keep the leg alive across stretches longer than the
+/// deadline, and are consumed on the inbound half (never forwarded to the
+/// proxy, which would treat them as an unexpected command and kill the
+/// session).
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_nop_sustains_and_is_not_forwarded() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+    let mut client_crypt = Crypt::new(&SharedSecret::new(KEY1), 0);
+
+    let (tx, rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    // Several keep-alive cycles, each advancing just under the deadline and
+    // refreshing it with a `Nop`: total quiet time far exceeds the timeout,
+    // yet the stream must stay up.
+    for _ in 0..4 {
+        tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+        client_crypt
+            .write(&mut client, 0, Command::Nop.to_bytes().as_slice())
+            .await
+            .unwrap();
+        // Let the inbound drain the buffered frame and refresh its clock.
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(!handle.is_finished(), "Nop must keep the leg alive");
+        assert!(
+            rx.try_recv().is_err(),
+            "Nop must be consumed, not forwarded to the proxy"
+        );
+    }
+
+    // Stop the keep-alive and let the deadline lapse: now it dies.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS + 1)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
+}
+
+/// Any inbound frame — not just `Nop` — refreshes the deadline, so a launcher
+/// that predates the keep-alive (real tunnel traffic only) is not killed while
+/// it is actively carrying data, and its payload still reaches the proxy.
+#[serial_test::serial(manager)]
+#[tokio::test(start_paused = true)]
+async fn test_server_inbound_keepalive_data_frame_sustains() {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (mut client, server) = tokio::io::duplex(1024);
+    let (crypt, _) = make_test_crypts();
+    let mut client_crypt = Crypt::new(&SharedSecret::new(KEY1), 0);
+
+    let (tx, rx) = flume::bounded(10);
+    let stop = Trigger::new();
+
+    let mut inbound = TunnelServerInboundStream::new(
+        server,
+        crypt,
+        tx,
+        stop.clone(),
+        SessionId::new_random(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let handle = tokio::spawn(async move { inbound.run().await });
+
+    for i in 0..3u8 {
+        tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS - 1)).await;
+        let payload = format!("data-{i}");
+        client_crypt
+            .write(&mut client, TEST_CHANNEL_ID, payload.as_bytes())
+            .await
+            .unwrap();
+        tokio::time::advance(std::time::Duration::from_millis(1)).await;
+        assert!(
+            !handle.is_finished(),
+            "data traffic must keep the leg alive"
+        );
+        let got = rx.try_recv().unwrap();
+        assert_eq!(got.channel_id, TEST_CHANNEL_ID);
+        assert_eq!(got.payload.as_ref(), payload.as_bytes());
+    }
+
+    // Quiet past the deadline: the data-driven liveness does not exempt an
+    // idle connection from the timeout.
+    tokio::time::advance(std::time::Duration::from_secs(KEEPALIVE_TIMEOUT_SECS + 1)).await;
+    handle.await.unwrap().unwrap();
+    assert!(stop.is_triggered());
+}
+
+/// The sequence number stamped into the recovery buffer must be the one the
+/// frame actually carries on the wire. Stamping a *prediction*
+/// (`current_seq() + 1`) desynchronizes the label from the wire whenever a
+/// second holder of the session's shared outbound counter encrypts between
+/// the prediction and the encrypt — exactly what a recovery handshake does
+/// while an old stream is still live. The buffer then holds labels that no
+/// window check can satisfy, and recovery fails.
+///
+/// Pinned here with a real interleave: the outbound stream sends payloads
+/// while another task encrypts under the same shared counter on the same
+/// runtime. Drain order is wire order (single writer, FIFO buffer).
+#[serial_test::serial(manager)]
+#[tokio::test(flavor = "multi_thread")]
+async fn recovery_buffer_labels_match_the_sequence_on_the_wire() -> Result<()> {
+    let session = new_session_for_test("127.0.0.1:1234");
+    let session = SessionManager::get_instance().add_session(session).unwrap();
+
+    let (_, stream_crypt) = session.server_tunnel_crypts()?;
+    let stop = Trigger::new();
+    let (tx, rx) = flume::bounded(100);
+    // Capacity 1, not 64 KiB: every duplex write must hand its bytes to the
+    // reader before it can continue, so the writer task genuinely yields
+    // between frames and the interloper's encrypt is guaranteed to slip in.
+    // A large buffer lets the writer drain all payloads in one go under CPU
+    // contention, and the test's precondition ("the interleave consumed a
+    // seq") degenerates ~half the time.
+    let (client, server) = tokio::io::duplex(1);
+    let (mut client_reader, _client_write) = tokio::io::split(client);
+
+    let mut outbound = TunnelServerOutboundStream::new(
+        server,
+        stream_crypt,
+        rx,
+        stop.clone(),
+        *session.id(),
+        Arc::new(TrafficCounters::default()),
+    );
+    let stream_handle = tokio::spawn(async move {
+        let _ = outbound.run().await;
+    }); // the channel-close exit is expected
+
+    // Independent holder over the session's shared outbound counter: every
+    // encrypt consumes a real sequence number that the stream's frames are
+    // interleaved with. The first encrypt happens inline, before any payload
+    // is queued, so the wire cannot start at seq 1 even on a lucky schedule.
+    let mut interloper = {
+        let (_in, out) = session.server_tunnel_crypts()?;
+        out
+    };
+    let mut hammer_buf = PacketBuffer::new();
+    hammer_buf.set_data(b"interleave").unwrap();
+    interloper.encrypt(0, 10, &mut hammer_buf).unwrap();
+    let hammer_stop = stop.clone();
+    let hammer_handle = tokio::spawn(async move {
+        for _ in 0..100u32 {
+            if hammer_stop.is_triggered() {
+                break;
+            }
+            interloper.encrypt(0, 10, &mut hammer_buf).unwrap(); // consumes a real seq each round
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let payloads: Vec<Vec<u8>> = (0..20u32)
+        .map(|i| format!("rld-{i:03}").repeat(8).into_bytes())
+        .collect();
+    let expected: Vec<Vec<u8>> = payloads.clone();
+    for p in payloads {
+        tx.send(PayloadWithChannel {
+            channel_id: TEST_CHANNEL_ID,
+            payload: p.into(),
+        })
+        .unwrap();
+    }
+
+    // The launcher-side crypt: decrypts server->tunnel frames under key_send.
+    let material =
+        shared::crypt::tunnel::derive_tunnel_material(session.shared_secret(), session.ticket())?;
+    let mut launcher_crypt = Crypt::new(&material.key_send, 0);
+
+    let mut stream_seq: Vec<u64> = Vec::new();
+    let mut expect_idx = 0usize;
+    while expect_idx < expected.len() {
+        let mut header = [0u8; 10];
+        client_reader.read_exact(&mut header).await?;
+        let length = u16::from_be_bytes([header[8], header[9]]) as usize;
+        let mut frame = header.to_vec();
+        frame.resize(10 + length, 0);
+        client_reader.read_exact(&mut frame[10..]).await?;
+
+        let wire_seq = u64::from_be_bytes(frame[0..8].try_into().unwrap());
+        let mut pb = PacketBuffer::new();
+        pb.full_buffer_mut()[..frame.len()].copy_from_slice(&frame);
+        launcher_crypt.decrypt(&mut pb)?;
+        if pb.data() == expected[expect_idx].as_slice() {
+            assert_eq!(pb.channel_id(), TEST_CHANNEL_ID);
+            stream_seq.push(wire_seq);
+            expect_idx += 1;
+        }
+    }
+
+    drop(tx);
+    stop.trigger();
+    let _ = stream_handle.await;
+    let _ = hammer_handle.await;
+
+    let labels: Vec<u64> = {
+        let rec_buf = session.recovery_buffer();
+        let mut buf = rec_buf.lock();
+        let mut v = Vec::new();
+        while let Some((_packet, seq)) = buf.take_unsent_packet() {
+            v.push(seq);
+        }
+        v
+    };
+
+    assert!(!stream_seq.is_empty());
+    // Every interloper encrypt consumed a real sequence number: the wire seqs
+    // of the stream frames are not contiguous.
+    assert!(
+        stream_seq.windows(2).any(|w| w[1] - w[0] > 1),
+        "the interleave did not consume any outbound sequences (test degenerated)"
+    );
+    assert_eq!(
+        labels, stream_seq,
+        "recovery-buffer labels drifted from the sequences on the wire"
+    );
+
+    SessionManager::get_instance().remove_session(session.id());
     Ok(())
 }

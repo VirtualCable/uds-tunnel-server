@@ -37,6 +37,7 @@ use anyhow::Result;
 use shared::log;
 use shared::protocol::{PayloadWithChannelReceiver, PayloadWithChannelSender};
 
+use crate::broker::BrokerApi;
 use crate::config;
 use crate::session::SessionRecoveryBuffer;
 
@@ -52,7 +53,7 @@ pub struct SessionManager {
 
 impl fmt::Debug for SessionManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         f.debug_struct("SessionManager")
             .field("sessions_count", &sessions.len())
             .finish()
@@ -75,8 +76,11 @@ impl SessionManager {
     /// `get_equiv_session` / `remove_equiv_session` bounded even
     /// under session-flood conditions.
     pub fn add_session(&self, session: Session) -> Result<Arc<Session>> {
-        let max = config::get().read().unwrap().max_sessions();
-        let mut sessions = self.sessions.write().unwrap();
+        let max = config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_sessions();
+        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
         if sessions.len() >= max {
             log::warn!(
                 "Refusing new session: SessionManager at cap ({} of {})",
@@ -95,40 +99,194 @@ impl SessionManager {
         }
         let session = Arc::new(session);
         sessions.insert(session.id, session.clone());
+        // If the session carries a UDP leg, publish its token in the
+        // relay map so the shared UDP socket can demultiplex to it.
+        // No-op when the relay is not running (e.g. tests, udp_enabled=false).
+        if session.udp().is_some() {
+            crate::udp::register_session(&session);
+        }
+        // Drop the map lock before spawning: the watchdog only needs the
+        // session's own cheap handles (counters, stopper, id), never the
+        // map.
+        drop(sessions);
+        Self::spawn_idle_data_watchdog(&session);
         Ok(session)
     }
 
+    /// Data-idle cap: a session may hold its slot only while it carries
+    /// real tunnel data. Keep-alive `Nop` frames refresh the launcher
+    /// leg's 10 s watchdog (proving the TCP socket is alive) but never
+    /// touch the traffic counters, so a pure-`Nop` zombie cannot sustain
+    /// the session beyond `session_idle_data_timeout_secs` (default
+    /// `DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS`; `0` disables the cap).
+    /// The clock is the session's shared `TrafficCounters`, so a
+    /// `Recover` of a dataless launcher does not reset it — re-attaching
+    /// a zombie keeps it a zombie. The window is pinned at registration
+    /// time (config re-reads afterwards do not retarget live sessions).
+    fn spawn_idle_data_watchdog(session: &Arc<Session>) {
+        let window = match config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_idle_data_timeout()
+        {
+            Some(window) => window,
+            None => return, // cap disabled
+        };
+        // The watchdog is a spawned task; without a runtime there is
+        // nothing to schedule it on (pure-sync unit use of the manager).
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let traffic = session.traffic();
+        let stop = session.stopper();
+        let id = *session.id();
+        handle.spawn(async move {
+            let mut last = traffic.total();
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(window) => {}
+                    // The session is ending for any other reason (clean
+                    // close, cap-reject, shutdown): our job is done.
+                    _ = stop.wait_async() => return,
+                }
+                let now = traffic.total();
+                if now != last {
+                    // Payload bytes crossed the leg within the window
+                    // (TCP or UDP, either direction): earned another one.
+                    last = now;
+                    continue;
+                }
+                log::info!(
+                    "Session {:?}: no data traffic within {:?}, ending it (keep-alive Nops alone cannot sustain a session)",
+                    id,
+                    window
+                );
+                // Same termination as any other session stop: the proxy
+                // exits and removes the session from the map; the client
+                // leg sees the drop.
+                stop.trigger();
+                return;
+            }
+        });
+    }
+
     pub fn get_session(&self, id: &SessionId) -> Option<Arc<Session>> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.get(id).cloned()
     }
 
     pub fn remove_session(&self, id: &SessionId) {
-        let mut sessions = self.sessions.write().unwrap();
-        if let Some(session) = sessions.get(id) {
+        // Unlink under the lock, then work on the taken Arc after the
+        // guard is released: if this call holds the last reference,
+        // `Session::Drop` (stop trigger + broker notification) runs
+        // without the global session map locked, so nothing the teardown
+        // path touches can re-enter these manager methods under the lock.
+        let session = {
+            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+            sessions.remove(id)
+        };
+        if let Some(session) = session {
             session.stop.trigger();
-            sessions.remove(id);
+            // Drop the UDP leg from the relay token map, if any.
+            if let Some(udp) = session.udp() {
+                crate::udp::unregister_token(&udp.token);
+            }
+            // `session` is dropped here, outside the write lock. The
+            // session's `current_equiv_id` lives inside the Session and
+            // is dropped together with the Arc, so no global equiv map
+            // needs to be cleaned up here.
         }
-        // The session's `current_equiv_id` lives inside the Session and
-        // is dropped together with the Arc, so no global equiv map needs
-        // to be cleaned up here.
     }
 
     pub async fn finish_all_sessions(&self) {
-        // Just drop session, will set the stop trigger
-        let mut sessions = self.sessions.write().unwrap();
-        sessions.clear();
+        // Drain repeatedly until a pass finds the map empty. The caller
+        // closes the accept loop before invoking this (main triggers the
+        // listener stop first), but connections already in flight can
+        // reach `add_session` while this function awaits the broker stop
+        // reports of the earlier batch. A session left in the map at the
+        // end of shutdown gets no broker stop at all — the tunnel record
+        // hangs until the broker's own validity window expires — so every
+        // late arrival must be caught by a further pass. The rounds cap
+        // only guards against a pathological endless supply; with the
+        // accept loop closed, every in-flight `handle_connection` is
+        // bounded by its own request/handshake timeouts, so the loop ends
+        // after the stragglers drain.
+        let mut round = 0usize;
+        loop {
+            round += 1;
+            // Take the sessions out of the map but keep them alive until
+            // the final stop reports are delivered: dropping the Arcs
+            // earlier would stop the streams (and the traffic counters)
+            // mid-drain, and the detached notifications spawned by
+            // `Session::Drop` could be killed before the runtime shuts
+            // down.
+            let sessions: Vec<Arc<Session>> = {
+                let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
+                sessions.drain().map(|(_, session)| session).collect()
+            };
+            if sessions.is_empty() {
+                break;
+            }
+            if round > 8 {
+                // Should be unreachable; warn rather than loop forever.
+                log::warn!(
+                    "Shutdown drain still finding sessions after {} rounds ({} left)",
+                    round,
+                    sessions.len()
+                );
+                drop(sessions);
+                break;
+            }
+
+            // Stop the streams first so the traffic counters freeze, then
+            // snapshot them for the report (in-flight adds after this point
+            // are at most one packet per leg, which is acceptable for
+            // informational stats).
+            for session in &sessions {
+                session.stopper().trigger();
+            }
+
+            // Claim the one-shot broker notifications up front
+            // (`take_broker_stop` is idempotent, so the `Session::Drop`
+            // below will not re-send). Await the reports concurrently;
+            // each has its own request timeout.
+            let reports: Vec<_> = sessions
+                .iter()
+                .filter_map(|session| session.take_broker_stop())
+                .map(|(notify, sent, recv)| {
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            crate::broker::get().stop_connection(&notify, sent, recv).await
+                        {
+                            log::warn!(
+                                "Broker stop notification failed on shutdown for notify ticket {:?}: {:?}",
+                                notify.redacted(),
+                                e
+                            );
+                        }
+                    })
+                })
+                .collect();
+            futures::future::join_all(reports).await;
+
+            // Dropping the Arcs triggers each session's `Drop`, stopping
+            // the proxy/streams just as `sessions.clear()` used to.
+            drop(sessions);
+        }
     }
 
     pub fn count(&self) -> usize {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.len()
     }
 
     /// Effective cap from `ServerConfig::max_sessions()`. Convenience
     /// for tests and for the connection layer when logging rejections.
     pub fn max_sessions(&self) -> usize {
-        config::get().read().unwrap().max_sessions()
+        config::get()
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_sessions()
     }
 
     /// Number of currently registered sessions whose `src_ip` matches
@@ -136,7 +294,7 @@ impl SessionManager {
     /// configured, otherwise the global `add_session` cap already
     /// bounds the active set.
     pub fn count_by_remote(&self, remote: std::net::SocketAddr) -> usize {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions.values().filter(|s| s.src_ip() == remote).count()
     }
 
@@ -161,10 +319,10 @@ impl SessionManager {
         }
     }
 
-    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16) {
+    pub async fn stop_client(&self, id: &SessionId, stream_channel_id: u16, generation: u64) {
         if let Some(session) = self.get_session(id) {
             log::debug!("Stopping session {:?} client side", id);
-            session.stop_client(stream_channel_id).await;
+            session.stop_client(stream_channel_id, generation).await;
         }
     }
 
@@ -172,7 +330,7 @@ impl SessionManager {
     /// that the client knows is accepted; the internal session id is
     /// never exposed and is not a valid key.
     pub fn get_equiv_session(&self, id: &SessionId) -> Option<Arc<Session>> {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         sessions
             .values()
             .find(|s| s.current_equiv_id().as_ref() == Some(id))
@@ -196,7 +354,7 @@ impl SessionManager {
     /// any. Used by `recover::recover` to invalidate the inbound
     /// recover_session_id before minting a new one.
     pub fn remove_equiv_session(&self, from: &SessionId) {
-        let sessions = self.sessions.read().unwrap();
+        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
         if let Some(session) = sessions
             .values()
             .find(|s| s.current_equiv_id().as_ref() == Some(from))

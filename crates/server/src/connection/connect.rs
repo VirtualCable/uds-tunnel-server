@@ -1,18 +1,122 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use shared::{crypt::types::PacketBuffer, log, protocol::ticket::Ticket, system::trigger::Trigger};
+use shared::{
+    crypt::{datagram::random_token, tunnel::get_udp_crypts, types::PacketBuffer},
+    log,
+    protocol::ticket::Ticket,
+    system::trigger::Trigger,
+};
 
 use crate::{
     broker::{self, BrokerApi},
     config,
-    session::{Session, SessionManager},
+    consts::HANDSHAKE_CONFIRM_TIMEOUT_SECS,
+    session::{Session, SessionId, SessionManager, UdpState},
     stream::server::TunnelServerStream,
 };
 
 use super::types::OpenResponse;
+
+/// RAII guard for a session that has been registered in the
+/// [`SessionManager`] but whose connect handshake has not completed yet.
+///
+/// Between `add_session` and the moment the client's ticket echo is
+/// validated and the `OpenResponse` is written, every early return
+/// (confirm timeout, read error, invalid ticket length, content mismatch,
+/// response write failure, ...) would otherwise leak a session that has
+/// no owner: the proxy task never observes a stop, nothing reaps it, and
+/// it occupies a slot of the `max_sessions` cap indefinitely. Half-open
+/// handshakes are trivially reachable (connect, handshake, close), so a
+/// leak on any of these paths is a slow resource-exhaustion DoS.
+///
+/// The guard removes the session on `Drop` unless [`commit`] has been
+/// called, so cleanup is automatic for the current and all future error
+/// paths in the handshake.
+///
+/// [`commit`]: PendingSession::commit
+struct PendingSession {
+    session: Arc<Session>,
+    committed: bool,
+}
+
+impl PendingSession {
+    fn new(session: Arc<Session>) -> Self {
+        Self {
+            session,
+            committed: false,
+        }
+    }
+
+    fn id(&self) -> &SessionId {
+        self.session.id()
+    }
+
+    /// Mark the handshake as completed: from now on the session belongs
+    /// to a validated client and must not be reaped by this guard.
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for PendingSession {
+    fn drop(&mut self) {
+        if !self.committed {
+            SessionManager::get_instance().remove_session(self.id());
+        }
+    }
+}
+
+/// RAII guard for the broker tunnel allocation created by
+/// `start_connection`.
+///
+/// A successful start reserves a tunnel record on the broker (keyed by
+/// the notify ticket, valid until its TTL expires). Every path that
+/// abandons the tunnel before a `Session` exists to own the notify
+/// ticket — ticket validation failure, per-IP cap rejection, shared
+/// secret decode failure — must release that reservation explicitly, or
+/// the broker keeps an open tunnel that never carries traffic.
+///
+/// Once the `Session` is built with the notify ticket, it owns the stop
+/// responsibility (its `Drop` reports the real traffic stats) and the
+/// guard is committed, so the (0, 0) stop below cannot fire twice.
+struct BrokerAllocation {
+    notify: Option<Ticket>,
+    committed: bool,
+}
+
+impl BrokerAllocation {
+    fn new(notify: Option<Ticket>) -> Self {
+        Self {
+            notify,
+            committed: false,
+        }
+    }
+
+    /// Hand the stop responsibility to the session: marks the guard
+    /// committed and returns the notify ticket to install on the new
+    /// `Session`. From now on this guard stays silent on drop, and the
+    /// session's own teardown reports the stop (with real stats, even if
+    /// registration later fails and the session is dropped immediately).
+    fn handoff(&mut self) -> Option<Ticket> {
+        self.committed = true;
+        self.notify.take()
+    }
+}
+
+impl Drop for BrokerAllocation {
+    fn drop(&mut self) {
+        if !self.committed
+            && let Some(notify) = self.notify
+        {
+            // No session ever relayed traffic on this allocation.
+            crate::broker::spawn_stop_notification(notify, 0, 0);
+        }
+    }
+}
 
 pub(super) async fn connect<R, W>(
     mut reader: R,
@@ -27,10 +131,16 @@ where
     let session_manager = SessionManager::get_instance();
     let broker = broker::get();
     match broker.start_connection(ticket, src_ip).await {
-        // Note: On a future, the broker could return more than a single channel stream id
-        // But currently, only one is supported, althout it's prepared to be extended later
+        // One ticket may name several remotes (`channel_count =
+        // remotes_count()`, capped by `MAX_CHANNEL_ID`); each opens its own
+        // data channel on the same tunnel.
         Ok(ticket_info) => {
             log::debug!("Received ticket info from broker: {:?}", ticket_info);
+            // The broker reserved a tunnel for us; the notify ticket is
+            // its handle. Keep it guarded until a `Session` exists to own
+            // the stop responsibility, so every early exit below releases
+            // the reservation (see `BrokerAllocation`).
+            let mut broker_alloc = BrokerAllocation::new(ticket_info.notify_ticket());
             ticket_info.validate()?; // Ensure ticket info is valid for our purposes
 
             // Optional per-remote-IP cap: when the config sets
@@ -40,16 +150,33 @@ where
             // network hiccup". No O(N) scan runs when the cap is
             // disabled (the default).
             //
+            // Trust boundary: with `use_proxy_protocol` enabled, `src_ip`
+            // comes from the PROXY v2 header and is only as trustworthy as
+            // the peer that wrote it. Who may reach the server (and who
+            // may speak PROXY v2 to it) is a deployment decision enforced
+            // at the firewall/routing layer, exactly as for any
+            // PROXY-speaking service (HAProxy, nginx, Envoy); the per-IP
+            // cap is defense-in-depth, not a network boundary. Keying the
+            // cap on the raw TCP peer instead would break the intended
+            // posture: behind a frontend, every legitimate client shares
+            // the frontend's address.
+            //
             // Compute the predicate synchronously and drop the config
             // read-lock before any `.await` so the guard does not
             // cross an await point (which would break `tokio::spawn`).
-            let per_remote_cap = config::get().read().unwrap().max_sessions_per_remote;
+            let per_remote_cap = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .max_sessions_per_remote;
             if let Some(per_remote) = per_remote_cap
                 && session_manager.count_by_remote(src_ip) >= per_remote
             {
                 log::warn!(
-                    "Per-remote-IP session cap hit for {} (cap {}); stalling",
+                    "Per-remote-IP session cap hit for {} ({} sessions at cap {}); \
+                     raise `max_sessions_per_remote` in the server config if this is \
+                     legitimate load; stalling",
                     src_ip,
+                    session_manager.count_by_remote(src_ip),
                     per_remote
                 );
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -57,20 +184,70 @@ where
             }
 
             let stop = Trigger::new();
-            let session = session_manager.add_session(Session::new(
-                ticket_info.get_shared_secret()?,
+            let shared_secret = ticket_info.get_shared_secret()?;
+
+            // Session rekeying threshold, read ONCE here (the same value is
+            // advertised in `OpenResponse.rekey_log2` and pinned into the
+            // session, so every crypt the session hands out afterwards —
+            // streams, replacements, recovery — epochs identically without
+            // ever touching the config again).
+            let rekey_log2 = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .rekey_log2();
+
+            let session = Session::with_rekey_log2(
+                shared_secret.clone(),
                 *ticket,
                 stop.clone(),
                 src_ip,
                 ticket_info.channels_remotes(),
-            ))?;
+                broker_alloc.handoff(),
+                rekey_log2,
+            );
+
+            // UDP relay leg: only when both the broker flag and the server
+            // config allow it. Keys derive from the same ticket shared
+            // secret (dedicated HKDF label), so no extra handshake is
+            // needed; a zero token on the OpenResponse means "disabled".
+            let udp_enabled = config::get()
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .udp_enabled();
+            let (udp_token, udp_port) = if ticket_info.enable_udp() && udp_enabled {
+                let token = random_token();
+                let (inbound, outbound) = get_udp_crypts(&shared_secret, ticket, rekey_log2)?;
+                session.set_udp(UdpState::new(token, inbound, outbound));
+                log::debug!("UDP relay leg enabled for ticket {:?}", ticket);
+                // Advertise the resolved UDP port so the client can reach
+                // the relay even when it is split from the TCP listener.
+                (
+                    token,
+                    config::get()
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .udp_sockaddr()
+                        .port(),
+                )
+            } else {
+                // A zeroed token means "UDP disabled"; the port is ignored.
+                ([0u8; shared::crypt::datagram::TOKEN_LENGTH], 0)
+            };
+
+            // add_session also publishes the UDP token in the relay map.
+            let session = session_manager.add_session(session)?;
+
+            // From this point on, the registered session is owned by this
+            // guard until the handshake completes; any early return below
+            // removes it automatically (see `PendingSession`).
+            let mut pending = PendingSession::new(session.clone());
 
             // Check that the first crypted packet is the ticket again
             let (mut crypt_reader, mut crypt_writer) = session.server_tunnel_crypts()?;
 
             let mut buffer: PacketBuffer = PacketBuffer::new();
             let ticket_confirm = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(HANDSHAKE_CONFIRM_TIMEOUT_SECS),
                 crypt_reader.read(&mut reader, &mut buffer),
             )
             .await
@@ -103,25 +280,37 @@ where
             // `remotes_count <= MAX_CHANNEL_ID` and `> 0`, so the channel
             // count we advertise here matches the broker's value one-to-one
             // and the client's view of the world matches ours.
-            let response = OpenResponse::new(equiv_id, ticket_info.remotes_count() as u16, 1, 1);
+            let response = OpenResponse::with_udp(
+                equiv_id,
+                ticket_info.remotes_count() as u16,
+                1,
+                1,
+                udp_token,
+                udp_port,
+                rekey_log2,
+            );
             let response_data = response.as_vec();
             // Send the OpenResponse
             crypt_writer
                 .write(&mut writer, ticket_channel_id, &response_data)
                 .await?;
 
+            // Handshake completed: the session is now owned by the client
+            // connection, detach it from the cleanup guard.
+            pending.commit();
+
             log::debug!(
                 "Sent OpenResponse to client with session_id: {:?}",
                 response
             );
 
-            // Now the recv/send seq should be set to 1 for next crypt managers
-            // (we already spent seq 0 for ticket exchange)
-            // In fact, we spent seq 1, because the crypt is pre-incrementing before use
-            // So next expected seq is 2 on both sides.
-            // Note: This is because we "spent" seq 0 just on the sent of the equiv session id
-            //       on response
-            session.set_seqs(1, 1);
+            // No seq sync is needed after the handshake: the crypts above
+            // share the session's live counters, so they already advanced
+            // the authoritative sequence state while consuming the ticket
+            // echo (inbound -> last-used + 1 via the anti-replay fetch_max,
+            // which admits a replayed handshake ticket only as a read at
+            // seq >= 2) and writing the OpenResponse (outbound -> 1 used,
+            // so the next send is 2, exactly what the client expects).
 
             // Server stream is the one connected to the client
             let server_stream = TunnelServerStream::new(*session.id(), reader, writer);

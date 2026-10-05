@@ -1,0 +1,509 @@
+// BSD 3-Clause License
+// Copyright (c) 2026, Virtual Cable S.L.
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice,
+//    this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+//    this list of conditions and the following disclaimer in the documentation
+//    and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its contributors
+//    may be used to endorse or promote products derived from this software
+//    without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+// Authors: Adolfo Gómez, dkmaster at dkmon dot com
+
+use aes_gcm::{
+    AeadInOut, Aes256Gcm, Nonce, Tag,
+    aead::{AeadCore, KeyInit},
+};
+use anyhow::Result;
+
+use std::sync::Arc;
+
+use super::{consts, rekey::RekeyState, replay::ReplayWindow, types::SharedSecret};
+
+/// Length of the per-session UDP token, in bytes.
+pub const TOKEN_LENGTH: usize = 16;
+/// Per-session identifier that lets the shared UDP socket of the server
+/// demultiplex datagrams to their owning session. Randomly assigned by the
+/// server; a zero token means "UDP disabled".
+pub type UdpToken = [u8; TOKEN_LENGTH];
+
+/// Cleartext datagram header: token (16 bytes) + seq (8 bytes, big-endian).
+pub const DATAGRAM_HEADER_SIZE: usize = TOKEN_LENGTH + 8;
+/// Maximum payload carried by one tunnel datagram. mstsc sends RDPUDP
+/// datagrams of 1237-1248 bytes (mostly 1239), above the nominal 1232 MTU, so
+/// the cap leaves headroom over them; anything larger is dropped and the RDP
+/// session stalls on a black screen.
+///
+/// MTU note: the worst-case wire datagram is 1440 bytes of UDP payload
+/// (24 header + 1400 payload + 16 tag), i.e. 1468 bytes on the wire with IPv4
+/// headers, which fits a 1500-byte path. On a path with a smaller MTU max-size
+/// datagrams would IP-fragment or drop: RDPUDP absorbs that as ordinary loss
+/// and retransmits.
+pub const MAX_DATAGRAM_PAYLOAD: usize = 1400;
+/// Minimum valid datagram: header + tag + at least one payload byte.
+const MIN_DATAGRAM_SIZE: usize = DATAGRAM_HEADER_SIZE + consts::TAG_LENGTH + 1;
+const MAX_DATAGRAM_SIZE: usize = DATAGRAM_HEADER_SIZE + MAX_DATAGRAM_PAYLOAD + consts::TAG_LENGTH;
+
+/// Initial value of the UDP send sequence counter.
+///
+/// Starts at 2^63 so UDP datagram seqs are unmistakable from the TCP leg
+/// counters (which start at 0/1) when inspecting traffic, and so that the
+/// 64-bit counter can never wrap: 2^63 remaining datagrams at a sustained
+/// 1M datagrams/second would take ~292,000 years.
+pub const INITIAL_SEQ: u64 = 1 << 63;
+
+/// Generates a fresh random session token. Uses the same CSPRNG-backed
+/// `rand::rng()` as `Ticket::new_random`. A zero token is reserved for
+/// "UDP disabled" and is never produced here (128 random bits; the
+/// all-zero value is a measure-zero event, but we guarantee it anyway).
+///
+/// The low nibble is always zero: those 4 bits are reserved as a channel
+/// index for the future multi-destination extension (channel `i` uses
+/// token `base + i`, max 16 channels), which makes collisions between a
+/// derived channel token and another session's base token impossible by
+/// construction.
+pub fn random_token() -> UdpToken {
+    use rand::RngExt as _;
+    let mut token = [0u8; TOKEN_LENGTH];
+    rand::rng().fill(&mut token);
+    token[TOKEN_LENGTH - 1] &= 0xF0;
+    token
+}
+
+/// AEAD crypt for the UDP leg of the tunnel.
+///
+/// Same AES-256-GCM construction as the stream `Crypt` (nonce = seq padded to
+/// 12 bytes), but with ordering semantics relaxed for datagrams: the receiver
+/// tracks seen sequence numbers with a sliding `ReplayWindow` instead of
+/// requiring strictly increasing values, and AAD binds the session token so a
+/// datagram cannot be replayed across sessions.
+///
+/// Keys and sequence numbers are fully independent of the TCP leg. There is
+/// no retransmission and no reordering: what is lost is lost (RDPUDP handles
+/// reliability end to end).
+///
+/// With rekeying (`k > 0`) the per-epoch key is anchored at `INITIAL_SEQ`, so
+/// the first datagram of a session sits in epoch 0 on the legacy key despite
+/// its huge absolute seq (`k = 0` collapses to a single epoch forever,
+/// byte-identical to the pre-rekeying wire format).
+pub struct DatagramCrypt {
+    /// Cipher for the last datagram this crypt encrypted or authenticated.
+    /// Kept as an `Arc` so an epoch crossing re-derives once and staying
+    /// inside the epoch is a pointer clone.
+    cipher: Arc<Aes256Gcm>,
+    send_seq: u64,
+    window: ReplayWindow,
+    /// Per-direction rekeying parameters anchored at `INITIAL_SEQ`, so the
+    /// first datagram of a session always sits in epoch 0 (the legacy key)
+    /// even though its absolute seq is 2^63 + 1. `k = 0` collapses to a
+    /// single epoch forever, byte-identical to the pre-rekeying wire format.
+    rekey: Arc<RekeyState>,
+    cipher_epoch: u64,
+}
+
+impl DatagramCrypt {
+    pub fn new(key: &SharedSecret) -> Self {
+        let cipher = Arc::new(Aes256Gcm::new(key.as_ref().into()));
+        DatagramCrypt {
+            rekey: Arc::new(RekeyState::epoch0_only(
+                super::rekey::TRANSPORT_UDP,
+                super::rekey::DIR_SERVER_TO_LAUNCHER,
+                INITIAL_SEQ,
+                cipher.clone(),
+            )),
+            cipher,
+            send_seq: INITIAL_SEQ,
+            window: ReplayWindow::new(),
+            cipher_epoch: 0,
+        }
+    }
+
+    /// Creates a crypt that rekeys per `rekey`, starting on its epoch-0
+    /// cipher (the legacy UDP-leg key for this direction). The epoch of
+    /// every datagram comes from its own seq, so a late/reordered datagram
+    /// of an earlier epoch re-derives that epoch's key with no transition
+    /// state.
+    pub fn with_rekey(rekey: Arc<RekeyState>) -> Self {
+        DatagramCrypt {
+            cipher: rekey.cipher_for(0),
+            send_seq: INITIAL_SEQ,
+            window: ReplayWindow::new(),
+            rekey,
+            cipher_epoch: 0,
+        }
+    }
+
+    /// Selects the cipher owning `seq`, re-deriving once per epoch crossing.
+    /// The replay window is orthogonal: it bounds *which* seqs are accepted;
+    /// the epoch only decides *which key* decrypts them.
+    fn cipher_for_seq(&mut self, seq: u64) -> Arc<Aes256Gcm> {
+        let epoch = self.rekey.epoch_of(seq);
+        if epoch != self.cipher_epoch {
+            self.cipher = self.rekey.cipher_for(epoch);
+            self.cipher_epoch = epoch;
+        }
+        self.cipher.clone()
+    }
+
+    /// Epoch anchor for UDP rekeying: the first datagram of a session must
+    /// sit in epoch 0 regardless of the 2^63-based counter.
+    pub const INITIAL_SEQ_ANCHOR: u64 = INITIAL_SEQ;
+
+    /// Current send sequence (last value used; next datagram gets send_seq + 1).
+    pub fn current_seq(&self) -> u64 {
+        self.send_seq
+    }
+
+    fn nonce_for(seq: u64) -> Nonce<<Aes256Gcm as AeadCore>::NonceSize> {
+        let mut nonce_arr = [0u8; 12];
+        nonce_arr[..8].copy_from_slice(&seq.to_be_bytes());
+        nonce_arr.into()
+    }
+
+    fn aad_for(token: &UdpToken, seq: u64) -> [u8; TOKEN_LENGTH + 8] {
+        let mut aad = [0u8; TOKEN_LENGTH + 8];
+        aad[..TOKEN_LENGTH].copy_from_slice(token);
+        aad[TOKEN_LENGTH..].copy_from_slice(&seq.to_be_bytes());
+        aad
+    }
+
+    /// Encrypts one payload into a full wire datagram: token | seq | ct | tag.
+    pub fn encrypt(&mut self, token: &UdpToken, payload: &[u8]) -> Result<Vec<u8>> {
+        if payload.is_empty() || payload.len() > MAX_DATAGRAM_PAYLOAD {
+            return Err(anyhow::anyhow!(
+                "invalid datagram payload size: {}",
+                payload.len()
+            ));
+        }
+
+        self.send_seq += 1;
+        let seq = self.send_seq;
+        let nonce = Self::nonce_for(seq);
+        let aad = Self::aad_for(token, seq);
+
+        let mut data = payload.to_vec();
+        let cipher = self.cipher_for_seq(seq);
+        let tag = cipher
+            .encrypt_inout_detached(&nonce, &aad, data.as_mut_slice().into())
+            .map_err(|e| anyhow::anyhow!("datagram encryption failure: {:?}", e))?;
+
+        let mut out = Vec::with_capacity(DATAGRAM_HEADER_SIZE + data.len() + consts::TAG_LENGTH);
+        out.extend_from_slice(token);
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.append(&mut data);
+        out.extend_from_slice(tag.as_slice());
+        Ok(out)
+    }
+
+    /// Decrypts one wire datagram for the given session token.
+    ///
+    /// - `Ok(Some(payload))` — authentic, fresh datagram.
+    /// - `Ok(None)` — benign discard: wrong token, duplicate, or too old for
+    ///   the replay window. Normal on UDP, not an error.
+    /// - `Err` — malformed or failed AEAD verification (forgery attempt).
+    ///
+    /// The replay window is only marked after a successful AEAD verification,
+    /// so a forged datagram with a huge seq cannot poison the window.
+    pub fn decrypt(&mut self, token: &UdpToken, datagram: &[u8]) -> Result<Option<Vec<u8>>> {
+        if datagram.len() < MIN_DATAGRAM_SIZE || datagram.len() > MAX_DATAGRAM_SIZE {
+            return Err(anyhow::anyhow!("invalid datagram size: {}", datagram.len()));
+        }
+        if &datagram[..TOKEN_LENGTH] != token {
+            return Ok(None); // Not for this session; benign on a shared socket
+        }
+
+        let seq = u64::from_be_bytes(
+            datagram[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE]
+                .try_into()
+                .expect("slice length checked above"),
+        );
+        let nonce = Self::nonce_for(seq);
+        let aad = Self::aad_for(token, seq);
+
+        let ct_len = datagram.len() - DATAGRAM_HEADER_SIZE - consts::TAG_LENGTH;
+        let mut data = datagram[DATAGRAM_HEADER_SIZE..DATAGRAM_HEADER_SIZE + ct_len].to_vec();
+        let tag: &Tag = (&datagram[datagram.len() - consts::TAG_LENGTH..])
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid datagram tag length"))?;
+
+        // Epoch-owned cipher, from the datagram's own seq (the replay
+        // window check below stays the first gate on honest ordering).
+        let cipher = self.cipher_for_seq(seq);
+        cipher
+            .decrypt_inout_detached(&nonce, &aad, data.as_mut_slice().into(), tag)
+            .map_err(|e| anyhow::anyhow!("datagram decryption failure: {:?}", e))?;
+
+        if !self.window.check_and_mark(seq) {
+            return Ok(None); // Duplicate or too old
+        }
+
+        Ok(Some(data))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_token() -> UdpToken {
+        [0x42u8; TOKEN_LENGTH]
+    }
+
+    fn crypt_pair() -> (DatagramCrypt, DatagramCrypt) {
+        let key = SharedSecret::new([7u8; 32]);
+        (DatagramCrypt::new(&key), DatagramCrypt::new(&key))
+    }
+
+    #[test]
+    fn test_random_token_has_zero_channel_nibble() {
+        // The low 4 bits are reserved as the channel index for the future
+        // multi-destination extension; base tokens must always have them
+        // clear so `base + i` (i < 16) can never collide with another
+        // session's base token.
+        for _ in 0..64 {
+            let token = random_token();
+            assert_eq!(token[TOKEN_LENGTH - 1] & 0x0F, 0);
+        }
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+        let payload = b"rdp-udp-payload";
+
+        let datagram = sender.encrypt(&token, payload).unwrap();
+        assert_eq!(
+            datagram.len(),
+            DATAGRAM_HEADER_SIZE + payload.len() + consts::TAG_LENGTH
+        );
+
+        let decrypted = receiver.decrypt(&token, &datagram).unwrap();
+        assert_eq!(decrypted.as_deref(), Some(payload.as_slice()));
+    }
+
+    #[test]
+    fn test_out_of_order_and_loss_are_accepted() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        let d1 = sender.encrypt(&token, b"one").unwrap();
+        let _d2 = sender.encrypt(&token, b"two").unwrap(); // simulates loss: never delivered
+        let d3 = sender.encrypt(&token, b"three").unwrap();
+        let d4 = sender.encrypt(&token, b"four").unwrap();
+
+        // Loss of d2, reordering of d3/d4: all fine
+        assert_eq!(
+            receiver.decrypt(&token, &d4).unwrap().as_deref(),
+            Some(b"four".as_slice())
+        );
+        assert_eq!(
+            receiver.decrypt(&token, &d3).unwrap().as_deref(),
+            Some(b"three".as_slice())
+        );
+        assert_eq!(
+            receiver.decrypt(&token, &d1).unwrap().as_deref(),
+            Some(b"one".as_slice())
+        );
+        // d2 never arrived; nothing breaks
+        let d5 = sender.encrypt(&token, b"five").unwrap();
+        assert_eq!(
+            receiver.decrypt(&token, &d5).unwrap().as_deref(),
+            Some(b"five".as_slice())
+        );
+    }
+
+    #[test]
+    fn test_duplicate_is_discarded_not_error() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        let d1 = sender.encrypt(&token, b"data").unwrap();
+        assert!(receiver.decrypt(&token, &d1).unwrap().is_some());
+        assert!(receiver.decrypt(&token, &d1).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_wrong_token_is_discarded_not_error() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+        let other_token = [0x99u8; TOKEN_LENGTH];
+
+        let d1 = sender.encrypt(&token, b"data").unwrap();
+        assert!(receiver.decrypt(&other_token, &d1).unwrap().is_none());
+        // And the datagram is still valid for its real session afterwards
+        assert!(receiver.decrypt(&token, &d1).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_tampered_datagram_fails() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        let mut d1 = sender.encrypt(&token, b"data").unwrap();
+        let last = d1.len() - 1;
+        d1[last] ^= 0xFF; // flip a bit in the tag
+        assert!(receiver.decrypt(&token, &d1).is_err());
+    }
+
+    #[test]
+    fn test_forged_huge_seq_does_not_poison_window() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        // Attacker without the key forges a datagram with a huge seq.
+        // AEAD must reject it BEFORE the window is touched.
+        let mut forged = Vec::new();
+        forged.extend_from_slice(&token);
+        forged.extend_from_slice(&(u64::MAX - 1).to_be_bytes());
+        forged.extend_from_slice(&[0u8; 8]); // fake ciphertext
+        forged.extend_from_slice(&[0u8; consts::TAG_LENGTH]);
+        assert!(receiver.decrypt(&token, &forged).is_err());
+
+        // Legitimate traffic keeps flowing: window was not advanced
+        let d1 = sender.encrypt(&token, b"legit").unwrap();
+        assert!(receiver.decrypt(&token, &d1).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_truncated_and_oversized_datagrams_fail() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        assert!(receiver.decrypt(&token, &[0u8; 10]).is_err());
+        let huge = vec![0u8; MAX_DATAGRAM_SIZE + 1];
+        assert!(receiver.decrypt(&token, &huge).is_err());
+
+        // Max payload roundtrips
+        let payload = vec![0xCDu8; MAX_DATAGRAM_PAYLOAD];
+        let d = sender.encrypt(&token, &payload).unwrap();
+        assert_eq!(
+            receiver.decrypt(&token, &d).unwrap().as_deref(),
+            Some(payload.as_slice())
+        );
+    }
+
+    #[test]
+    fn test_mstsc_sized_datagram_roundtrips() {
+        let (mut sender, mut receiver) = crypt_pair();
+        let token = test_token();
+
+        let payload = vec![0xABu8; 1248];
+        let d = sender.encrypt(&token, &payload).unwrap();
+        assert_eq!(
+            receiver.decrypt(&token, &d).unwrap().as_deref(),
+            Some(payload.as_slice())
+        );
+    }
+
+    #[test]
+    fn test_empty_payload_rejected() {
+        let (mut sender, _) = crypt_pair();
+        assert!(sender.encrypt(&test_token(), b"").is_err());
+    }
+
+    /// DatagramCrypt rekeying: crossing an epoch boundary rotates the key
+    /// purely by seq; the replay window keeps bounding *which* seqs are
+    /// accepted independently of *which key* decrypts them, and a datagram
+    /// of an earlier epoch that arrives after the receiver already crossed
+    /// boundaries still decrypts (the key is re-derived from the datagram's
+    /// own seq, never from a transition clock).
+    #[test]
+    fn test_rekey_across_epochs_roundtrip_and_replay() {
+        use super::super::rekey::{DIR_SERVER_TO_LAUNCHER, RekeyState, SessionPrk, TRANSPORT_UDP};
+
+        let secret = SharedSecret::new([0x51u8; 32]);
+        let ticket: crate::protocol::ticket::Ticket = [0x52u8; 48].into();
+        let epoch0 = SharedSecret::new([0x53u8; 32]);
+        let mk = || {
+            Arc::new(RekeyState::new(
+                Arc::new(SessionPrk::derive(&secret, &ticket)),
+                TRANSPORT_UDP,
+                DIR_SERVER_TO_LAUNCHER,
+                2, // epoch rotates every 4 datagrams, anchored at INITIAL_SEQ
+                INITIAL_SEQ,
+                Arc::new(Aes256Gcm::new(epoch0.as_ref().into())),
+            ))
+        };
+
+        let token = test_token();
+        let mut sender = DatagramCrypt::with_rekey(mk());
+        let mut receiver = DatagramCrypt::with_rekey(mk());
+
+        // Emit 12 datagrams (seqs INITIAL_SEQ+1..+12, epochs 0,1,2), storing
+        // the wire form so the receiver can consume them out of order.
+        let mut wire = Vec::new();
+        for i in 1..=12u64 {
+            let payload = format!("dg-{i}");
+            let d = sender.encrypt(&token, payload.as_bytes()).unwrap();
+            wire.push((i, payload.into_bytes(), d));
+        }
+
+        // Deliver epoch 2 first (seq +12), then two earlier epochs out of
+        // order (+7 = epoch 1, +3 = epoch 0). The receiver jumps its window
+        // to +13, then must still decrypt +7 and +3 under their epochs' keys,
+        // all inside the 1024-slot window and never seen.
+        for &(i, ref payload, ref d) in [&wire[11], &wire[6], &wire[2]] {
+            assert_eq!(
+                receiver.decrypt(&token, d).unwrap().as_deref(),
+                Some(payload.as_slice()),
+                "out-of-order datagram {i}"
+            );
+        }
+
+        // Replay of an already-authenticated datagram is discarded regardless
+        // of its epoch.
+        assert!(receiver.decrypt(&token, &wire[11].2).unwrap().is_none());
+
+        // OFF (k = 0): single epoch forever, byte-identical to a legacy
+        // crypt built with `new` on the same key.
+        let mut legacy = DatagramCrypt::new(&epoch0);
+        let mut off = DatagramCrypt::with_rekey(Arc::new(RekeyState::epoch0_only(
+            TRANSPORT_UDP,
+            DIR_SERVER_TO_LAUNCHER,
+            INITIAL_SEQ,
+            Arc::new(Aes256Gcm::new(epoch0.as_ref().into())),
+        )));
+        let dl = legacy.encrypt(&token, b"x").unwrap();
+        let d0 = off.encrypt(&token, b"x").unwrap();
+        assert_eq!(dl, d0);
+    }
+
+    #[test]
+    fn test_seq_increments_and_is_unique() {
+        let (mut sender, _) = crypt_pair();
+        let token = test_token();
+
+        let d1 = sender.encrypt(&token, b"a").unwrap();
+        let d2 = sender.encrypt(&token, b"a").unwrap();
+        assert_ne!(d1, d2);
+        assert_eq!(sender.current_seq(), INITIAL_SEQ + 2);
+        assert_eq!(
+            &d1[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE],
+            &(INITIAL_SEQ + 1).to_be_bytes()
+        );
+        assert_eq!(
+            &d2[TOKEN_LENGTH..DATAGRAM_HEADER_SIZE],
+            &(INITIAL_SEQ + 2).to_be_bytes()
+        );
+    }
+}

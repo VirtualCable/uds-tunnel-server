@@ -270,6 +270,38 @@ pub fn setup_logging(level: &str, log_type: LogType) {
     });
 }
 
+/// Mask the middle half of a secret string for safe logging, keeping a
+/// short prefix and suffix so the value can still be correlated across
+/// log lines without being disclosed in full: `"1234567890ABCDEF"`
+/// becomes `"1234...CDEF"`. Strings too short to survive masking
+/// (< 4 chars) are fully replaced by `*`s.
+pub fn redact_secret(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    if len < 4 {
+        return "*".repeat(len);
+    }
+    let hidden = len / 2; // middle half removed
+    let visible = len - hidden;
+    let head = visible.div_ceil(2);
+    let tail = visible - head;
+    let prefix: String = chars[..head].iter().collect();
+    let suffix: String = chars[len - tail..].iter().collect();
+    format!("{prefix}...{suffix}")
+}
+
+/// Byte-slice variant of [`redact_secret`]: hex-encodes the secret and
+/// masks its middle half, for secrets that are raw bytes (shared secrets,
+/// UDP relay tokens) rather than displayable strings.
+pub fn redact_secret_bytes(b: &[u8]) -> String {
+    let mut hex = String::with_capacity(b.len() * 2);
+    for byte in b {
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte >> 4)]));
+        hex.push(char::from(b"0123456789abcdef"[usize::from(byte & 0x0f)]));
+    }
+    redact_secret(&hex)
+}
+
 pub fn set_log_level(level: &str) {
     // Note: Changing log level at runtime is not directly supported by tracing_subscriber.
     // This is a workaround by re-initializing the subscriber with the new level.
@@ -295,6 +327,23 @@ mod tests {
         warn!("Warning entry");
         error!("Error entry");
         trace!("Trace entry");
+    }
+
+    #[test]
+    fn test_redact_secret_keeps_head_and_tail() {
+        assert_eq!(redact_secret("1234567890ABCDEF"), "1234...CDEF");
+        // middle half is hidden, ends are kept
+        assert_eq!(redact_secret("ABCDEFGHIJKLMNOP"), "ABCD...MNOP");
+    }
+
+    #[test]
+    fn test_redact_secret_short_strings() {
+        assert_eq!(redact_secret(""), "");
+        assert_eq!(redact_secret("a"), "*");
+        assert_eq!(redact_secret("ab"), "**");
+        assert_eq!(redact_secret("abc"), "***");
+        // 4 chars: only first and last survive
+        assert_eq!(redact_secret("abcd"), "a...d");
     }
 
     #[test]

@@ -100,8 +100,14 @@ async fn test_http_broker_stop() {
             TUNNEL_AUTH_HEADER,
             format!("Bearer {}{}", TUNNEL_AUTH_NAMESPACE_PREFIX, auth_token).as_str(),
         )
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "command": "stop",
+            "ticket": ticket.as_str(),
+            "sent": 1234,
+            "recv": 5678,
+        })))
         .with_status(200)
         .create();
-    let result = api.stop_connection(&ticket).await;
+    let result = api.stop_connection(&ticket, 1234, 5678).await;
     assert!(result.is_ok());
 }

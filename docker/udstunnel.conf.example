@@ -17,13 +17,14 @@ listen_port = 4443
 # Whether to expect PROXY protocol v2 headers (if behind a proxy like HAProxy).
 use_proxy_protocol = false
 
-# Master switch for the encrypted UDP relay leg (RDPUDP). Default: true.
-# The per-session gate is the broker's `enable_udp` flag for the user service.
-udp_enabled = true
+# Master switch for the UDP relay leg (RDP UDP redirection). Default: true.
+# The per-session gate is the broker's enable_udp flag; this only controls
+# whether the shared UDP socket is bound. If the bind fails, the server
+# keeps serving TCP only.
+# udp_enabled = true
 
-# UDP relay bind port. Falls back to `listen_port` when unset. Set to 0 to
-# share the TCP socket; set explicitly to split TCP and UDP onto different
-# ports when the deployment needs it.
+# Port for the shared UDP relay socket. Default: same as listen_port.
+# Can also be overridden with the UDSTUNNEL_UDP_LISTEN_PORT env var.
 # udp_listen_port = 4443
 
 
@@ -50,6 +51,27 @@ broker_auth_token = "your-secret-token-here"
 
 # Size of the session recovery buffer in KB. Default: 64
 recovery_buffer_size = 64
+
+# Hard cap on concurrent sessions. Default: 8192
+# max_sessions = 8192
+
+# Per-source-IP session cap. Unset (commented) = disabled. Behind NAT/CGNAT
+# choose a large value; too low silently locks out legitimate tenants that
+# share an egress address.
+# max_sessions_per_remote = 128
+
+# Data-idle session cap in seconds: a session carrying no payload bytes for
+# this long is ended (keep-alive Nop frames do NOT count as payload).
+# Default: 120; 0 disables the cap.
+# session_idle_data_timeout_secs = 120
+
+# Rekeying threshold: log2 of the frames per AES-GCM key epoch. Every 2^k
+# sequence numbers the tunnel re-derives a fresh key (NIST SP 800-38D per-key
+# bound). 0 = OFF (single key for the whole session); 1..=63 = that threshold;
+# values above 63 are clamped with a warning. Default: 20.
+# Changing this requires BOTH server and launcher on the rekeying wire format
+# (OpenResponse is 91 bytes); a pre-rekeying launcher is rejected outright.
+# rekey_seq_log2 = 20
 
 
 # --- Logging Settings ---

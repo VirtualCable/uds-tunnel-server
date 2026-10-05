@@ -16,14 +16,25 @@ field accepted by the file. Unknown fields are ignored by
 
 ## Environment overrides
 
-Two settings can be overridden at runtime via environment variables
-without editing the file. They take effect only when the
-configuration file is read; later edits to the file still win.
+The knobs below can be overridden via environment variables without
+editing the file. Config overrides are applied once, when the
+configuration is first read at startup; the effective config is
+cached in a process-wide `OnceLock`, so editing the file or the
+environment afterwards has no effect until the server is restarted.
 
-| Variable                   | Overrides                  |
-|----------------------------|----------------------------|
-| `UDSTUNNEL_LISTEN_ADDR`    | `listen_addr`              |
-| `UDSTUNNEL_LISTEN_PORT`    | `listen_port` (must parse) |
+| Variable                    | Overrides                                            |
+|-----------------------------|------------------------------------------------------|
+| `UDSTUNNEL_LISTEN_ADDR`     | `listen_addr`                                        |
+| `UDSTUNNEL_LISTEN_PORT`     | `listen_port` (must parse)                           |
+| `UDSTUNNEL_UDP_LISTEN_PORT` | `udp_listen_port` (must parse)                       |
+| `UDSTUNNEL_TUNNEL_LOG_LEVEL`| `log_level` (the tracing filter level)               |
+| `UDSTUNNEL_TUNNEL_LOG_PATH` | Directory the `uds-tunnel.log` file lives in         |
+| `UDSTUNNEL_STDERR_LOG_FILE` | stderr log target override (release builds)          |
+
+The log variables are read by the logging setup rather than the
+config loader, so they apply regardless of the TOML file's own
+`log_level`; the entrypoint sets `UDSTUNNEL_TUNNEL_LOG_PATH` for the
+Docker image.
 
 ## Fields
 
@@ -51,6 +62,28 @@ configuration file is read; later edits to the file still win.
   incoming TCP connection before the UDS handshake. The header's
   source address is then used as the session `src_ip`. Leave `false`
   when the server is exposed directly to clients.
+
+### UDP relay
+
+#### `udp_enabled`
+
+- Type: boolean
+- Default: `true`
+- Master switch for the UDP relay leg (used for RDP UDP redirection).
+  The per-session gate is the broker's `enable_udp` flag on the ticket
+  response; this field only controls whether the shared UDP socket is
+  bound at all. If the bind fails, the server logs an error and keeps
+  serving TCP only (RDP falls back to the TCP leg transparently).
+
+#### `udp_listen_port`
+
+- Type: unsigned 16-bit integer
+- Default: same as `listen_port`
+- Port of the shared UDP socket every session's UDP leg multiplexes on.
+  The bind address always follows `listen_addr`. The resolved port is
+  advertised to the client in the `OpenResponse` (`udp_port` field), so
+  the launcher reaches the relay even when it is split from the TCP
+  listener.
 
 ### Broker API
 
@@ -122,12 +155,65 @@ configuration file is read; later edits to the file still win.
   transient broker hiccup.
 - The O(N) count runs only when this field is configured; the
   default config pays nothing for the check.
+- **Choose a large value.** Behind NAT / CGNAT a single source IP is
+  many users, not one: too low a cap silently locks out legitimate
+  tenants that happen to share an egress address. The rejection log
+  names the offending IP, the current count, the cap, and the
+  `max_sessions_per_remote` knob to raise, so an operator can see at a
+  glance whether it is abuse or legitimate shared load.
+
+#### `session_idle_data_timeout_secs`
+
+- Type: unsigned integer (seconds)
+- Default: `120` (see `DEFAULT_SESSION_IDLE_DATA_TIMEOUT_SECS` in
+  `crates/server/src/consts.rs`); `0` disables the cap
+- Data-idle cap for sessions. A session that carries no payload bytes
+  for this long is ended, freeing its slot. Keep-alive `Nop` frames do
+  **not** count: they only refresh the launcher leg's 10 s TCP watchdog
+  (`KEEPALIVE_TIMEOUT_SECS`), proving the socket is alive — they cannot
+  sustain a session indefinitely. Real tunnel data in either direction
+  and over either transport (TCP data channels, UDP relay datagrams)
+  resets the clock. A `Recover` of the launcher stream does not reset
+  it: the clock belongs to the session's traffic counters, not to the
+  stream, so re-attaching a dataless launcher keeps it a dataless
+  session. This is the defence against a client with a valid ticket
+  parking a slot forever with `Nop`s only.
+
+#### `rekey_seq_log2`
+
+- Type: unsigned 8-bit integer (stored as `0..=255`; the effective
+  threshold is clamped to `0..=63`, see below)
+- Default: `20` (see `DEFAULT_REKEY_LOG2` in `crates/shared/src/crypt/rekey.rs`)
+- Rekeying threshold, as log2 of the frames per AES-GCM key epoch: every
+  `2^k` sequence numbers (per direction, per transport), the tunnel re-derives
+  a fresh key from the session's HKDF PRK with the frame's own epoch number,
+  so a single key never protects more than `2^k` AES-GCM invocations (the
+  NIST SP 800-38D per-key bound). `0` disables rekeying entirely (single key
+  for the whole session lifetime, the pre-rekeying wire format); `1..=63`
+  re-derives `epoch = saturating_sub(seq, seq_base) >> k` deterministically,
+  with no rekey handshake and no transition window. `seq_base` is the
+  per-transport epoch anchor: `0` for the TCP leg (counters start near zero)
+  and `2^63` (`datagram::INITIAL_SEQ`) for the UDP leg — whose first
+  datagram must sit in epoch 0 on the legacy key despite its huge absolute
+  seq. Values of `k` above `63` would make the shift undefined,
+  so they are clamped to `63` with a warning instead of poisoning the
+  handshake.
+- **Rollout:** the threshold is owned by the server and adopted by the
+  launcher through `OpenResponse.rekey_log2` (a byte added to the wire:
+  90 -> 91 bytes). The change is **not backward-compatible**: a pre-rekeying
+  launcher cannot parse the new `OpenResponse` (length mismatch), and the
+  server never re-advertises a different `k` on `Recover` — the threshold is
+  pinned to the session and survives stream replacements and re-connections.
+- **Perf cost:** negligible. The re-derivation runs once per epoch boundary;
+  `k = 20` means one HKDF expand + one AES key schedule per million frames
+  per direction, and staying inside an epoch costs a comparison and a shift.
 
 ## Behaviour summary
 
 | Concern                          | Knob                          | Default      |
 |----------------------------------|-------------------------------|--------------|
 | Bind                             | `listen_addr` / `listen_port` | `*` / 443    |
+| UDP relay                        | `udp_enabled` / `udp_listen_port` | `true` / `listen_port` |
 | PROXY v2 source IP               | `use_proxy_protocol`          | `false`      |
 | Broker endpoint                  | `ticket_api_url`              | empty        |
 | Broker auth                      | `broker_auth_token`           | empty        |
@@ -135,6 +221,8 @@ configuration file is read; later edits to the file still win.
 | Session recovery buffer          | `recovery_buffer_size`        | 64 KB        |
 | Total session cap                | `max_sessions`                | 8192         |
 | Per source-IP session cap        | `max_sessions_per_remote`     | disabled     |
+| Data-idle session cap            | `session_idle_data_timeout_secs` | 120 s      |
+| Key-epoch rekeying               | `rekey_seq_log2`               | 20         |
 
 ## Validation
 
@@ -142,4 +230,7 @@ The config struct is deserialised with `toml::from_str`. Parsing fails
 loudly with a Rust-side error if a field has the wrong type. Missing
 required fields (`ticket_api_url`, `broker_auth_token`) panic at
 startup with a clear "Failed to parse server configuration file"
-message in debug builds and abort in release builds.
+message. Panic unwinding is enabled in every build profile (no
+`panic = "abort"` in any `[profile]` section), so release builds
+behave the same as debug ones here: the process panics and the
+runtime reports the unwound error.

@@ -42,7 +42,12 @@ pub(super) enum Command {
     ServerFailed,  // Will not close the proxy, to allow recovery
     ServerStopped, // Will close the proxy, as the server is done
     // Client is attached by us, so no need for an attach command
-    ClientStopped(u16), // stream_channel_id, no need to know if it failed or stopped normally
+    // stream_channel_id + the generation that owns it. The proxy only stops
+    // and closes the slot when the generation still matches, so a stale
+    // stream (its channel already replaced by a newer generation) cannot
+    // tear down the new occupant. No need to know if it failed or stopped
+    // normally.
+    ClientStopped(u16, u64),
 }
 
 #[derive(Debug)]
@@ -55,12 +60,23 @@ impl Handler {
         Self { ctrl_tx }
     }
 
+    /// Upper bound for the proxy to answer an attach request. The proxy
+    /// drains queued replies on exit (so `reply_rx` normally disconnects
+    /// immediately), making this a purely defensive guard against a wedged
+    /// proxy that would otherwise strand the caller forever.
+    const ATTACH_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
     pub async fn start_server(&self) -> Result<types::ServerEndpoints> {
         log::debug!("Starting server in session proxy");
         let (reply_tx, reply_rx) = flume::bounded(1);
         let cmd = Command::AttachServer { reply: reply_tx };
         self.ctrl_tx.send_async(cmd).await?;
-        let endpoints = reply_rx.recv_async().await?;
+        let endpoints = tokio::time::timeout(Self::ATTACH_REPLY_TIMEOUT, reply_rx.recv_async())
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!("Timed out waiting for session proxy to attach the server")
+            })?
+            .map_err(|_| anyhow::anyhow!("Session proxy is not accepting attach requests"))?;
         Ok(endpoints)
     }
 
@@ -82,10 +98,10 @@ impl Handler {
         }
     }
 
-    pub async fn stop_client(&self, stream_channel_id: u16) {
+    pub async fn stop_client(&self, stream_channel_id: u16, generation: u64) {
         if let Err(e) = self
             .ctrl_tx
-            .send_async(Command::ClientStopped(stream_channel_id))
+            .send_async(Command::ClientStopped(stream_channel_id, generation))
             .await
         {
             log::error!(

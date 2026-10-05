@@ -51,11 +51,35 @@ pub struct TicketRemote {
     // pub extra: Option<serde_json::Value>,
 }
 
-#[derive(serde::Deserialize, Debug)]
+#[derive(serde::Deserialize)]
 pub struct TicketResponse {
     pub remotes: Vec<TicketRemote>,
     pub notify: String, // Stop notification ticket
     pub shared_secret: Option<String>,
+    // Whether the broker allows the UDP relay leg for this transport.
+    // Top-level in the broker JSON; absent on brokers that predate it.
+    #[serde(default)]
+    pub enable_udp: bool,
+}
+
+// Manual Debug: the derived form would print the shared secret (32-byte
+// session key material, hex) and the notify stop ticket verbatim. Both
+// are credentials, so they are redacted to a short correlation prefix.
+impl std::fmt::Debug for TicketResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TicketResponse")
+            .field("remotes", &self.remotes)
+            .field("notify", &shared::log::redact_secret(&self.notify))
+            .field(
+                "shared_secret",
+                &self
+                    .shared_secret
+                    .as_deref()
+                    .map(shared::log::redact_secret),
+            )
+            .field("enable_udp", &self.enable_udp)
+            .finish()
+    }
 }
 
 impl TicketResponse {
@@ -65,6 +89,19 @@ impl TicketResponse {
         } else {
             Err(anyhow::anyhow!("Missing or invalid shared secret"))
         }
+    }
+
+    pub fn enable_udp(&self) -> bool {
+        self.enable_udp
+    }
+
+    /// The stop-notification ticket as a `Ticket`, if the broker provided
+    /// one with the expected length. The `Ticket` conversion is a pure
+    /// length check; the notify string is opaque protocol data, not a
+    /// credential this tunnel derives keys from, so no alphanumeric
+    /// validation is applied here.
+    pub fn notify_ticket(&self) -> Option<Ticket> {
+        Ticket::try_from(self.notify.as_bytes()).ok()
     }
 
     pub fn channels_remotes(&self) -> Vec<String> {
@@ -162,7 +199,22 @@ mod tests {
             remotes,
             notify: String::new(),
             shared_secret: None,
+            enable_udp: false,
         }
+    }
+
+    #[test]
+    fn enable_udp_defaults_to_false_when_absent() {
+        let resp: TicketResponse =
+            serde_json::from_str(r#"{"remotes": [], "notify": "", "shared_secret": null}"#)
+                .unwrap();
+        assert!(!resp.enable_udp());
+
+        let resp: TicketResponse = serde_json::from_str(
+            r#"{"remotes": [], "notify": "", "shared_secret": null, "enable_udp": true}"#,
+        )
+        .unwrap();
+        assert!(resp.enable_udp());
     }
 
     #[test]

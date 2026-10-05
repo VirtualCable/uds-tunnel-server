@@ -374,6 +374,7 @@ async fn test_tunnel_outbound() -> Result<()> {
         *session.id(),
         stop.clone(),
         1,
+        0, // generation: this test does not assert on the proxy slot teardown
         tunnel_reader,
         tunnel_writer,
         channels,

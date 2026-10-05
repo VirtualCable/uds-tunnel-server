@@ -29,6 +29,11 @@
 
 // Authors: Adolfo Gómez, dkmaster at dkmon dot com
 
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
+
 use aes_gcm::{
     AeadInOut, Aes256Gcm, Nonce, Tag,
     aead::{Aead, AeadCore, KeyInit},
@@ -39,6 +44,9 @@ use crate::log;
 
 // Comms related
 pub mod consts;
+pub mod datagram;
+pub mod rekey;
+pub mod replay;
 pub mod stream;
 pub mod tunnel;
 pub mod types;
@@ -46,16 +54,108 @@ pub mod types;
 // PQC related
 pub mod kem;
 
+/// AEAD stream crypt with a monotonically increasing sequence number used as
+/// the AES-GCM nonce (and bound as AAD).
+///
+/// The sequence counter lives behind an [`Arc<AtomicU64>`] so that several
+/// `Crypt` instances can *share* one counter. The server session uses this to
+/// keep a single authoritative counter per direction: every crypt it hands
+/// out (handshake, each launcher-facing stream, each recovery handshake)
+/// encrypts/decrypts through the same atomic, so two streams that overlap
+/// for a short window (e.g. a recovery replacing a live stream while a
+/// socket write is in flight) can never reuse a `(key, seq)` nonce pair —
+/// AES-GCM nonce reuse is prevented by construction, not by coordination
+/// between the streams.
 pub struct Crypt {
-    cipher: Aes256Gcm,
-    seq: u64,
+    /// Cipher for `cipher_epoch`, the epoch owning the last frame this
+    /// crypt encrypted or authenticated. Kept as an `Arc` so crossing an
+    /// epoch boundary is a re-derive (once per `2^k` frames) and staying
+    /// inside it is a pointer comparison.
+    cipher: Arc<Aes256Gcm>,
+    seq: Arc<AtomicU64>,
+    /// Per-direction rekeying parameters (`k = 0` collapses to a single
+    /// epoch forever, byte-identical to the pre-rekeying wire format).
+    rekey: Arc<rekey::RekeyState>,
+    cipher_epoch: u64,
 }
 
 impl Crypt {
+    /// Creates a crypt with its own private counter seeded at `seq`.
     pub fn new(key: &types::SharedSecret, seq: u64) -> Self {
         log::debug!("Creating Crypt with initial seq: {}", seq);
-        let cipher = Aes256Gcm::new(key.as_ref().into());
-        Crypt { cipher, seq }
+        let cipher = Arc::new(Aes256Gcm::new(key.as_ref().into()));
+        Crypt {
+            rekey: Arc::new(rekey::RekeyState::epoch0_only(
+                rekey::TRANSPORT_TCP,
+                rekey::DIR_SERVER_TO_LAUNCHER,
+                0,
+                cipher.clone(),
+            )),
+            cipher,
+            seq: Arc::new(AtomicU64::new(seq)),
+            cipher_epoch: 0,
+        }
+    }
+
+    /// Creates a crypt that *shares* `seq` as its counter. Encrypting or
+    /// decrypting through this instance advances the same atomic every other
+    /// holder sees. See the [`Crypt`] docs for why the server session builds
+    /// all its crypts this way.
+    pub fn with_counter(key: &types::SharedSecret, seq: Arc<AtomicU64>) -> Self {
+        let cipher = Arc::new(Aes256Gcm::new(key.as_ref().into()));
+        Crypt {
+            rekey: Arc::new(rekey::RekeyState::epoch0_only(
+                rekey::TRANSPORT_TCP,
+                rekey::DIR_SERVER_TO_LAUNCHER,
+                0,
+                cipher.clone(),
+            )),
+            cipher,
+            seq,
+            cipher_epoch: 0,
+        }
+    }
+
+    /// Creates a crypt that *shares* `seq` as its counter and rekeys per
+    /// `rekey`: every frame whose epoch differs from the crypt's cached one
+    /// re-derives the cipher from the frame's own sequence number (see
+    /// [`rekey`]). The crypt starts on `rekey`'s epoch-0 cipher, which is
+    /// the legacy tunnel key for this direction — `k = 0` states collapse
+    /// to that single epoch forever, byte-identical to `with_counter`.
+    pub fn with_rekey(seq: Arc<AtomicU64>, rekey: Arc<rekey::RekeyState>) -> Self {
+        let cipher = rekey.cipher_for(0);
+        Crypt {
+            cipher_epoch: 0,
+            cipher,
+            seq,
+            rekey,
+        }
+    }
+
+    /// Attaches (or replaces) the rekeying state mid-life. The crypt must
+    /// be sitting in epoch 0 at the call site — which is exactly what the
+    /// launcher does: it builds the handshake crypt pair from the legacy
+    /// material, then installs the session's negotiated `k` right after
+    /// parsing the `OpenResponse` and before any data frame flows. The
+    /// epoch-0 cipher is taken from the new state (a byte-identical rebuild
+    /// of the same legacy key), so nothing on the wire changes at the seam.
+    pub fn set_rekey(&mut self, rekey: Arc<rekey::RekeyState>) {
+        self.cipher_epoch = 0;
+        self.cipher = rekey.cipher_for(0);
+        self.rekey = rekey;
+    }
+
+    /// Selects the cipher for `seq`, re-deriving (once per epoch crossing)
+    /// when the frame belongs to a different epoch than the crypt's cached
+    /// cipher. `k = 0` never leaves epoch 0, which keeps OFF byte-identical
+    /// to the legacy construction.
+    fn cipher_for_seq(&mut self, seq: u64) -> Arc<Aes256Gcm> {
+        let epoch = self.rekey.epoch_of(seq);
+        if epoch != self.cipher_epoch {
+            self.cipher = self.rekey.cipher_for(epoch);
+            self.cipher_epoch = epoch;
+        }
+        self.cipher.clone()
     }
 
     /// Increments and returns the internal seq.
@@ -63,13 +163,12 @@ impl Crypt {
     /// (so it is pre increment, that is, if seq is 0, first packet will have seq 1, and then seq will be 1 after the call also).
     /// Returns the incremented seq value.
     pub fn next_seq(&mut self) -> u64 {
-        self.seq += 1;
-        self.seq
+        self.seq.fetch_add(1, Ordering::SeqCst) + 1
     }
 
     /// Returns the current seq value without incrementing it.
     pub fn current_seq(&self) -> u64 {
-        self.seq
+        self.seq.load(Ordering::SeqCst)
     }
 
     /// Encrypts the given plaintext using AES-GCM with a unique nonce derived from an internal seq.
@@ -115,8 +214,10 @@ impl Crypt {
         //     channel_id
         // );
 
-        let tag = self
-            .cipher
+        // Epoch-owned cipher: identical to `self.cipher` for every frame of
+        // the current epoch, re-derived once at the epoch crossing.
+        let cipher = self.cipher_for_seq(seq);
+        let tag = cipher
             .encrypt_inout_detached(&nonce, &aad, (&mut data[..data_with_channel_length]).into())
             .map_err(|e| anyhow::anyhow!("encryption failure: {:?}", e))?;
         data[data_with_channel_length..data_with_channel_length + consts::TAG_LENGTH]
@@ -129,7 +230,7 @@ impl Crypt {
     /// Decrypts the given ciphertext using AES-GCM with a nonce derived from the provided seq.
     /// The nonce is constructed by taking the seq value and padding it to 12 bytes with
     /// zeros. The seq value is also used as associated data (AAD) to ensure integrity.
-    /// Returns the decrypted plaintext on success, and the channel (first 2 bytes, little-endian u16).
+    /// Returns the decrypted plaintext on success, and the channel (first 2 bytes, big-endian u16).
     /// Note: length is the length on encrpypted data WITH the tag (so, as readed from the stream).
     pub fn decrypt(&mut self, buffer: &mut types::PacketBuffer) -> Result<()> {
         let seq = buffer.seq()?;
@@ -139,6 +240,15 @@ impl Crypt {
                 seq,
                 self.current_seq()
             ));
+        }
+        // `seq` comes straight from the wire. Advancing the counter below
+        // computes `seq + 1`, and a `u64::MAX` frame would overflow it: a
+        // panic under overflow-checks (CI/debug) on an unauthenticated
+        // inbound stream, or a counter wedged at MAX in release. No honest
+        // peer ever reaches this value — 2^64 packets is unreachable — so
+        // reject the frame outright instead of faulting the session.
+        if seq == u64::MAX {
+            return Err(anyhow::anyhow!("invalid sequence number: u64::MAX"));
         }
 
         let length = buffer.length()?;
@@ -164,11 +274,18 @@ impl Crypt {
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid tag length"))?;
 
-        self.cipher
+        // Epoch-owned cipher. The seq comes from the frame header, so a
+        // late frame of an earlier epoch (legitimately still in flight)
+        // re-derives that epoch's key deterministically; the anti-replay
+        // check above already rejected replays.
+        let cipher = self.cipher_for_seq(seq);
+        cipher
             .decrypt_inout_detached(&nonce, &aad, ciphertext.into(), tag)
             .map_err(|e| anyhow::anyhow!("decryption failure: {:?}", e))?;
 
-        self.seq = seq + 1; // Update to last used seq + 1, so no replays are possible
+        // Update to last used seq + 1 (max, so a shared counter never moves
+        // backwards if another holder already advanced it past this packet).
+        self.seq.fetch_max(seq + 1, Ordering::SeqCst);
 
         // Fix data length to remove ending tag, so only channel + data is left
         buffer.set_length(len)?;
@@ -201,6 +318,22 @@ impl Crypt {
             .decrypt(nonce, data)
             .map_err(|_| anyhow::format_err!("AES-256-GCM decryption failed"))
     }
+
+    /// Symmetric counterpart of [`Crypt::simple_decrypt`]: encrypts with a
+    /// derived key + explicit nonce, outside the internal seq machinery.
+    /// Used by the broker side of the ticket exchange (and by tests that
+    /// need to build a broker-shaped encrypted payload).
+    pub fn simple_encrypt(
+        key: &types::SharedSecret,
+        nonce: &[u8; 12],
+        data: &[u8],
+    ) -> Result<Vec<u8>> {
+        let nonce: &Nonce<<Aes256Gcm as AeadCore>::NonceSize> = &Nonce::from(*nonce);
+        let cipher = Aes256Gcm::new(key.as_ref().into());
+        cipher
+            .encrypt(nonce, data)
+            .map_err(|_| anyhow::format_err!("AES-256-GCM encryption failed"))
+    }
 }
 
 #[cfg(test)]
@@ -215,6 +348,117 @@ mod tests {
     fn test_send_sync() {
         assert_send::<Crypt>();
         assert_sync::<Crypt>();
+        assert_send::<rekey::RekeyState>();
+        assert_sync::<rekey::RekeyState>();
+    }
+
+    /// A crypt built with `with_rekey` rotates its cipher at the epoch
+    /// boundary, and a frame of the previous epoch (still in flight, ahead
+    /// of the receiver's counter) decrypts fine because the key is a pure
+    /// function of the frame's own seq.
+    #[test]
+    fn test_rekey_across_epoch_boundary_roundtrip() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let secret = SharedSecret::new([0x11u8; 32]);
+        let ticket: crate::protocol::ticket::Ticket = [0x22u8; 48].into();
+        let epoch0 = SharedSecret::new([0x33u8; 32]);
+
+        // k = 2: epochs switch every 4 frames.
+        let rekey = Arc::new(rekey::RekeyState::new(
+            Arc::new(rekey::SessionPrk::derive(&secret, &ticket)),
+            rekey::TRANSPORT_TCP,
+            rekey::DIR_SERVER_TO_LAUNCHER,
+            2,
+            0,
+            Arc::new(aes_gcm::Aes256Gcm::new(epoch0.as_ref().into())),
+        ));
+
+        let counter = Arc::new(AtomicU64::new(0));
+        let mut sender = Crypt::with_rekey(counter.clone(), rekey.clone());
+        let mut receiver = Crypt::with_rekey(Arc::new(AtomicU64::new(0)), rekey);
+
+        // Frames 1..=12 span epochs 0, 1, 2 (seq>>2): all roundtrip.
+        for i in 1..=12u64 {
+            let payload = format!("frame-{i}");
+            let mut buf = types::PacketBuffer::new();
+            buf.set_data(payload.as_bytes()).unwrap();
+            sender.encrypt(5, payload.len(), &mut buf).unwrap();
+            assert_eq!(buf.seq().unwrap(), i, "seq at {i}");
+            let wire = buf.buffer().unwrap().to_vec();
+            receiver.decrypt(&mut buf).unwrap();
+            assert_eq!(
+                buf.data(),
+                format!("frame-{i}").as_bytes(),
+                "roundtrip at {i}: wire {wire:?}"
+            );
+        }
+
+        // The receiver crossed epochs following the frames' own seqs, and
+        // its counter tracks the last authenticated frame.
+        assert_eq!(receiver.current_seq(), 13);
+        assert_eq!(counter.load(SeqCst), 12);
+
+        // A late frame of an *earlier* epoch (seq 5: epoch 1, while the
+        // sender sits at epoch 2) still decrypts: the key comes from the
+        // frame's seq, not from a transition clock. It is admitted because
+        // the receiver's own counter is behind it, exactly the in-flight
+        // overlap the design relies on.
+        let mut late = types::PacketBuffer::new();
+        late.set_data(b"late").unwrap();
+        let len = b"late".len();
+        let mut stale_sender = Crypt::with_rekey(
+            Arc::new(AtomicU64::new(4)), // next encrypt gets seq 5, epoch 1
+            Arc::new(rekey::RekeyState::new(
+                Arc::new(rekey::SessionPrk::derive(&secret, &ticket)),
+                rekey::TRANSPORT_TCP,
+                rekey::DIR_SERVER_TO_LAUNCHER,
+                2,
+                0,
+                Arc::new(aes_gcm::Aes256Gcm::new(epoch0.as_ref().into())),
+            )),
+        );
+        stale_sender.encrypt(5, len, &mut late).unwrap();
+        assert_eq!(late.seq().unwrap(), 5);
+        let mut early_receiver = Crypt::with_rekey(
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(rekey::RekeyState::new(
+                Arc::new(rekey::SessionPrk::derive(&secret, &ticket)),
+                rekey::TRANSPORT_TCP,
+                rekey::DIR_SERVER_TO_LAUNCHER,
+                2,
+                0,
+                Arc::new(aes_gcm::Aes256Gcm::new(epoch0.as_ref().into())),
+            )),
+        );
+        early_receiver.decrypt(&mut late).unwrap();
+        assert_eq!(late.data(), b"late");
+    }
+
+    /// With `k = 0` (OFF) a crypt must be byte-identical to the legacy
+    /// construction — same ciphertext bytes on the wire, forever.
+    #[test]
+    fn test_off_rekey_is_byte_identical_to_legacy() {
+        let key = SharedSecret::new([0x44u8; 32]);
+        let mut legacy = Crypt::with_counter(&key, Arc::new(AtomicU64::new(0)));
+
+        let rekey = Arc::new(rekey::RekeyState::epoch0_only(
+            rekey::TRANSPORT_TCP,
+            rekey::DIR_SERVER_TO_LAUNCHER,
+            0,
+            Arc::new(aes_gcm::Aes256Gcm::new(key.as_ref().into())),
+        ));
+        let mut off = Crypt::with_rekey(Arc::new(AtomicU64::new(0)), rekey);
+
+        for i in 0..8u16 {
+            let mut a = types::PacketBuffer::new();
+            let mut b = types::PacketBuffer::new();
+            a.set_data(b"payload bytes").unwrap();
+            b.set_data(b"payload bytes").unwrap();
+            legacy.encrypt(i, 13, &mut a).unwrap();
+            off.encrypt(i, 13, &mut b).unwrap();
+            assert_eq!(a.buffer().unwrap(), b.buffer().unwrap(), "frame {i}");
+        }
     }
 
     #[test]
@@ -247,6 +491,53 @@ mod tests {
         assert_eq!(crypt.next_seq(), 1);
         assert_eq!(crypt.next_seq(), 2);
         assert_eq!(crypt.current_seq(), 2);
+    }
+
+    /// Two crypts built with `with_counter` over the same atomic share one
+    /// sequence space: what one encrypts with seq N, the other observes as
+    /// already used and skips on its own encrypt. This is the property the
+    /// server session relies on to make stream replacement nonce-safe.
+    #[test]
+    fn test_shared_counter_across_crypts() {
+        let key = SharedSecret::new([5u8; 32]);
+        let counter = Arc::new(AtomicU64::new(0));
+
+        let mut crypt_a = Crypt::with_counter(&key, counter.clone());
+        let mut crypt_b = Crypt::with_counter(&key, counter.clone());
+
+        let mut buf_a = types::PacketBuffer::new();
+        buf_a.set_data(b"aaaa").unwrap();
+        crypt_a.encrypt(1, 4, &mut buf_a).unwrap();
+        assert_eq!(buf_a.seq().unwrap(), 1);
+        assert_eq!(crypt_b.current_seq(), 1); // shared state, visible everywhere
+
+        // crypt_b must not reuse seq 1: its next encrypt gets seq 2
+        let mut buf_b = types::PacketBuffer::new();
+        buf_b.set_data(b"bbbb").unwrap();
+        crypt_b.encrypt(1, 4, &mut buf_b).unwrap();
+        assert_eq!(buf_b.seq().unwrap(), 2);
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+
+        let mut buf_c = types::PacketBuffer::new();
+        buf_c.set_data(b"cccc").unwrap();
+        crypt_a.encrypt(1, 4, &mut buf_c).unwrap();
+        assert_eq!(buf_c.seq().unwrap(), 3);
+
+        // decrypt advances the counter for every holder (fetch_max on
+        // last-used + 1), never moving it backwards.
+        let mut buf_c2 = buf_c.clone();
+        crypt_b.decrypt(&mut buf_c2).unwrap();
+        assert_eq!(crypt_a.current_seq(), 4);
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+
+        // a replayed early frame is now rejected through either holder
+        let mut buf_a2 = buf_a.clone();
+        let err = crypt_b.decrypt(&mut buf_a2).unwrap_err();
+        assert!(
+            err.to_string().contains("replay attack detected"),
+            "{}",
+            err
+        );
     }
 
     #[test]

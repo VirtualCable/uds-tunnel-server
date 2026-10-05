@@ -38,6 +38,11 @@ use shared::{
 
 use crate::config;
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
 async fn wait_for_session_existence(session_id: &SessionId, must_exists: bool) -> Result<()> {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -82,6 +87,7 @@ fn new_session_for_test(remote: &str) -> Session {
     )
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_session_manager_add_and_get() {
     log::setup_logging("debug", log::LogType::Test);
@@ -111,6 +117,7 @@ async fn test_session_running() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_session_sequence_numbers() {
     log::setup_logging("debug", log::LogType::Test);
@@ -118,24 +125,15 @@ async fn test_session_sequence_numbers() {
     let session = new_session_for_test("127.0.0.1:1234");
     let seq = session.seqs();
     assert_eq!(seq, (0, 0));
-    session.set_seqs(5, 10);
-    let seq = session.seqs();
-    assert_eq!(seq, (5, 10));
-}
 
-/// `set_seqs` overwrites both halves of the pair in one critical
-/// section. Two consecutive calls produce the latest value (not a
-/// stacked write) and asymmetric pairs are accepted (e.g. `(7, 11)`)
-/// because inbound and outbound seqs are tracked independently.
-#[tokio::test]
-async fn test_set_seqs_assigns_atomically() {
-    let session = new_session_for_test("127.0.0.1:1234");
-
-    session.set_seqs(7, 11);
-    assert_eq!(session.seqs(), (7, 11));
-
-    session.set_seqs(0, 0);
-    assert_eq!(session.seqs(), (0, 0));
+    // The counters are moved only by the crypts themselves: a holder built
+    // from `server_tunnel_crypts` advancing the outbound counter is visible
+    // through `seqs()` with no explicit set path.
+    let (_, mut outbound) = session.server_tunnel_crypts().unwrap();
+    let mut buf = shared::crypt::types::PacketBuffer::new();
+    buf.set_data(b"abcd").unwrap();
+    outbound.encrypt(1, 4, &mut buf).unwrap();
+    assert_eq!(session.seqs(), (0, 1));
 }
 
 #[serial_test::serial(manager)]
@@ -184,7 +182,7 @@ async fn test_session_lifecycle() {
 
     // No client is running in fact, and as the proxy is stopped,
     // but this should not fail
-    manager.stop_client(session.id(), 1).await;
+    manager.stop_client(session.id(), 1, 0).await;
     wait_for_session_existence(session.id(), false)
         .await
         .unwrap();
@@ -212,9 +210,10 @@ async fn test_session_removed_exactly_once() {
 
     // Any aditional stops should be no-ops
     manager.stop_server(session.id()).await;
-    manager.stop_client(session.id(), 1).await;
+    manager.stop_client(session.id(), 1, 0).await;
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_get_session_returns_arc_clone() {
     log::setup_logging("debug", log::LogType::Test);
@@ -230,6 +229,7 @@ async fn test_get_session_returns_arc_clone() {
     assert!(Arc::ptr_eq(&s1, &s2));
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_get_equiv_session_default() {
     log::setup_logging("debug", log::LogType::Test);
@@ -248,6 +248,7 @@ async fn test_get_equiv_session_default() {
     assert!(manager.get_session(session.id()).is_some());
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_add_equiv_session() {
     let manager = SessionManager::new();
@@ -261,6 +262,7 @@ async fn test_add_equiv_session() {
     assert!(Arc::ptr_eq(&equiv_session, &direct_session));
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_session_removes_equiv_session() {
     let manager = SessionManager::new();
@@ -275,6 +277,7 @@ async fn test_remove_session_removes_equiv_session() {
     assert!(manager.get_session(session.id()).is_none());
 }
 
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_equiv_session() {
     let manager = SessionManager::new();
@@ -295,6 +298,7 @@ async fn test_remove_equiv_session() {
 /// stops resolving once the session is gone. The equiv id lives
 /// inside the `Session` (one slot per session), so removing the
 /// session from the manager is enough to retire the equiv entry.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_remove_session_clears_current_equiv_id() {
     let manager = SessionManager::new();
@@ -315,6 +319,7 @@ async fn test_remove_session_clears_current_equiv_id() {
 /// accumulate entries. Simulating the loop directly on the manager
 /// (no broker / handshake needed) verifies that the invariant holds
 /// no matter how many recovers happen.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_equivs_do_not_accumulate_across_recoveries() {
     let manager = SessionManager::new();
@@ -360,6 +365,7 @@ async fn test_equivs_do_not_accumulate_across_recoveries() {
 /// A recover that removes its old equiv id and mints a new one must
 /// leave exactly one live equiv for the session, and the old equiv
 /// must no longer resolve.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_recover_invalidates_old_equiv_id() {
     let manager = SessionManager::new();
@@ -384,6 +390,7 @@ async fn test_recover_invalidates_old_equiv_id() {
 /// a second one. This is the property that lets the manager drop its
 /// global `HashMap<SessionId, SessionId>`: any "second mint" implicitly
 /// supersedes the first, so no cleanup pass is needed.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_create_equiv_session_twice_overwrites_previous() {
     let manager = SessionManager::new();
@@ -423,6 +430,7 @@ async fn test_create_equiv_session_twice_overwrites_previous() {
 /// perspective. This guards against any future regression that, say,
 /// stores the equiv in a flat map keyed only by equiv id without
 /// verifying the owning session.
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_equiv_id_is_session_scoped() {
     let manager = SessionManager::new();
@@ -458,7 +466,7 @@ async fn test_equiv_id_is_session_scoped() {
 /// config so the O(n) lookup paths in `get_equiv_session` /
 /// `remove_equiv_session` cannot be made to degrade indefinitely by
 /// flooding the manager with sessions.
-#[serial_test::serial(manager)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_add_session_respects_max_sessions_cap() {
     let manager = SessionManager::new();
@@ -497,7 +505,7 @@ async fn test_add_session_respects_max_sessions_cap() {
 /// sessions whose `src_ip` matches the given address. Used by the
 /// per-remote-IP cap in `connection::connect` (when enabled via
 /// `ServerConfig::max_sessions_per_remote`).
-#[serial_test::serial(manager)]
+#[serial_test::serial(config, manager)]
 #[tokio::test]
 async fn test_count_by_remote() {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -524,4 +532,312 @@ async fn test_count_by_remote() {
     assert_eq!(manager.count_by_remote(a), 2);
     assert_eq!(manager.count_by_remote(b), 1);
     assert_eq!(manager.count_by_remote(other), 0);
+}
+
+/// B4 regression for the shutdown drain.
+///
+/// History: `finish_all_sessions` used to drain the session map exactly
+/// once, while the accept loop was still alive (`main.rs` triggered the
+/// listener stop AFTER the drain). Sessions whose handshakes completed
+/// during the drain's broker-stop awaits were registered after the
+/// one-shot pass had passed them by: the process then exited with live
+/// sessions whose tunnels were never closed at the broker. The fix:
+/// `main.rs` stops the accept loop first, and `finish_all_sessions`
+/// re-drains until the map settles empty.
+///
+/// This test pins the re-drain directly on the manager: a session is
+/// registered while the first batch's broker stop report is still in
+/// flight. Pre-fix the late arrival stayed in the map and got no stop
+/// report at all; post-fix a second pass must drain and notify it.
+struct Gate {
+    opened: Mutex<bool>,
+    notify: tokio::sync::Notify,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Gate {
+            opened: Mutex::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Block until `open` is called. The future is registered before the
+    /// flag is checked, so a concurrent `open` can never be lost.
+    async fn wait(&self) {
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if *self.opened.lock().unwrap() {
+            return;
+        }
+        notified.await;
+    }
+
+    fn open(&self) {
+        *self.opened.lock().unwrap() = true;
+        self.notify.notify_waiters();
+    }
+}
+
+/// Minimal broker endpoint for stop notifications: counts the requests it
+/// has fully read and holds the FIRST reply until `gate` opens, modelling a
+/// slow broker response so a session can be registered mid-drain.
+async fn start_gated_stop_broker(
+    gate: Arc<Gate>,
+    arrivals: Arc<AtomicUsize>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((sock, _)) = listener.accept().await else {
+                break;
+            };
+            let gate = gate.clone();
+            let arrivals = arrivals.clone();
+            tokio::spawn(async move {
+                let mut sock = sock;
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 1024];
+                let headers_end = loop {
+                    let Ok(n) = sock.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        return;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                // Drain the (small) JSON body so the reply is not racing a
+                // half-written request.
+                let head = String::from_utf8_lossy(&buf[..headers_end]).to_lowercase();
+                let content_len: usize = head
+                    .lines()
+                    .find_map(|l| {
+                        l.strip_prefix("content-length:")
+                            .and_then(|v| v.trim().parse().ok())
+                    })
+                    .unwrap_or(0);
+                while buf.len() < headers_end + content_len {
+                    let n = sock.read(&mut chunk).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+
+                if arrivals.fetch_add(1, Ordering::SeqCst) == 0 {
+                    gate.wait().await;
+                }
+                let _ = sock
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                    .await;
+                let _ = sock.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{addr}/"), task)
+}
+
+fn session_with_stop_ticket(remote: &str) -> Session {
+    Session::with_broker_stop_ticket(
+        SharedSecret::new([0u8; 32]),
+        ticket::Ticket::new_random(),
+        Trigger::new(),
+        "127.0.0.1:0".parse().unwrap(),
+        vec![remote.to_string()],
+        Some(ticket::Ticket::new_random()),
+    )
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test]
+async fn finish_all_sessions_drains_sessions_registered_during_the_drain() {
+    let gate = Arc::new(Gate::new());
+    let arrivals = Arc::new(AtomicUsize::new(0));
+    let (url, broker_task) = start_gated_stop_broker(gate.clone(), arrivals.clone()).await;
+
+    let original_url = config::get().read().unwrap().ticket_api_url.clone();
+    {
+        let cfg = config::get();
+        let mut c = cfg.write().unwrap();
+        c.ticket_api_url = url;
+        c.broker_auth_token = "test_token".to_string();
+        c.dangerous_disable_ssl_verify = Some(false);
+    }
+
+    let manager = Arc::new(SessionManager::new());
+    let first = manager
+        .add_session(session_with_stop_ticket("127.0.0.1:1"))
+        .unwrap();
+
+    let drain_manager = manager.clone();
+    let drain = tokio::spawn(async move { drain_manager.finish_all_sessions().await });
+
+    // Wait until the broker has fully read the first stop report: the drain
+    // is inside `join_all` for the first batch from this point on.
+    let mut spins = 0;
+    while arrivals.load(Ordering::SeqCst) == 0 {
+        assert!(
+            spins < 500,
+            "the first stop report never reached the broker"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        spins += 1;
+    }
+
+    // The straggler: a handshake that completed while the first batch's
+    // report was in flight registers now.
+    let late = manager
+        .add_session(session_with_stop_ticket("127.0.0.1:2"))
+        .expect("late session under cap");
+    assert_eq!(
+        manager.count(),
+        1,
+        "the first pass took `first` out of the map"
+    );
+
+    // Release the first reply.
+    gate.open();
+    tokio::time::timeout(std::time::Duration::from_secs(10), drain)
+        .await
+        .expect("the drain must complete once the broker replies")
+        .expect("drain task panicked");
+
+    // FIXED BEHAVIOUR PIN: pre-fix, the one-shot drain returned here with
+    // `late` still registered and the broker having seen a single stop
+    // report. Post-fix the second pass drains it and notifies as well.
+    assert_eq!(
+        arrivals.load(Ordering::SeqCst),
+        2,
+        "both sessions must have delivered their broker stop report"
+    );
+    assert_eq!(manager.count(), 0, "the drain must leave the map empty");
+    assert!(first.take_broker_stop().is_none(), "first was notified");
+    assert!(late.take_broker_stop().is_none(), "late was notified");
+
+    drop(first);
+    drop(late);
+    config::get().write().unwrap().ticket_api_url = original_url;
+    broker_task.abort();
+}
+
+// ---------------------------------------------------------------------------
+// Data-idle session cap: keep-alive `Nop`s sustain the TCP leg (10 s
+// watchdog) but NOT the session. A session that carries no payload bytes
+// within `session_idle_data_timeout_secs` is ended by the watchdog that
+// `add_session` spawns. Virtual time (`start_paused`) keeps the tests
+// instant regardless of the cap value.
+// ---------------------------------------------------------------------------
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn dataless_session_is_ended_at_the_idle_data_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(1);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:1"))
+        .expect("session under cap");
+    let stop = session.stopper();
+
+    // Just under the cap: still alive.
+    tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "a session within the data-idle window must not be ended"
+    );
+
+    // Cross the window with zero payload bytes: ended.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        stop.is_triggered(),
+        "a dataless session must be ended once the idle-data cap expires"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn real_payload_bytes_reset_the_idle_data_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(1);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:2"))
+        .expect("session under cap");
+    let stop = session.stopper();
+    let traffic = session.traffic();
+
+    // t = 0.8: still inside the first window, and real data crosses the
+    // leg (this is what the cap measures; a `Nop` would not do it).
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    traffic.add_sent(10);
+
+    // t = 1.6: past the first window, but the watchdog re-armed on the
+    // data delta, so the session must be alive.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "payload bytes within the window must reset the idle-data clock"
+    );
+
+    // t = 2.0: the re-armed window expires with no further data: ended.
+    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        stop.is_triggered(),
+        "idle data after the last payload must still expire the session"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
+}
+
+#[serial_test::serial(config, manager)]
+#[tokio::test(start_paused = true)]
+async fn zero_idle_data_timeout_disables_the_cap() {
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = Some(0);
+    let manager = SessionManager::get_instance();
+    let session = manager
+        .add_session(new_session_for_test("127.0.0.1:3"))
+        .expect("session under cap");
+    let stop = session.stopper();
+
+    // Way beyond the production default (120 s): a disabled cap means the
+    // watchdog is not even spawned, so the session lives.
+    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !stop.is_triggered(),
+        "timeout 0 must disable the data-idle session cap"
+    );
+
+    manager.remove_session(session.id());
+    config::get()
+        .write()
+        .unwrap()
+        .session_idle_data_timeout_secs = None;
 }

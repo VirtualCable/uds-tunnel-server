@@ -31,12 +31,17 @@ toml.workspace = true
 tokio-rustls.workspace = true
 tokio.workspace = true
 futures.workspace = true
+
+# socket options (SO keepalive backup for the application-level keep-alive)
+socket2.workspace = true
 async-trait.workspace = true
 
 # channel
 flume.workspace = true
 
 [dev-dependencies]
+# Virtual time (tokio::time::advance) for the keep-alive watchdog tests.
+tokio = { workspace = true, features = ["test-util"] }
 # Pull in the test-only helpers from `shared` (e.g. the deterministic
 # ML-KEM-768 keypair used by the integration tests). Enabling the feature
 # here makes it available to this crate's tests without leaking it into

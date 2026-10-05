@@ -366,6 +366,7 @@ async fn reattach_server_works() -> Result<()> {
 // these checks an attacker (or buggy client) holding a valid ticket
 // could either grow `clients_senders` up to `u16::MAX` (memory DoS)
 // or trigger an out-of-bounds index into `session.remotes` (panic).
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_channel_id_zero() -> Result<()> {
     use super::channels::ClientChannels;
@@ -383,6 +384,7 @@ async fn create_client_rejects_channel_id_zero() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
     use super::channels::ClientChannels;
@@ -415,6 +417,7 @@ async fn create_client_rejects_id_above_remotes_len() -> Result<()> {
     Ok(())
 }
 
+#[serial_test::serial(manager)]
 #[tokio::test]
 async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
     use super::channels::ClientChannels;
@@ -434,5 +437,231 @@ async fn create_client_rejects_id_above_hard_cap() -> Result<()> {
         .unwrap_err();
     assert!(err.to_string().contains("exceeds hard cap"), "{}", err);
     assert_eq!(channels.slots_len(), 0);
+    Ok(())
+}
+
+// Regression tests for `close_client` bounds. Channel 0 is the control
+// channel: `CloseChannel { channel_id: 0 }` from an authenticated peer
+// used to index `clients_senders[(0 - 1) as usize]`, panicking (debug
+// overflow / release out-of-bounds). The panic aborts the spawned proxy
+// task before its `stop.trigger()` + `remove_session` cleanup runs, so
+// the session leaks in the SessionManager indefinitely.
+#[tokio::test]
+async fn close_client_channel_zero_is_noop() {
+    use super::channels::ClientChannels;
+
+    let mut channels = ClientChannels::new();
+    // Must not panic and must not touch any slot.
+    channels.close_client(0);
+    assert_eq!(channels.slots_len(), 0);
+}
+
+#[tokio::test]
+async fn close_client_rejects_out_of_range_ids() {
+    use super::channels::ClientChannels;
+
+    let mut channels = ClientChannels::new();
+    // No client ever created: any id is out of range, must not panic.
+    channels.close_client(1);
+    channels.close_client(u16::MAX);
+    assert_eq!(channels.slots_len(), 0);
+}
+
+// Full proxy-level regression: the client channel of an established
+// session sends `CloseChannel { channel_id: 0 }` on the control channel
+// (exactly the PoC of the leak). The proxy must survive the command
+// (the guard turns it into a no-op); before the fix the panic aborted
+// the proxy task and bypassed its session cleanup, leaking the session.
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn proxy_survives_close_channel_zero_and_reaps_session() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (host_port, stop_server, _server_tx, _server_rx) = create_test_server().await;
+
+    let stop = Trigger::new();
+    let (proxy, handle) = Proxy::new(stop.clone());
+    let session = SessionManager::get_instance().add_session(Session::new(
+        SharedSecret::new([0u8; 32]),
+        Ticket::new_random(),
+        stop.clone(),
+        "127.1.2.3:1234".parse().unwrap(),
+        vec![host_port],
+    ))?;
+    let task = proxy.run(*session.id());
+
+    let server = handle.start_server().await?;
+
+    // Open a legitimate channel, then close channel 0 from the client side
+    server
+        .tx
+        .send_async(
+            protocol::Command::OpenChannel {
+                channel_id: TEST_CHANNEL_ID,
+            }
+            .to_message(),
+        )
+        .await?;
+    server
+        .tx
+        .send_async(protocol::PayloadWithChannel::new(
+            0,
+            protocol::Command::CloseChannel { channel_id: 0 }
+                .to_bytes()
+                .as_slice(),
+        ))
+        .await?;
+
+    // Give the proxy time to process the command. On the unfixed code the
+    // panic here aborts the task and the session never leaves the manager.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // The proxy task must be alive (the command was a no-op).
+    assert!(
+        !task.is_finished(),
+        "proxy task aborted: CloseChannel(0) panicked inside the session proxy"
+    );
+
+    // On clean shutdown, the proxy must reap the session it leaked before
+    // the fix (the panic path skipped this cleanup).
+    handle.stop_server().await;
+    wait_for_session_existence(session.id(), false).await?;
+    stop_server.trigger();
+
+    Ok(())
+}
+
+// B1 regression (unit): the slot's generation must follow the newest
+// `create_client`. A replacement mints a fresh generation, so death
+// notices from the replaced stream no longer match the slot.
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn slot_generation_tracks_the_latest_create_client() -> Result<()> {
+    use super::channels::ClientChannels;
+
+    let (host_port, stop_server, _server_tx, _server_rx) = create_test_server().await;
+    let session = std::sync::Arc::new(new_session_for_test(&host_port));
+    let mut channels = ClientChannels::new();
+
+    channels
+        .create_client(TEST_CHANNEL_ID, session.clone())
+        .await?;
+    assert!(channels.generation_matches(TEST_CHANNEL_ID, 0));
+    assert!(!channels.generation_matches(TEST_CHANNEL_ID, 1));
+
+    // Reopen the same channel: replaces the slot with a new generation.
+    channels.create_client(TEST_CHANNEL_ID, session).await?;
+    assert!(channels.generation_matches(TEST_CHANNEL_ID, 1));
+    assert!(
+        !channels.generation_matches(TEST_CHANNEL_ID, 0),
+        "a notice from the replaced generation must not match the current slot"
+    );
+
+    stop_server.trigger();
+    Ok(())
+}
+
+// B1 regression (end to end): a stop notice carrying a generation that no
+// longer owns the channel slot must be ignored by the proxy.
+//
+// History: the proxy used to stop and clear the slot by channel id alone.
+// When a channel was reopened (`create_client` replacing the live slot),
+// the replaced generation's stream dies and its `ClientStopped` notice can
+// arrive once the newer generation already owns the slot. Judging by
+// channel id alone, the stale notice stopped the new stream and cleared
+// its sender, so every frame the server kept forwarding to that channel
+// was silently dropped (`send_to_channel` on a cleared slot is a no-op).
+// The notice now carries the stream's generation and the proxy only tears
+// the slot down when it still matches. Explicit expirations — the notice
+// of the generation that really owns the slot — keep working unchanged.
+#[serial_test::serial(manager)]
+#[tokio::test]
+async fn stale_stop_notice_does_not_kill_the_reopened_channel() -> Result<()> {
+    log::setup_logging("debug", log::LogType::Test);
+
+    let (host_port, stop_server, _server_tx, server_rx) = create_test_server().await;
+
+    let stop = Trigger::new();
+    let (proxy, handle) = Proxy::new(stop.clone());
+    let session = SessionManager::get_instance().add_session(Session::new(
+        SharedSecret::new([0u8; 32]),
+        Ticket::new_random(),
+        stop.clone(),
+        "127.1.2.3:1234".parse().unwrap(),
+        vec![host_port],
+    ))?;
+    let _task = proxy.run(*session.id());
+
+    let server = handle.start_server().await?;
+
+    // Generation 0 owns the channel: traffic flows.
+    server
+        .tx
+        .send_async(
+            protocol::Command::OpenChannel {
+                channel_id: TEST_CHANNEL_ID,
+            }
+            .to_message(),
+        )
+        .await?;
+    server
+        .tx
+        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"gen0"))
+        .await?;
+    let msg = server_rx.recv_async().await?;
+    assert_eq!(msg, b"gen0");
+
+    // Reopen the channel: the slot is owned by a newer generation now
+    // (the second `create_client` of this proxy is generation id 1).
+    server
+        .tx
+        .send_async(
+            protocol::Command::OpenChannel {
+                channel_id: TEST_CHANNEL_ID,
+            }
+            .to_message(),
+        )
+        .await?;
+    // Let the replaced stream die and deliver its own (legitimate) notice
+    // so the slot settles on the new generation before the test injects a
+    // stale one.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // FIXED BEHAVIOUR PIN: deliver a notice for generation 0 — the
+    // replaced generation, i.e. exactly the stale report of the old
+    // stream. The slot belongs to generation 1, so the proxy must ignore
+    // it. Pre-fix (notices judged by channel id alone) this stopped and
+    // cleared the live slot: the payload below was silently dropped and
+    // the receive timed out.
+    handle.stop_client(TEST_CHANNEL_ID, 0).await;
+    server
+        .tx
+        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"gen1"))
+        .await?;
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), server_rx.recv_async())
+        .await
+        .expect("stale stop notice tore down the live channel")?;
+    assert_eq!(msg, b"gen1");
+
+    // The matching arm must still work: a notice for the generation that
+    // really owns the slot stops and closes it.
+    handle.stop_client(TEST_CHANNEL_ID, 1).await;
+    server
+        .tx
+        .send_async(protocol::PayloadWithChannel::new(TEST_CHANNEL_ID, b"gen2"))
+        .await?;
+    let gone = tokio::time::timeout(
+        std::time::Duration::from_millis(300),
+        server_rx.recv_async(),
+    )
+    .await;
+    assert!(
+        gone.is_err(),
+        "the slot still existed after the matching generation's stop notice"
+    );
+
+    handle.stop_server().await;
+    wait_for_session_existence(session.id(), false).await?;
+    stop_server.trigger();
     Ok(())
 }

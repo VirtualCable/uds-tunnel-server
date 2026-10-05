@@ -42,12 +42,24 @@ use shared::{log, protocol, system::trigger::Trigger};
 struct ClientChannel {
     sender: protocol::PayloadSender,
     stop: Trigger,
+    /// Identity of the generation that currently owns this slot. A client
+    /// stream is spawned with its generation and reports it back when it
+    /// dies; the proxy only tears the slot down when the reported
+    /// generation still matches the slot. Without it, reopening a channel
+    /// (`create_client` replacing a live slot) let the *previous*
+    /// generation's death notice stop and clear the *new* occupant — the
+    /// reopened channel was killed and its frames silently dropped.
+    generation: u64,
 }
 
 pub(super) struct ClientChannels {
     clients_senders: Vec<Option<ClientChannel>>,
     sender: protocol::PayloadWithChannelSender,
     receiver: protocol::PayloadWithChannelReceiver,
+    /// Monotonic generation counter: each `create_client` mints a fresh id
+    /// that tags the slot and the stream it spawns, so a stale stream's
+    /// teardown can be matched against the slot it used to own.
+    next_generation: u64,
 }
 
 impl ClientChannels {
@@ -57,6 +69,7 @@ impl ClientChannels {
             clients_senders: Vec::new(),
             sender,
             receiver,
+            next_generation: 0,
         }
     }
 
@@ -64,6 +77,19 @@ impl ClientChannels {
     #[cfg(test)]
     pub(super) fn slots_len(&self) -> usize {
         self.clients_senders.len()
+    }
+
+    /// True when the slot for `stream_channel_id` is currently owned by the
+    /// generation `generation`. A death report from any other generation
+    /// (or for an empty slot) is stale: the channel was already closed or
+    /// reopened by a newer stream.
+    pub(super) fn generation_matches(&self, stream_channel_id: u16, generation: u64) -> bool {
+        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+            return false;
+        }
+        self.clients_senders[(stream_channel_id - 1) as usize]
+            .as_ref()
+            .is_some_and(|client| client.generation == generation)
     }
 
     pub async fn create_client(
@@ -117,6 +143,8 @@ impl ClientChannels {
         let (target_reader, target_writer) = target_stream.into_split();
 
         let stop = Trigger::new();
+        let generation = self.next_generation;
+        self.next_generation += 1;
 
         // Note: The TunnelClientStream will not receive the global stop, but its own stop trigger
         // managed by the ClientFanIn
@@ -124,6 +152,7 @@ impl ClientChannels {
             *session.id(),
             stop.clone(),
             stream_channel_id,
+            generation,
             target_reader,
             target_writer,
             types::ClientEndpoints {
@@ -139,7 +168,11 @@ impl ClientChannels {
             }
         });
 
-        self.clients_senders[idx] = Some(ClientChannel { sender, stop });
+        self.clients_senders[idx] = Some(ClientChannel {
+            sender,
+            stop,
+            generation,
+        });
         Ok(())
     }
 
@@ -181,8 +214,14 @@ impl ClientChannels {
 
     /// Closes the client for the given stream_channel_id
     pub fn close_client(&mut self, stream_channel_id: u16) {
-        if self.clients_senders.len() >= stream_channel_id as usize {
-            self.clients_senders[(stream_channel_id - 1) as usize] = None;
+        // Channel 0 is the control channel and there is no client slot for
+        // it; without this guard `(stream_channel_id - 1)` underflows
+        // (panic in debug, index 65535 out of bounds in release) and the
+        // resulting panic aborts the spawned proxy task before its
+        // `stop.trigger()` + `remove_session` cleanup, leaking the session.
+        if stream_channel_id == 0 || stream_channel_id as usize > self.clients_senders.len() {
+            return;
         }
+        self.clients_senders[(stream_channel_id - 1) as usize] = None;
     }
 }

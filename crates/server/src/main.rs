@@ -38,6 +38,12 @@ pub mod connection;
 pub mod consts;
 pub mod session;
 pub mod stream;
+pub mod udp;
+
+#[cfg(test)]
+mod tests_broker_timeout;
+#[cfg(test)]
+mod tests_session_teardown_soak;
 
 use shared::{log, system::trigger::Trigger};
 
@@ -55,16 +61,22 @@ async fn main() {
     );
     // Warn on any configuration that materially weakens security posture.
     // Must run after set_log_level so the warnings are actually emitted.
-    config::get().read().unwrap().report_dangerous_settings();
+    config::get()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .report_dangerous_settings();
 
     // Read config
     // Crate a listener with the configured address
-    let listen_sock_addr = config::get().read().unwrap().listen_sockaddr();
+    let listen_sock_addr = config::get()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .listen_sockaddr();
 
     session::RECOVERY_BUFFER_SIZE.store(
         config::get()
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .recovery_buffer_size
             .unwrap_or(64)
             * 1024, // Convert from Kb to bytes
@@ -75,8 +87,29 @@ async fn main() {
 
     let stop = Trigger::new();
 
-    // Spawn the signal handler
+    // UDP relay leg: same bind address as TCP, its own (configurable)
+    // port. If the bind fails we keep serving TCP only — RDP falls back
+    // to the TCP leg transparently, so this must not abort startup.
     {
+        let (udp_enabled, udp_addr) = {
+            let config_guard = config::get();
+            let config = config_guard.read().unwrap_or_else(|e| e.into_inner());
+            (config.udp_enabled(), config.udp_sockaddr())
+        };
+        if udp_enabled {
+            match udp::UdpRelay::start(udp_addr, stop.clone()).await {
+                Ok(_) => log::info!("UDP relay listening on {}", udp_addr),
+                Err(e) => log::error!(
+                    "Failed to bind UDP relay on {}: {:?}. Continuing with TCP only.",
+                    udp_addr,
+                    e
+                ),
+            }
+        }
+    }
+
+    // Spawn the signal handler
+    let shutdown_handler = {
         let stop = stop.clone();
         tokio::spawn(async move {
             let ctrl_c = signal::ctrl_c();
@@ -98,12 +131,22 @@ async fn main() {
                 ctrl_c.await.expect("Failed to listen for Ctrl-C");
                 log::info!("Received Ctrl-C, shutting down");
             }
+            // Close the accept loop FIRST, then drain the sessions. In the
+            // other order (drain first, stop after) every broker stop
+            // notification of the drain was awaited while the listener kept
+            // accepting, and connections completed in that window were
+            // registered after the one-shot drain had passed them by: the
+            // runtime then shut down with live sessions whose tunnels were
+            // never closed at the broker. With the accept loop stopped
+            // first, only stragglers whose handshake was already in flight
+            // can still register, and `finish_all_sessions` re-drains until
+            // the map settles.
+            stop.trigger();
             session::SessionManager::get_instance()
                 .finish_all_sessions()
                 .await;
-            stop.trigger();
-        });
-    }
+        })
+    };
 
     loop {
         tokio::select! {
@@ -118,6 +161,8 @@ async fn main() {
                         tokio::spawn({
                             // Try to disable Nagle's algorithm for better performance in our case
                             socket.set_nodelay(true).ok();
+                            // Backup liveness probe: see `connection::net`.
+                            connection::net::set_keepalive(&socket);
                             let (reader, writer) = socket.into_split();
                             async move {
                                 if let Err(e) =
@@ -134,5 +179,12 @@ async fn main() {
                 }
             }
         }
+    }
+
+    // Wait for the drain to finish before the runtime shuts down: the accept
+    // loop above only stops the listener, the broker stop notifications still
+    // have to complete.
+    if let Err(e) = shutdown_handler.await {
+        log::error!("Shutdown handler failed: {:?}", e);
     }
 }
