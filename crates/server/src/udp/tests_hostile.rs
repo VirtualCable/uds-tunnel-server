@@ -249,7 +249,7 @@ async fn amplification_factor_from_a_minimal_request() {
         let mut buf = [0u8; 4096];
         let (len, peer) = rdp.recv_from(&mut buf).await.unwrap();
         // Reply with the largest datagram the relay will carry.
-        let big = vec![0xEEu8; shared::crypt::consts::CRYPT_PACKET_SIZE + 32];
+        let big = vec![0xEEu8; MAX_DATAGRAM_PAYLOAD];
         rdp.send_to(&big, peer).await.unwrap();
         len
     });
